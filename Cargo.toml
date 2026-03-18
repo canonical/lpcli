@@ -2,5 +2,60 @@
 name = "lpcli"
 version = "0.1.0"
 edition = "2024"
+description = "A command-line client for Launchpad.net"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/canonical/lpcli"
+keywords = ["launchpad", "ubuntu", "cli", "packaging"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "lpcli"
+path = "src/bin/lpcli.rs"
+
+[lib]
+name = "lpcli"
+path = "src/lib.rs"
 
 [dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "cookies"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# OAuth 1.0a signing (hand-rolled using HMAC-SHA1)
+hmac = "0.12"
+sha1 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+hex = "0.4"
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# Configuration / credential storage
+dirs = "5"
+toml = "0.8"
+
+# URL handling
+url = { version = "2", features = ["serde"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Pretty terminal output
+colored = "2"
+comfy-table = "7"
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockito = "1"
+
