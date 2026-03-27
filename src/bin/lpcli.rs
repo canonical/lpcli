@@ -86,6 +86,13 @@ enum BugCommand {
         /// Filter by tag.
         #[arg(short, long)]
         tag: Option<String>,
+        /// Restrict to a specific source package (e.g. "firefox").
+        /// Only meaningful when the target is a distribution.
+        #[arg(short, long)]
+        package: Option<String>,
+        /// Keyword search against bug titles and descriptions.
+        #[arg(short, long)]
+        keyword: Option<String>,
         /// Maximum results to return.
         #[arg(short, long, default_value = "25")]
         limit: u32,
@@ -295,26 +302,42 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             status,
             importance,
             tag,
+            package,
+            keyword,
             limit,
         } => {
             let params = BugSearchParams {
                 status: status.as_deref(),
                 importance: importance.as_deref(),
                 tag: tag.as_deref(),
+                package_name: package.as_deref(),
+                search_text: keyword.as_deref(),
                 limit: Some(limit),
                 ..Default::default()
             };
-            let task_list = bugs::search_bugs(&client, &target, &params).await?;
-            let mut table = build_table(vec!["ID", "Title", "Status"]);
-            for bug in &task_list {
+            let tasks = bugs::search_bugs(&client, &target, &params).await?;
+            let mut table = build_table(vec!["ID", "Title", "Status", "Target"]);
+            for task in &tasks {
+                // The bug number is the last path segment of bug_link, e.g.
+                // "https://api.launchpad.net/devel/bugs/12345" → "12345".
+                let bug_id = task
+                    .bug_link
+                    .as_deref()
+                    .and_then(|url| url.rsplit('/').next())
+                    .unwrap_or("—")
+                    .to_string();
                 table.add_row(vec![
-                    bug.id.to_string(),
-                    truncate(&bug.title, 60),
-                    String::new(),
+                    bug_id,
+                    truncate(task.title.as_deref().unwrap_or("—"), 55),
+                    task.status.as_deref().unwrap_or("—").to_string(),
+                    task.bug_target_display_name
+                        .as_deref()
+                        .unwrap_or("—")
+                        .to_string(),
                 ]);
             }
             println!("{table}");
-            println!("{} bug(s) found.", task_list.len());
+            println!("{} bug(s) found.", tasks.len());
         }
 
         BugCommand::Comment { bug_id, message } => {

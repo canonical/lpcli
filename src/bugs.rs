@@ -124,8 +124,10 @@ impl std::fmt::Display for BugImportance {
 pub struct BugTask {
     /// API self-link.
     pub self_link: Option<String>,
-    /// Bug API link.
+    /// Bug API link (e.g. `https://api.launchpad.net/devel/bugs/12345`).
     pub bug_link: Option<String>,
+    /// The title of the bug related to this task.
+    pub title: Option<String>,
     /// Status of this task.
     pub status: Option<String>,
     /// Importance of this task.
@@ -166,6 +168,11 @@ pub struct BugSearchParams<'a> {
     pub tag: Option<&'a str>,
     /// Filter by assignee Launchpad name.
     pub assignee: Option<&'a str>,
+    /// Restrict to a specific source package (e.g. `"firefox"`). Only
+    /// meaningful when the target is a distribution such as `"ubuntu"`.
+    pub package_name: Option<&'a str>,
+    /// Full-text keyword search (matches bug titles and descriptions).
+    pub search_text: Option<&'a str>,
     /// Maximum number of results to return.
     pub limit: Option<u32>,
 }
@@ -192,18 +199,30 @@ pub async fn get_bug_tasks(
     Collection::fetch_all(client, &url).await
 }
 
-/// Search bugs on a Launchpad project.
+/// Search bug tasks on a Launchpad project, distribution, or source package.
 ///
-/// `target` should be the project name (e.g. `"ubuntu"`) or
-/// `"~person"` for a person's bugs.
+/// `target` is the project or distribution name (e.g. `"ubuntu"`,
+/// `"launchpad"`). Supply [`BugSearchParams::package_name`] to scope the
+/// search to a specific source package within a distribution (e.g.
+/// `"firefox"` within `"ubuntu"`), and [`BugSearchParams::search_text`] to
+/// perform a keyword search against bug titles and descriptions.
+///
+/// Returns a list of [`BugTask`] entries. Each task carries the bug title,
+/// status, importance, and the affected target.
 pub async fn search_bugs(
     client: &LaunchpadClient,
     target: &str,
     params: &BugSearchParams<'_>,
-) -> Result<Vec<Bug>> {
-    let mut query = format!(
-        "/{target}/+bugs?ws.op=searchTasks",
-    );
+) -> Result<Vec<BugTask>> {
+    // Build the base path.  When a package name is provided we target the
+    // distribution source package (`/{distro}/+source/{pkg}`); otherwise we
+    // search the project / distribution directly.
+    let base = if let Some(pkg) = params.package_name {
+        format!("/{target}/+source/{}?ws.op=searchTasks", urlenc(pkg))
+    } else {
+        format!("/{target}?ws.op=searchTasks")
+    };
+    let mut query = base;
     if let Some(status) = params.status {
         query.push_str(&format!("&status={}", urlenc(status)));
     }
@@ -211,10 +230,13 @@ pub async fn search_bugs(
         query.push_str(&format!("&importance={}", urlenc(importance)));
     }
     if let Some(tag) = params.tag {
-        query.push_str(&format!("&tag={}", urlenc(tag)));
+        query.push_str(&format!("&tags={}", urlenc(tag)));
     }
     if let Some(assignee) = params.assignee {
         query.push_str(&format!("&assignee={}", urlenc(assignee)));
+    }
+    if let Some(text) = params.search_text {
+        query.push_str(&format!("&search_text={}", urlenc(text)));
     }
     if let Some(limit) = params.limit {
         query.push_str(&format!("&ws.size={limit}"));
