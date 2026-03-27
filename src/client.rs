@@ -87,8 +87,7 @@ impl LaunchpadClient {
         let mut req = self.http.get(url).header("Accept", "application/json");
 
         if let Some(creds) = &self.credentials {
-            let auth_header =
-                auth::build_auth_header("GET", url, creds, &HashMap::new())?;
+            let auth_header = auth::build_auth_header(creds)?;
             req = req.header("Authorization", auth_header);
         }
 
@@ -119,8 +118,7 @@ impl LaunchpadClient {
             .form(params);
 
         if let Some(creds) = &self.credentials {
-            let auth_header =
-                auth::build_auth_header("POST", url, creds, params)?;
+            let auth_header = auth::build_auth_header(creds)?;
             req = req.header("Authorization", auth_header);
         }
 
@@ -141,8 +139,7 @@ impl LaunchpadClient {
             .form(params);
 
         if let Some(creds) = &self.credentials {
-            let auth_header =
-                auth::build_auth_header("PATCH", url, creds, params)?;
+            let auth_header = auth::build_auth_header(creds)?;
             req = req.header("Authorization", auth_header);
         }
 
@@ -157,7 +154,13 @@ impl LaunchpadClient {
     async fn handle_response<T: DeserializeOwned>(&self, resp: reqwest::Response) -> Result<T> {
         let status = resp.status();
         if status == StatusCode::UNAUTHORIZED {
-            return Err(LpError::NotAuthenticated);
+            // Read the response body so the exact Launchpad error message is
+            // surfaced to the user rather than a generic string.
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "(could not read response body)".to_string());
+            return Err(LpError::Api { status: 401, message: body });
         }
         if status == StatusCode::NOT_FOUND {
             return Err(LpError::NotFound(

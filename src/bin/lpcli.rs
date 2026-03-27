@@ -10,7 +10,6 @@ use lpcli::{
     auth,
     bugs::{self, BugSearchParams},
     client::LaunchpadClient,
-    error::LpError,
     packages::{self, SourceSearchParams},
     people,
     projects,
@@ -574,9 +573,11 @@ async fn handle_project(cmd: ProjectCommand) -> lpcli::error::Result<()> {
 
 /// Build an authenticated client from stored credentials.
 ///
-/// Returns `LpError::NotAuthenticated` if no credentials are found.
+/// Returns `LpError::NotAuthenticated` if no credentials are found, or the
+/// underlying error (e.g. `LpError::Config`) if the file exists but cannot
+/// be read or parsed.
 fn authenticated_client() -> lpcli::error::Result<LaunchpadClient> {
-    let creds = auth::load_credentials().map_err(|_| LpError::NotAuthenticated)?;
+    let creds = auth::load_credentials()?;
     Ok(LaunchpadClient::new(Some(creds)))
 }
 

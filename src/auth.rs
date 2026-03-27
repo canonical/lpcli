@@ -18,14 +18,10 @@
 //! | Authorise | `https://launchpad.net/+authorize-token` |
 //! | Access token | `https://launchpad.net/+access-token` |
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use hmac::{Hmac, Mac};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use sha1::Sha1;
 
 use crate::error::{LpError, Result};
 
@@ -145,72 +141,50 @@ pub fn timestamp() -> String {
         .to_string()
 }
 
-/// Percent-encode a string according to RFC 3986.
+/// Percent-encode a string according to RFC 3986 (as required by OAuth 1.0a).
+///
+/// Characters in the unreserved set — `ALPHA / DIGIT / "-" / "." / "_" / "~"` —
+/// are kept as-is; all other bytes are encoded as `%XX` with uppercase hex digits.
+/// This is distinct from `application/x-www-form-urlencoded` encoding, which
+/// incorrectly encodes `~` as `%7E` and uses `+` for spaces instead of `%20`.
 pub fn percent_encode(input: &str) -> String {
-    url::form_urlencoded::byte_serialize(input.as_bytes()).collect()
+    let mut output = String::with_capacity(input.len() * 3);
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                output.push(byte as char);
+            }
+            _ => output.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    output
 }
 
 /// Build and return the `Authorization` header value for an OAuth 1.0a signed
-/// request using HMAC-SHA1.
+/// request using the PLAINTEXT signature method.
 ///
-/// `method` should be uppercase (e.g. `"GET"`, `"POST"`).
-pub fn build_auth_header(
-    method: &str,
-    url: &str,
-    creds: &Credentials,
-    extra_params: &HashMap<&str, &str>,
-) -> Result<String> {
+/// Launchpad's web service uses PLAINTEXT signing over TLS (HTTPS).  The
+/// signature is `"&" + percent_encode(token_secret)` — that is, an empty
+/// consumer secret, an ampersand, and the percent-encoded access token
+/// secret.  When placed inside the Authorization header the `&` is itself
+/// percent-encoded as `%26`, exactly as shown in Launchpad's API
+/// documentation.
+///
+/// See: <https://documentation.ubuntu.com/launchpad/user/how-to/launchpad-api/launchpad-web-signing/>
+pub fn build_auth_header(creds: &Credentials) -> Result<String> {
     let nonce = generate_nonce();
     let ts = timestamp();
 
-    // Collect all OAuth parameters (excluding the signature).
-    let mut params: Vec<(String, String)> = vec![
-        ("oauth_consumer_key".to_string(), creds.consumer_key.clone()),
-        ("oauth_nonce".to_string(), nonce.clone()),
-        ("oauth_signature_method".to_string(), "HMAC-SHA1".to_string()),
-        ("oauth_timestamp".to_string(), ts.clone()),
-        ("oauth_token".to_string(), creds.access_token.token.clone()),
-        ("oauth_version".to_string(), "1.0".to_string()),
-    ];
+    // PLAINTEXT signature: percent_encode(consumer_secret) + "&" + percent_encode(token_secret).
+    // Launchpad does not use a consumer secret, so it is an empty string.
+    let signature = format!("&{}", percent_encode(&creds.access_token.secret));
 
-    for (k, v) in extra_params {
-        params.push((k.to_string(), v.to_string()));
-    }
-
-    // Sort parameters lexicographically by key then value.
-    params.sort();
-
-    // Build the normalised parameter string.
-    let param_string = params
-        .iter()
-        .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
-        .collect::<Vec<_>>()
-        .join("&");
-
-    // Base string: METHOD & encoded_url & encoded_params
-    let base_string = format!(
-        "{}&{}&{}",
-        percent_encode(method),
-        percent_encode(url),
-        percent_encode(&param_string),
-    );
-
-    // Signing key: consumer_secret & token_secret
-    // Launchpad uses an empty consumer secret for PIN-based flows.
-    let signing_key = format!("&{}", percent_encode(&creds.access_token.secret));
-
-    // HMAC-SHA1 signature.
-    type HmacSha1 = Hmac<Sha1>;
-    let mut mac = HmacSha1::new_from_slice(signing_key.as_bytes())
-        .map_err(|e| LpError::OAuth(format!("HMAC key error: {e}")))?;
-    mac.update(base_string.as_bytes());
-    let signature = BASE64.encode(mac.finalize().into_bytes());
-
-    // Build the Authorization header.
+    // Build the Authorization header.  All values are percent-encoded per
+    // RFC 5849 §3.5.1.  The signature's leading `&` becomes `%26`.
     let header = format!(
-        r#"OAuth realm="https://api.launchpad.net/", oauth_consumer_key="{}", oauth_token="{}", oauth_signature_method="HMAC-SHA1", oauth_timestamp="{}", oauth_nonce="{}", oauth_version="1.0", oauth_signature="{}""#,
-        creds.consumer_key,
-        creds.access_token.token,
+        r#"OAuth realm="https://api.launchpad.net/", oauth_consumer_key="{}", oauth_token="{}", oauth_signature_method="PLAINTEXT", oauth_timestamp="{}", oauth_nonce="{}", oauth_version="1.0", oauth_signature="{}""#,
+        percent_encode(&creds.consumer_key),
+        percent_encode(&creds.access_token.token),
         ts,
         nonce,
         percent_encode(&signature),
@@ -336,8 +310,14 @@ mod tests {
 
     #[test]
     fn percent_encode_special_chars() {
-        assert_eq!(percent_encode("hello world"), "hello+world");
+        // Spaces must be %20 (RFC 3986), not + (form-urlencoded).
+        assert_eq!(percent_encode("hello world"), "hello%20world");
         assert_eq!(percent_encode("a=b&c=d"), "a%3Db%26c%3Dd");
+        // ~ is an RFC 3986 unreserved character and must NOT be encoded.
+        // This is critical for OAuth signatures on URLs like /~username.
+        assert_eq!(percent_encode("~ubuntu"), "~ubuntu");
+        assert_eq!(percent_encode("https://api.launchpad.net/devel/~ubuntu"),
+            "https%3A%2F%2Fapi.launchpad.net%2Fdevel%2F~ubuntu");
     }
 
     #[test]
@@ -376,17 +356,12 @@ mod tests {
     #[test]
     fn build_auth_header_contains_required_fields() {
         let creds = Credentials::new("lpcli", "tok", "sec");
-        let header = build_auth_header(
-            "GET",
-            "https://api.launchpad.net/devel/bugs/1",
-            &creds,
-            &HashMap::new(),
-        )
-        .unwrap();
+        let header = build_auth_header(&creds).unwrap();
         assert!(header.starts_with("OAuth realm="));
         assert!(header.contains("oauth_consumer_key=\"lpcli\""));
         assert!(header.contains("oauth_token=\"tok\""));
-        assert!(header.contains("oauth_signature_method=\"HMAC-SHA1\""));
-        assert!(header.contains("oauth_signature="));
+        assert!(header.contains("oauth_signature_method=\"PLAINTEXT\""));
+        // Signature should be percent-encoded "&sec" → "%26sec"
+        assert!(header.contains("oauth_signature=\"%26sec\""));
     }
 }

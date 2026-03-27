@@ -31,11 +31,8 @@ serde_json = "1"
 thiserror = "2"
 anyhow = "1"
 
-# OAuth 1.0a signing (hand-rolled using HMAC-SHA1)
-hmac = "0.12"
-sha1 = "0.10"
+# OAuth nonce generation
 rand = "0.8"
-base64 = "0.22"
 hex = "0.4"
 
 # CLI argument parsing
@@ -58,4 +55,5 @@ comfy-table = "7"
 [dev-dependencies]
 tokio-test = "0.4"
 mockito = "1"
+dirs = "5"
 
