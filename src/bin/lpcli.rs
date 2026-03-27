@@ -386,12 +386,18 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
             let members = people::get_team_members(&client, &team).await?;
             let mut table = build_table(vec!["Member", "Status", "Since"]);
             for m in &members {
+                // Extract "~username" from the full API URL (e.g. ".../~jdoe" → "~jdoe").
+                let member_name = m
+                    .member_link
+                    .as_deref()
+                    .and_then(|url| url.rsplit('/').next())
+                    .unwrap_or("—");
                 let date = m
-                    .date_created
+                    .date_joined
                     .map(|d| d.format("%Y-%m-%d").to_string())
                     .unwrap_or_default();
                 table.add_row(vec![
-                    m.member_link.as_deref().unwrap_or("—"),
+                    member_name,
                     m.status.as_deref().unwrap_or("—"),
                     &date,
                 ]);

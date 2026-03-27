@@ -74,12 +74,12 @@ pub struct TeamMembership {
     pub member_link: Option<String>,
     /// Link to the team.
     pub team_link: Option<String>,
-    /// Membership status (e.g. "Approved", "Pending").
+    /// Membership status (e.g. "Approved", "Administrator").
     pub status: Option<String>,
-    /// When the membership was created.
-    pub date_created: Option<DateTime<Utc>>,
-    /// When the membership was last changed.
-    pub date_status_set: Option<DateTime<Utc>>,
+    /// When the membership was first made active.
+    pub date_joined: Option<DateTime<Utc>>,
+    /// When the membership expires.
+    pub date_expires: Option<DateTime<Utc>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -109,11 +109,15 @@ pub async fn search_people(
 }
 
 /// List the (approved) members of a Launchpad team.
+///
+/// Uses the `members_details` collection link which returns `TeamMembership`
+/// resources (with status and join date), rather than the `members` link which
+/// returns plain `Person` resources.
 pub async fn get_team_members(
     client: &LaunchpadClient,
     team_name: &str,
 ) -> Result<Vec<TeamMembership>> {
-    let url = client.url(&format!("/~{team_name}/members"));
+    let url = client.url(&format!("/~{team_name}/members_details"));
     Collection::fetch_all(client, &url).await
 }
 
@@ -184,10 +188,11 @@ mod tests {
             "member_link": "https://api.launchpad.net/devel/~jdoe",
             "team_link": "https://api.launchpad.net/devel/~ubuntu-dev",
             "status": "Approved",
-            "date_created": null,
-            "date_status_set": null
+            "date_joined": null,
+            "date_expires": null
         }"#;
         let membership: TeamMembership = serde_json::from_str(json).unwrap();
         assert_eq!(membership.status.as_deref(), Some("Approved"));
+        assert_eq!(membership.member_link.as_deref(), Some("https://api.launchpad.net/devel/~jdoe"));
     }
 }
