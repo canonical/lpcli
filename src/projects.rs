@@ -9,7 +9,8 @@
 //! |----------|------|
 //! | Project | `/{project_name}` |
 //! | Project group | `/+projectgroups/{group}` |
-//! | Milestones | `/{project}/milestones` |
+//! | All milestones | `/{project}/all_milestones` |
+//! | Active milestones | `/{project}/active_milestones` |
 //! | Releases | `/{project}/{milestone_name}/release` |
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -112,21 +113,27 @@ pub async fn search_projects(
     Collection::fetch_all(client, &url).await
 }
 
-/// List all milestones for a project.
+/// List all milestones for a project or distribution.
+///
+/// Uses the `all_milestones` collection link exposed by both `project` and
+/// `distribution` resources in the Launchpad API.
 pub async fn list_milestones(
     client: &LaunchpadClient,
     project: &str,
 ) -> Result<Vec<Milestone>> {
-    let url = client.url(&format!("/{project}/milestones"));
+    let url = client.url(&format!("/{project}/all_milestones"));
     Collection::fetch_all(client, &url).await
 }
 
-/// List only the active milestones for a project.
+/// List only the active milestones for a project or distribution.
+///
+/// Uses the `active_milestones` collection link exposed by both `project` and
+/// `distribution` resources in the Launchpad API.
 pub async fn list_active_milestones(
     client: &LaunchpadClient,
     project: &str,
 ) -> Result<Vec<Milestone>> {
-    let url = client.url(&format!("/{project}?ws.op=getMilestones&only_active=true"));
+    let url = client.url(&format!("/{project}/active_milestones"));
     Collection::fetch_all(client, &url).await
 }
 
