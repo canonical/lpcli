@@ -237,6 +237,40 @@ fn enc(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Top-level distribution
+// ---------------------------------------------------------------------------
+
+/// Core metadata for an Ubuntu distribution (or any Launchpad distribution).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Distribution {
+    /// Short identifying name (e.g. `"ubuntu"`).
+    pub name: String,
+    /// Human-readable display name (e.g. `"Ubuntu"`).
+    pub display_name: Option<String>,
+    /// Short title.
+    pub title: Option<String>,
+    /// One-paragraph summary.
+    pub summary: Option<String>,
+    /// Whether packages are tracked in Launchpad.
+    pub official_packages: Option<bool>,
+    /// API self-link.
+    pub self_link: Option<String>,
+    /// Launchpad web link.
+    pub web_link: Option<String>,
+    /// API link to the distribution owner.
+    pub owner_link: Option<String>,
+    /// API link to the bug supervisor.
+    pub bug_supervisor_link: Option<String>,
+}
+
+/// Fetch top-level metadata for a distribution.
+///
+/// `distro` is the distribution identifier, e.g. `"ubuntu"` or `"debian"`.
+pub async fn get_distro(client: &LaunchpadClient, distro: &str) -> Result<Distribution> {
+    client.get(&format!("/{distro}")).await
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

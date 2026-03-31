@@ -313,6 +313,69 @@ pub async fn get_bug_comments(
 }
 
 // ---------------------------------------------------------------------------
+// Bug subscriptions
+// ---------------------------------------------------------------------------
+
+/// A subscription connecting a person to a bug.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BugSubscription {
+    /// API self-link.
+    pub self_link: Option<String>,
+    /// API link to the subscribed person.
+    pub person_link: Option<String>,
+    /// API link to the bug.
+    pub bug_link: Option<String>,
+    /// When the subscription was created.
+    pub date_created: Option<DateTime<Utc>>,
+    /// API link to the person who created the subscription.
+    pub subscribed_by_link: Option<String>,
+}
+
+/// Subscribe a person to a bug.
+///
+/// `person_url` must be the full Launchpad API URL for the person
+/// (e.g. `"https://api.launchpad.net/devel/~jdoe"`).
+///
+/// Returns the new [`BugSubscription`] record.
+pub async fn subscribe_to_bug(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    person_url: &str,
+) -> Result<BugSubscription> {
+    use std::collections::HashMap;
+    let path = format!("/bugs/{bug_id}");
+    let url = client.url(&path);
+    let mut params: HashMap<&str, &str> = HashMap::new();
+    params.insert("ws.op", "subscribe");
+    params.insert("person", person_url);
+    client.post_url(&url, &params).await
+}
+
+/// Unsubscribe a person from a bug.
+///
+/// `person_url` must be the full Launchpad API URL for the person.
+pub async fn unsubscribe_from_bug(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    person_url: &str,
+) -> Result<()> {
+    use std::collections::HashMap;
+    let mut params: HashMap<&str, &str> = HashMap::new();
+    params.insert("ws.op", "unsubscribe");
+    params.insert("person", person_url);
+    client.post_ok(&format!("/bugs/{bug_id}"), &params).await
+}
+
+/// List all subscriptions for a bug.
+pub async fn get_bug_subscriptions(
+    client: &LaunchpadClient,
+    bug_id: u64,
+) -> Result<Vec<BugSubscription>> {
+    let url = client.url(&format!("/bugs/{bug_id}/subscriptions"));
+    Collection::fetch_all(client, &url).await
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

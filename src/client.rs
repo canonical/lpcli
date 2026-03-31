@@ -174,6 +174,82 @@ impl LaunchpadClient {
         self.handle_response_ok(resp).await
     }
 
+    /// Perform an authenticated DELETE on an absolute URL, discarding the body.
+    pub async fn delete_url_ok(&self, url: &str) -> Result<()> {
+        let mut req = self
+            .http
+            .delete(url)
+            .header("Accept", "application/json");
+
+        if let Some(creds) = &self.credentials {
+            let auth_header = auth::build_auth_header(creds)?;
+            req = req.header("Authorization", auth_header);
+        }
+
+        let resp = req.send().await?;
+        self.handle_response_ok(resp).await
+    }
+
+    /// POST with a slice of key-value pairs, allowing repeated keys (needed for
+    /// Launchpad list parameters such as `event_types` and `scopes`).
+    pub async fn post_pairs<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        params: &[(&str, &str)],
+    ) -> Result<T> {
+        let url = self.url(path);
+        self.post_pairs_url(&url, params).await
+    }
+
+    /// POST with key-value pairs against an absolute URL, returning a
+    /// deserialised JSON body.
+    pub async fn post_pairs_url<T: DeserializeOwned>(
+        &self,
+        url: &str,
+        params: &[(&str, &str)],
+    ) -> Result<T> {
+        let body = encode_pairs(params);
+        let mut req = self
+            .http
+            .post(url)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(body);
+
+        if let Some(creds) = &self.credentials {
+            let auth_header = auth::build_auth_header(creds)?;
+            req = req.header("Authorization", auth_header);
+        }
+
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    /// POST with key-value pairs against a relative path, discarding the body.
+    pub async fn post_pairs_ok(&self, path: &str, params: &[(&str, &str)]) -> Result<()> {
+        let url = self.url(path);
+        self.post_pairs_url_ok(&url, params).await
+    }
+
+    /// POST with key-value pairs against an absolute URL, discarding the body.
+    pub async fn post_pairs_url_ok(&self, url: &str, params: &[(&str, &str)]) -> Result<()> {
+        let body = encode_pairs(params);
+        let mut req = self
+            .http
+            .post(url)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(body);
+
+        if let Some(creds) = &self.credentials {
+            let auth_header = auth::build_auth_header(creds)?;
+            req = req.header("Authorization", auth_header);
+        }
+
+        let resp = req.send().await?;
+        self.handle_response_ok(resp).await
+    }
+
     // -----------------------------------------------------------------------
     // Response handling
     // -----------------------------------------------------------------------
@@ -228,6 +304,26 @@ impl LaunchpadClient {
         }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Encode a slice of key-value tuples as URL form-encoded data, allowing
+/// repeated keys (which `HashMap` cannot represent).
+fn encode_pairs(params: &[(&str, &str)]) -> String {
+    params
+        .iter()
+        .map(|(k, v)| {
+            let ek: String =
+                url::form_urlencoded::byte_serialize(k.as_bytes()).collect();
+            let ev: String =
+                url::form_urlencoded::byte_serialize(v.as_bytes()).collect();
+            format!("{ek}={ev}")
+        })
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 // ---------------------------------------------------------------------------

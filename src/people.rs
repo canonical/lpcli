@@ -130,6 +130,24 @@ pub async fn get_person_bugs(
     Collection::fetch_all(client, &url).await
 }
 
+/// List all PPAs (Personal Package Archives) owned by a person or team.
+pub async fn list_person_ppas(
+    client: &LaunchpadClient,
+    person_name: &str,
+) -> Result<Vec<crate::packages::Archive>> {
+    let url = client.url(&format!("/~{person_name}/ppas"));
+    Collection::fetch_all(client, &url).await
+}
+
+/// Return the Launchpad teams owned by a person.
+pub async fn get_person_owned_teams(
+    client: &LaunchpadClient,
+    person_name: &str,
+) -> Result<Vec<Person>> {
+    let url = client.url(&format!("/~{person_name}?ws.op=getOwnedTeams"));
+    Collection::fetch_all(client, &url).await
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

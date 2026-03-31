@@ -160,6 +160,62 @@ pub async fn get_release(
 }
 
 // ---------------------------------------------------------------------------
+// Project series
+// ---------------------------------------------------------------------------
+
+/// A series of releases within a Launchpad project
+/// (e.g. the `"trunk"` or `"2.0"` series of `"launchpad"`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectSeries {
+    /// Short identifier used in URLs (e.g. `"trunk"`, `"2.0"`).
+    pub name: String,
+    /// Human-readable title.
+    pub title: Option<String>,
+    /// Summary of the series.
+    pub summary: Option<String>,
+    /// Lifecycle status (e.g. `"Active Development"`, `"Supported"`, `"Obsolete"`).
+    pub status: Option<String>,
+    /// API self-link.
+    pub self_link: Option<String>,
+    /// Launchpad web link.
+    pub web_link: Option<String>,
+    /// API link to the parent project.
+    pub project_link: Option<String>,
+    /// API link to the series owner.
+    pub owner_link: Option<String>,
+    /// Date the series was created.
+    pub date_created: Option<DateTime<Utc>>,
+}
+
+/// Fetch a single project series by project name and series name.
+pub async fn get_project_series(
+    client: &LaunchpadClient,
+    project: &str,
+    series_name: &str,
+) -> Result<ProjectSeries> {
+    client.get(&format!("/{project}/{series_name}")).await
+}
+
+/// List all series for a project.
+pub async fn list_project_series(
+    client: &LaunchpadClient,
+    project: &str,
+) -> Result<Vec<ProjectSeries>> {
+    let url = client.url(&format!("/{project}/series"));
+    Collection::fetch_all(client, &url).await
+}
+
+/// List all releases in a project series.
+pub async fn list_series_releases(
+    client: &LaunchpadClient,
+    project: &str,
+    series_name: &str,
+) -> Result<Vec<Release>> {
+    let url = client.url(&format!("/{project}/{series_name}/releases"));
+    Collection::fetch_all(client, &url).await
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

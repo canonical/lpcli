@@ -30,10 +30,18 @@
 //! }
 //! ```
 
+pub mod access_tokens;
 pub mod auth;
 pub mod bugs;
 pub mod client;
+pub mod cves;
 pub mod error;
+pub mod git;
 pub mod packages;
 pub mod people;
 pub mod projects;
+pub mod questions;
+pub mod snaps;
+pub mod specifications;
+pub mod translations;
+pub mod webhooks;
