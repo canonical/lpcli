@@ -66,16 +66,19 @@ enum BugCommand {
     /// Show details of a single bug.
     Show {
         /// The Launchpad bug number.
+        #[arg(short, long)]
         bug_id: u64,
     },
     /// List bug tasks for a bug.
     Tasks {
         /// The Launchpad bug number.
+        #[arg(short, long)]
         bug_id: u64,
     },
     /// Search bugs on a project or distribution.
     Search {
         /// Project or distribution name (e.g. "ubuntu", "launchpad").
+        #[arg(short, long, default_value = "ubuntu")]
         target: String,
         /// Filter by status (e.g. "New", "Confirmed", "Fix Released").
         #[arg(short, long)]
@@ -84,7 +87,7 @@ enum BugCommand {
         #[arg(short, long)]
         importance: Option<String>,
         /// Filter by tag.
-        #[arg(short, long)]
+        #[arg(short = 'g', long)]
         tag: Option<String>,
         /// Restrict to a specific source package (e.g. "firefox").
         /// Only meaningful when the target is a distribution.
@@ -100,13 +103,16 @@ enum BugCommand {
     /// Add a comment to a bug.
     Comment {
         /// The Launchpad bug number.
+        #[arg(short, long)]
         bug_id: u64,
         /// Comment text.
+        #[arg(short, long)]
         message: String,
     },
     /// List comments on a bug.
     Comments {
         /// The Launchpad bug number.
+        #[arg(short, long)]
         bug_id: u64,
     },
 }
@@ -120,16 +126,19 @@ enum PersonCommand {
     /// Show info about a Launchpad person or team.
     Show {
         /// Launchpad username (without leading ~).
+        #[arg(short, long)]
         name: String,
     },
     /// Search for people by name.
     Search {
         /// Search query.
+        #[arg(short, long)]
         query: String,
     },
     /// List members of a team.
     Members {
         /// Team name (without leading ~).
+        #[arg(short, long)]
         team: String,
     },
 }
@@ -143,6 +152,7 @@ enum PackageCommand {
     /// Show info about an Ubuntu distro series.
     Series {
         /// Series codename (e.g. "jammy", "noble").
+        #[arg(short, long)]
         series: String,
         /// Distribution name (default: "ubuntu").
         #[arg(short, long, default_value = "ubuntu")]
@@ -157,6 +167,7 @@ enum PackageCommand {
     /// Search published source packages in a distro series.
     Search {
         /// Series codename (e.g. "jammy").
+        #[arg(short, long)]
         series: String,
         /// Source package name.
         #[arg(short, long)]
@@ -174,15 +185,19 @@ enum PackageCommand {
     /// Show info about a PPA.
     Ppa {
         /// PPA owner (Launchpad name, without ~).
+        #[arg(short, long)]
         owner: String,
         /// PPA name.
+        #[arg(short, long)]
         ppa: String,
     },
     /// List source packages in a PPA.
     PpaSources {
         /// PPA owner.
+        #[arg(short, long)]
         owner: String,
         /// PPA name.
+        #[arg(short, long)]
         ppa: String,
         /// Source package name filter.
         #[arg(short, long)]
@@ -199,16 +214,19 @@ enum ProjectCommand {
     /// Show info about a Launchpad project.
     Show {
         /// Project name.
+        #[arg(short, long)]
         name: String,
     },
     /// Search Launchpad projects.
     Search {
         /// Search query.
+        #[arg(short, long)]
         query: String,
     },
     /// List milestones for a project.
     Milestones {
         /// Project name.
+        #[arg(short, long)]
         project: String,
         /// Show only active milestones.
         #[arg(short, long)]
