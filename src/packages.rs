@@ -13,7 +13,7 @@
 //! |----------|------|
 //! | Ubuntu distribution | `/ubuntu` |
 //! | Series | `/ubuntu/jammy` |
-//! | Source publications | `/ubuntu/jammy?ws.op=getPublishedSources` |
+//! | Source publications | `/ubuntu/+archive/primary?ws.op=getPublishedSources` |
 //! | PPAs | `/~{person}/+archive/ubuntu/{ppa}` |
 
 use chrono::{DateTime, Utc};
@@ -149,15 +149,27 @@ pub async fn list_distro_series(
 
 /// Search for source package publications in a distro series.
 ///
-/// `distro` is typically `"ubuntu"`, `series` is the codename.
+/// `distro` is typically `"ubuntu"`, `series` is the codename (e.g. `"jammy"`).
+///
+/// `getPublishedSources` is an operation on the **archive** resource, not on
+/// `distro_series`. This function targets the distribution's primary archive
+/// (`/{distro}/+archive/primary`) and passes the series as a full API URL
+/// via the `distro_series` link parameter.
 pub async fn search_published_sources(
     client: &LaunchpadClient,
     distro: &str,
     series: &str,
     params: &SourceSearchParams<'_>,
 ) -> Result<Vec<SourcePackagePublishingHistory>> {
+    // getPublishedSources lives on archive, not distro_series.
+    let archive_url = client.url(&format!("/{distro}/+archive/primary"));
+    // The distro_series parameter must be the full API URL of the series
+    // resource, URL-encoded as a query parameter value.
     let series_url = client.url(&format!("/{distro}/{series}"));
-    let mut query = format!("{series_url}?ws.op=getPublishedSources");
+    let mut query = format!(
+        "{archive_url}?ws.op=getPublishedSources&distro_series={}",
+        enc(&series_url),
+    );
     if let Some(name) = params.source_name {
         query.push_str(&format!("&source_name={}", enc(name)));
     }
