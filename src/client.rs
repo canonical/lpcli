@@ -147,6 +147,33 @@ impl LaunchpadClient {
         self.handle_response(resp).await
     }
 
+    /// Perform an authenticated POST request and return `Ok(())` on success,
+    /// discarding the response body.
+    ///
+    /// Use this for operations whose success response carries no JSON body
+    /// (e.g. Launchpad `newMessage`, which returns `201 Created` with a
+    /// `Location` header but an empty body).
+    pub async fn post_ok(
+        &self,
+        path: &str,
+        params: &HashMap<&str, &str>,
+    ) -> Result<()> {
+        let url = self.url(path);
+        let mut req = self
+            .http
+            .post(&url)
+            .header("Accept", "application/json")
+            .form(params);
+
+        if let Some(creds) = &self.credentials {
+            let auth_header = auth::build_auth_header(creds)?;
+            req = req.header("Authorization", auth_header);
+        }
+
+        let resp = req.send().await?;
+        self.handle_response_ok(resp).await
+    }
+
     // -----------------------------------------------------------------------
     // Response handling
     // -----------------------------------------------------------------------
@@ -175,6 +202,31 @@ impl LaunchpadClient {
 
         let bytes = resp.bytes().await?;
         serde_json::from_slice(&bytes).map_err(LpError::Json)
+    }
+
+    /// Like [`handle_response`] but discards the response body on success.
+    ///
+    /// Used for operations that return `201 Created` with no JSON body.
+    async fn handle_response_ok(&self, resp: reqwest::Response) -> Result<()> {
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED {
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "(could not read response body)".to_string());
+            return Err(LpError::Api { status: 401, message: body });
+        }
+        if status == StatusCode::NOT_FOUND {
+            return Err(LpError::NotFound(
+                "The requested resource does not exist on Launchpad.".to_string(),
+            ));
+        }
+        if !status.is_success() {
+            let code = status.as_u16();
+            let message = resp.text().await.unwrap_or_else(|_| status.to_string());
+            return Err(LpError::Api { status: code, message });
+        }
+        Ok(())
     }
 }
 

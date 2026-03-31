@@ -287,16 +287,20 @@ pub async fn set_bug_importance(
 }
 
 /// Add a comment to a bug.
+///
+/// The Launchpad `newMessage` operation returns `201 Created` with an empty
+/// body (the new message URL is in the `Location` header), so this function
+/// returns `()` rather than trying to deserialise a response object.
 pub async fn add_bug_comment(
     client: &LaunchpadClient,
     bug_id: u64,
     comment: &str,
-) -> Result<BugComment> {
+) -> Result<()> {
     use std::collections::HashMap;
     let mut params = HashMap::new();
     params.insert("ws.op", "newMessage");
     params.insert("content", comment);
-    client.post(&format!("/bugs/{bug_id}"), &params).await
+    client.post_ok(&format!("/bugs/{bug_id}"), &params).await
 }
 
 /// Fetch comments for a bug.
