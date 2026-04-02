@@ -62,7 +62,7 @@ pub struct CveSearchParams<'a> {
 /// Returns [`crate::error::LpError::NotFound`] when the sequence does not
 /// correspond to a tracked CVE.
 pub async fn get_cve(client: &LaunchpadClient, sequence: &str) -> Result<Cve> {
-    client.get(&format!("/bugs/cve/{sequence}")).await
+    client.get(&format!("/bugs/cve/{}", enc(sequence))).await
 }
 
 /// Search for CVEs with optional distribution and date filters.
@@ -73,11 +73,11 @@ pub async fn search_cves(
     let mut query = "/cves?ws.op=advancedSearch".to_string();
 
     if let Some(dist) = params.in_distribution {
-        let dist_url = client.url(&format!("/{dist}"));
+        let dist_url = client.url(&format!("/{}", enc(dist)));
         query.push_str(&format!("&in_distribution={}", enc(&dist_url)));
     }
     if let Some(dist) = params.not_in_distribution {
-        let dist_url = client.url(&format!("/{dist}"));
+        let dist_url = client.url(&format!("/{}", enc(dist)));
         query.push_str(&format!("&not_in_distribution={}", enc(&dist_url)));
     }
     if let Some(since) = params.modified_since {

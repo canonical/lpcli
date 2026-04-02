@@ -55,6 +55,7 @@ impl LaunchpadClient {
         Self {
             http: reqwest::Client::builder()
                 .user_agent(concat!("lpcli/", env!("CARGO_PKG_VERSION")))
+                .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("Failed to build HTTP client"),
             credentials,
@@ -127,6 +128,10 @@ impl LaunchpadClient {
     }
 
     /// Perform an authenticated PATCH request (used to update Launchpad resources).
+    ///
+    /// The Launchpad REST API requires `PATCH` bodies to be `application/json`.
+    /// The `If-Match: *` header is included to satisfy Launchpad's optimistic
+    /// concurrency check without requiring a prior `GET` to obtain an `ETag`.
     pub async fn patch_url<T: DeserializeOwned>(
         &self,
         url: &str,
@@ -136,7 +141,8 @@ impl LaunchpadClient {
             .http
             .patch(url)
             .header("Accept", "application/json")
-            .form(params);
+            .header("If-Match", "*")
+            .json(params);
 
         if let Some(creds) = &self.credentials {
             let auth_header = auth::build_auth_header(creds)?;
@@ -265,6 +271,19 @@ impl LaunchpadClient {
                 .unwrap_or_else(|_| "(could not read response body)".to_string());
             return Err(LpError::Api { status: 401, message: body });
         }
+        if status == StatusCode::FORBIDDEN {
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "(could not read response body)".to_string());
+            return Err(LpError::Api {
+                status: 403,
+                message: format!(
+                    "Permission denied. Verify your Launchpad account has the \
+                     required permissions. {body}"
+                ),
+            });
+        }
         if status == StatusCode::NOT_FOUND {
             return Err(LpError::NotFound(
                 "The requested resource does not exist on Launchpad.".to_string(),
@@ -292,6 +311,19 @@ impl LaunchpadClient {
                 .unwrap_or_else(|_| "(could not read response body)".to_string());
             return Err(LpError::Api { status: 401, message: body });
         }
+        if status == StatusCode::FORBIDDEN {
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "(could not read response body)".to_string());
+            return Err(LpError::Api {
+                status: 403,
+                message: format!(
+                    "Permission denied. Verify your Launchpad account has the \
+                     required permissions. {body}"
+                ),
+            });
+        }
         if status == StatusCode::NOT_FOUND {
             return Err(LpError::NotFound(
                 "The requested resource does not exist on Launchpad.".to_string(),
@@ -309,6 +341,14 @@ impl LaunchpadClient {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Percent-encode a string for use as a URL path segment or query parameter value.
+///
+/// Exported so that library modules can produce safe URLs without a separate
+/// dependency on `url::form_urlencoded`.
+pub fn urlenc(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
 
 /// Encode a slice of key-value tuples as URL form-encoded data, allowing
 /// repeated keys (which `HashMap` cannot represent).
@@ -343,6 +383,11 @@ pub struct Collection<T> {
 
 impl<T: DeserializeOwned + std::fmt::Debug> Collection<T> {
     /// Fetch all pages, returning the complete list of entries.
+    ///
+    /// Use this for queries where the full result set is required (e.g. listing
+    /// all milestones or team members). For user-facing searches that include a
+    /// `ws.size=N` page-size limit, use [`fetch_page`] instead to avoid
+    /// exhausting all pages when only the first is needed.
     pub async fn fetch_all(
         client: &LaunchpadClient,
         first_url: &str,
@@ -358,6 +403,17 @@ impl<T: DeserializeOwned + std::fmt::Debug> Collection<T> {
             }
         }
         Ok(results)
+    }
+
+    /// Fetch a single page of results without following pagination links.
+    ///
+    /// Use this when the URL already contains a `ws.size=N` page-size limit
+    /// (e.g. user-facing searches that should respect a `--limit` flag).
+    /// Unlike [`fetch_all`], this makes exactly one HTTP request and returns
+    /// only the entries on that page.
+    pub async fn fetch_page(client: &LaunchpadClient, url: &str) -> Result<Vec<T>> {
+        let page: Collection<T> = client.get_url(url).await?;
+        Ok(page.entries)
     }
 }
 

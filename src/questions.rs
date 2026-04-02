@@ -98,7 +98,7 @@ pub async fn get_question(
     target: &str,
     question_id: u64,
 ) -> Result<Question> {
-    client.get(&format!("/{target}/+question/{question_id}")).await
+    client.get(&format!("/{}/+question/{question_id}", urlenc(target))).await
 }
 
 /// Search questions on a project or distribution.
@@ -109,16 +109,12 @@ pub async fn search_questions(
     target: &str,
     params: &QuestionSearchParams<'_>,
 ) -> Result<Vec<Question>> {
-    let mut query = format!("/{target}?ws.op=searchQuestions");
+    let mut query = format!("/{}?ws.op=searchQuestions", urlenc(target));
     if let Some(text) = params.search_text {
-        let enc: String =
-            url::form_urlencoded::byte_serialize(text.as_bytes()).collect();
-        query.push_str(&format!("&search={enc}"));
+        query.push_str(&format!("&search={}", urlenc(text)));
     }
     if let Some(status) = params.status {
-        let enc: String =
-            url::form_urlencoded::byte_serialize(status.as_bytes()).collect();
-        query.push_str(&format!("&status={enc}"));
+        query.push_str(&format!("&status={}", urlenc(status)));
     }
     let url = client.url(&query);
     Collection::fetch_all(client, &url).await
@@ -130,8 +126,16 @@ pub async fn get_question_messages(
     target: &str,
     question_id: u64,
 ) -> Result<Vec<QuestionMessage>> {
-    let url = client.url(&format!("/{target}/+question/{question_id}/messages"));
+    let url = client.url(&format!("/{}/+question/{question_id}/messages", urlenc(target)));
     Collection::fetch_all(client, &url).await
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn urlenc(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
 // ---------------------------------------------------------------------------

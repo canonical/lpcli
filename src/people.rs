@@ -95,7 +95,7 @@ pub struct TeamMembership {
 ///
 /// Returns [`crate::error::LpError::NotFound`] when the person does not exist.
 pub async fn get_person(client: &LaunchpadClient, name: &str) -> Result<Person> {
-    client.get(&format!("/~{name}")).await
+    client.get(&format!("/~{}", urlenc(name))).await
 }
 
 /// Search for people by display name or Launchpad name.
@@ -117,7 +117,7 @@ pub async fn get_team_members(
     client: &LaunchpadClient,
     team_name: &str,
 ) -> Result<Vec<TeamMembership>> {
-    let url = client.url(&format!("/~{team_name}/members_details"));
+    let url = client.url(&format!("/~{}/members_details", urlenc(team_name)));
     Collection::fetch_all(client, &url).await
 }
 
@@ -126,7 +126,10 @@ pub async fn get_person_bugs(
     client: &LaunchpadClient,
     name: &str,
 ) -> Result<Vec<crate::bugs::Bug>> {
-    let url = client.url(&format!("/~{name}/+bugs?ws.op=searchTasks&bug_reporter=~{name}"));
+    let enc_name = urlenc(name);
+    let url = client.url(&format!(
+        "/~{enc_name}/+bugs?ws.op=searchTasks&bug_reporter=~{enc_name}"
+    ));
     Collection::fetch_all(client, &url).await
 }
 
@@ -135,7 +138,7 @@ pub async fn list_person_ppas(
     client: &LaunchpadClient,
     person_name: &str,
 ) -> Result<Vec<crate::packages::Archive>> {
-    let url = client.url(&format!("/~{person_name}/ppas"));
+    let url = client.url(&format!("/~{}/ppas", urlenc(person_name)));
     Collection::fetch_all(client, &url).await
 }
 
@@ -144,8 +147,16 @@ pub async fn get_person_owned_teams(
     client: &LaunchpadClient,
     person_name: &str,
 ) -> Result<Vec<Person>> {
-    let url = client.url(&format!("/~{person_name}?ws.op=getOwnedTeams"));
+    let url = client.url(&format!("/~{}?ws.op=getOwnedTeams", urlenc(person_name)));
     Collection::fetch_all(client, &url).await
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn urlenc(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
 // ---------------------------------------------------------------------------

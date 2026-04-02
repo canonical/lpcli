@@ -72,7 +72,9 @@ pub async fn get_distro_series_import_queue(
     series: &str,
 ) -> Result<Vec<TranslationImportQueueEntry>> {
     let url = client.url(&format!(
-        "/{distro}/{series}?ws.op=getTranslationImportQueueEntries"
+        "/{}/{}?ws.op=getTranslationImportQueueEntries",
+        urlenc(distro),
+        urlenc(series),
     ));
     Collection::fetch_all(client, &url).await
 }
@@ -87,9 +89,19 @@ pub async fn get_distro_series_templates(
     series: &str,
 ) -> Result<Vec<TranslationTemplate>> {
     let url = client.url(&format!(
-        "/{distro}/{series}?ws.op=getTranslationTemplates"
+        "/{}/{}?ws.op=getTranslationTemplates",
+        urlenc(distro),
+        urlenc(series),
     ));
     Collection::fetch_all(client, &url).await
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn urlenc(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
 // ---------------------------------------------------------------------------

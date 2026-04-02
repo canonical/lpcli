@@ -100,7 +100,7 @@ pub struct Release {
 ///
 /// Returns [`crate::error::LpError::NotFound`] when no such project exists.
 pub async fn get_project(client: &LaunchpadClient, name: &str) -> Result<Project> {
-    client.get(&format!("/{name}")).await
+    client.get(&format!("/{}", urlenc(name))).await
 }
 
 /// Search Launchpad projects by keyword.
@@ -121,7 +121,7 @@ pub async fn list_milestones(
     client: &LaunchpadClient,
     project: &str,
 ) -> Result<Vec<Milestone>> {
-    let url = client.url(&format!("/{project}/all_milestones"));
+    let url = client.url(&format!("/{}/all_milestones", urlenc(project)));
     Collection::fetch_all(client, &url).await
 }
 
@@ -133,7 +133,7 @@ pub async fn list_active_milestones(
     client: &LaunchpadClient,
     project: &str,
 ) -> Result<Vec<Milestone>> {
-    let url = client.url(&format!("/{project}/active_milestones"));
+    let url = client.url(&format!("/{}/active_milestones", urlenc(project)));
     Collection::fetch_all(client, &url).await
 }
 
@@ -144,7 +144,7 @@ pub async fn get_milestone(
     milestone_name: &str,
 ) -> Result<Milestone> {
     client
-        .get(&format!("/{project}/{milestone_name}"))
+        .get(&format!("/{}/{}", urlenc(project), urlenc(milestone_name)))
         .await
 }
 
@@ -155,7 +155,7 @@ pub async fn get_release(
     milestone_name: &str,
 ) -> Result<Release> {
     client
-        .get(&format!("/{project}/{milestone_name}/release"))
+        .get(&format!("/{}/{}/release", urlenc(project), urlenc(milestone_name)))
         .await
 }
 
@@ -193,7 +193,7 @@ pub async fn get_project_series(
     project: &str,
     series_name: &str,
 ) -> Result<ProjectSeries> {
-    client.get(&format!("/{project}/{series_name}")).await
+    client.get(&format!("/{}/{}", urlenc(project), urlenc(series_name))).await
 }
 
 /// List all series for a project.
@@ -201,7 +201,7 @@ pub async fn list_project_series(
     client: &LaunchpadClient,
     project: &str,
 ) -> Result<Vec<ProjectSeries>> {
-    let url = client.url(&format!("/{project}/series"));
+    let url = client.url(&format!("/{}/series", urlenc(project)));
     Collection::fetch_all(client, &url).await
 }
 
@@ -211,8 +211,16 @@ pub async fn list_series_releases(
     project: &str,
     series_name: &str,
 ) -> Result<Vec<Release>> {
-    let url = client.url(&format!("/{project}/{series_name}/releases"));
+    let url = client.url(&format!("/{}/{}/releases", urlenc(project), urlenc(series_name)));
     Collection::fetch_all(client, &url).await
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn urlenc(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
 // ---------------------------------------------------------------------------

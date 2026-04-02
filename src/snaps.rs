@@ -106,7 +106,7 @@ pub async fn get_snap(
     owner: &str,
     name: &str,
 ) -> Result<Snap> {
-    client.get(&format!("/~{owner}/+snap/{name}")).await
+    client.get(&format!("/~{}/+snap/{}", urlenc(owner), urlenc(name))).await
 }
 
 /// List snap recipes owned by a Launchpad person or team.
@@ -114,7 +114,7 @@ pub async fn find_snaps_by_owner(
     client: &LaunchpadClient,
     owner: &str,
 ) -> Result<Vec<Snap>> {
-    let owner_url = client.url(&format!("/~{owner}"));
+    let owner_url = client.url(&format!("/~{}", urlenc(owner)));
     let enc: String =
         url::form_urlencoded::byte_serialize(owner_url.as_bytes()).collect();
     let url = client.url(&format!("/+snaps?ws.op=findByOwner&owner={enc}"));
@@ -138,7 +138,7 @@ pub async fn get_snap_pending_builds(
     owner: &str,
     name: &str,
 ) -> Result<Vec<SnapBuild>> {
-    let url = client.url(&format!("/~{owner}/+snap/{name}/pending_builds"));
+    let url = client.url(&format!("/~{}/+snap/{}/pending_builds", urlenc(owner), urlenc(name)));
     Collection::fetch_all(client, &url).await
 }
 
@@ -160,7 +160,15 @@ pub async fn request_snap_builds(
     params.insert("ws.op", "requestBuilds");
     params.insert("archive", archive_url);
     params.insert("pocket", pocket);
-    client.post(&format!("/~{owner}/+snap/{name}"), &params).await
+    client.post(&format!("/~{}/+snap/{}", urlenc(owner), urlenc(name)), &params).await
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn urlenc(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
 // ---------------------------------------------------------------------------

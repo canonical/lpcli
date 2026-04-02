@@ -218,9 +218,9 @@ pub async fn search_bugs(
     // distribution source package (`/{distro}/+source/{pkg}`); otherwise we
     // search the project / distribution directly.
     let base = if let Some(pkg) = params.package_name {
-        format!("/{target}/+source/{}?ws.op=searchTasks", urlenc(pkg))
+        format!("/{}/+source/{}?ws.op=searchTasks", urlenc(target), urlenc(pkg))
     } else {
-        format!("/{target}?ws.op=searchTasks")
+        format!("/{}?ws.op=searchTasks", urlenc(target))
     };
     let mut query = base;
     if let Some(status) = params.status {
@@ -242,7 +242,9 @@ pub async fn search_bugs(
         query.push_str(&format!("&ws.size={limit}"));
     }
     let url = client.url(&query);
-    Collection::fetch_all(client, &url).await
+    // ws.size sets the Launchpad page size, not a total cap.  fetch_page
+    // requests exactly one page so the user-supplied limit is honoured.
+    Collection::fetch_page(client, &url).await
 }
 
 /// File a new bug on a Launchpad project.

@@ -135,7 +135,7 @@ pub async fn get_distro_series(
     distro: &str,
     series: &str,
 ) -> Result<DistroSeries> {
-    client.get(&format!("/{distro}/{series}")).await
+    client.get(&format!("/{}/{}", enc(distro), enc(series))).await
 }
 
 /// List all known distro series for a distribution.
@@ -143,7 +143,7 @@ pub async fn list_distro_series(
     client: &LaunchpadClient,
     distro: &str,
 ) -> Result<Vec<DistroSeries>> {
-    let url = client.url(&format!("/{distro}/series"));
+    let url = client.url(&format!("/{}/series", enc(distro)));
     Collection::fetch_all(client, &url).await
 }
 
@@ -162,10 +162,10 @@ pub async fn search_published_sources(
     params: &SourceSearchParams<'_>,
 ) -> Result<Vec<SourcePackagePublishingHistory>> {
     // getPublishedSources lives on archive, not distro_series.
-    let archive_url = client.url(&format!("/{distro}/+archive/primary"));
+    let archive_url = client.url(&format!("/{}/+archive/primary", enc(distro)));
     // The distro_series parameter must be the full API URL of the series
     // resource, URL-encoded as a query parameter value.
-    let series_url = client.url(&format!("/{distro}/{series}"));
+    let series_url = client.url(&format!("/{}/{}", enc(distro), enc(series)));
     let mut query = format!(
         "{archive_url}?ws.op=getPublishedSources&distro_series={}",
         enc(&series_url),
@@ -203,7 +203,7 @@ pub async fn get_ppa(
     ppa_name: &str,
 ) -> Result<Archive> {
     client
-        .get(&format!("/~{owner}/+archive/ubuntu/{ppa_name}"))
+        .get(&format!("/~{}/+archive/ubuntu/{}", enc(owner), enc(ppa_name)))
         .await
 }
 
@@ -214,7 +214,7 @@ pub async fn list_ppa_sources(
     ppa_name: &str,
     params: &SourceSearchParams<'_>,
 ) -> Result<Vec<SourcePackagePublishingHistory>> {
-    let archive_url = client.url(&format!("/~{owner}/+archive/ubuntu/{ppa_name}"));
+    let archive_url = client.url(&format!("/~{}/+archive/ubuntu/{}", enc(owner), enc(ppa_name)));
     let mut query = format!("{archive_url}?ws.op=getPublishedSources");
     if let Some(name) = params.source_name {
         query.push_str(&format!("&source_name={}", enc(name)));
@@ -267,7 +267,7 @@ pub struct Distribution {
 ///
 /// `distro` is the distribution identifier, e.g. `"ubuntu"` or `"debian"`.
 pub async fn get_distro(client: &LaunchpadClient, distro: &str) -> Result<Distribution> {
-    client.get(&format!("/{distro}")).await
+    client.get(&format!("/{}", enc(distro))).await
 }
 
 // ---------------------------------------------------------------------------

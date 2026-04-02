@@ -153,7 +153,9 @@ pub async fn list_person_git_repositories(
     client: &LaunchpadClient,
     person_name: &str,
 ) -> Result<Vec<GitRepository>> {
-    let url = client.url(&format!("/~{person_name}/+git"));
+    let enc: String =
+        url::form_urlencoded::byte_serialize(person_name.as_bytes()).collect();
+    let url = client.url(&format!("/~{enc}/+git"));
     Collection::fetch_all(client, &url).await
 }
 

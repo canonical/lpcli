@@ -68,7 +68,7 @@ pub async fn get_specification(
     target: &str,
     name: &str,
 ) -> Result<Specification> {
-    client.get(&format!("/{target}/+spec/{name}")).await
+    client.get(&format!("/{}/+spec/{}", urlenc(target), urlenc(name))).await
 }
 
 /// List all specifications for a project, including obsolete ones.
@@ -76,7 +76,7 @@ pub async fn list_project_specifications(
     client: &LaunchpadClient,
     project: &str,
 ) -> Result<Vec<Specification>> {
-    let url = client.url(&format!("/{project}/all_specifications"));
+    let url = client.url(&format!("/{}/all_specifications", urlenc(project)));
     Collection::fetch_all(client, &url).await
 }
 
@@ -85,8 +85,16 @@ pub async fn list_valid_project_specifications(
     client: &LaunchpadClient,
     project: &str,
 ) -> Result<Vec<Specification>> {
-    let url = client.url(&format!("/{project}/valid_specifications"));
+    let url = client.url(&format!("/{}/valid_specifications", urlenc(project)));
     Collection::fetch_all(client, &url).await
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn urlenc(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
 // ---------------------------------------------------------------------------

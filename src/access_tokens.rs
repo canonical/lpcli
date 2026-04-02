@@ -68,7 +68,7 @@ pub async fn issue_project_access_token(
     for scope in scopes {
         pairs.push(("scopes", scope));
     }
-    client.post_pairs(&format!("/{project}"), &pairs).await
+    client.post_pairs(&format!("/{}", urlenc(project)), &pairs).await
 }
 
 /// Issue a new personal access token for a Git repository.
@@ -97,7 +97,7 @@ pub async fn list_project_access_tokens(
     client: &LaunchpadClient,
     project: &str,
 ) -> Result<Vec<AccessToken>> {
-    let url = client.url(&format!("/{project}?ws.op=getAccessTokens"));
+    let url = client.url(&format!("/{}?ws.op=getAccessTokens", urlenc(project)));
     Collection::fetch_all(client, &url).await
 }
 
@@ -121,6 +121,14 @@ pub async fn revoke_access_token(
     client
         .post_pairs_url_ok(token_url, &[("ws.op", "revoke")])
         .await
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn urlenc(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
 // ---------------------------------------------------------------------------
