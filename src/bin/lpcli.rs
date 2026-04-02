@@ -1058,16 +1058,22 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
 
         PersonCommand::Bugs { name } => {
             let bugs_list = people::get_person_bugs(&client, &name).await?;
-            let mut table = build_table(vec!["ID", "Title", "Tags"]);
+            let mut table = build_table(vec!["Bug", "Title", "Status", "Importance"]);
             for b in &bugs_list {
+                let bug_id = b
+                    .bug_link
+                    .as_deref()
+                    .and_then(|url| url.rsplit('/').next())
+                    .unwrap_or("—");
                 table.add_row(vec![
-                    b.id.to_string(),
-                    truncate(&b.title, 55),
-                    b.tags.join(", "),
+                    bug_id.to_string(),
+                    truncate(b.title.as_deref().unwrap_or("—"), 55),
+                    b.status.as_deref().unwrap_or("—").to_string(),
+                    b.importance.as_deref().unwrap_or("—").to_string(),
                 ]);
             }
             println!("{table}");
-            println!("{} bug(s) found.", bugs_list.len());
+            println!("{} bug task(s) found.", bugs_list.len());
         }
 
         PersonCommand::Ppas { name } => {

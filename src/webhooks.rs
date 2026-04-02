@@ -95,7 +95,10 @@ pub async fn create_webhook(
         pairs.push(("secret", s));
     }
     let clean = target_path.trim_start_matches('/');
-    client.post_pairs(&format!("/{clean}"), &pairs).await
+    let location = client
+        .post_pairs_created_location(&format!("/{clean}"), &pairs)
+        .await?;
+    client.get_url(&location).await
 }
 
 /// List webhooks registered on a Launchpad target.
@@ -124,7 +127,10 @@ pub async fn ping_webhook(
     client: &LaunchpadClient,
     webhook_url: &str,
 ) -> Result<WebhookDelivery> {
-    client.post_pairs_url(webhook_url, &[("ws.op", "ping")]).await
+    let location = client
+        .post_pairs_url_created_location(webhook_url, &[("ws.op", "ping")])
+        .await?;
+    client.get_url(&location).await
 }
 
 /// List recent deliveries for a webhook.

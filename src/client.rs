@@ -22,7 +22,10 @@
 
 use std::collections::HashMap;
 
-use reqwest::{StatusCode};
+use reqwest::{
+    StatusCode,
+    header::LOCATION,
+};
 use serde::de::DeserializeOwned;
 use crate::auth::{self, Credentials};
 use crate::error::{LpError, Result};
@@ -180,6 +183,42 @@ impl LaunchpadClient {
         self.handle_response_ok(resp).await
     }
 
+    /// Perform an authenticated POST request and return the `Location` header
+    /// from a successful response.
+    ///
+    /// Use this for Launchpad operations that return `201 Created` with an
+    /// empty body and provide the created resource URL in `Location`.
+    pub async fn post_created_location(
+        &self,
+        path: &str,
+        params: &HashMap<&str, &str>,
+    ) -> Result<String> {
+        let url = self.url(path);
+        self.post_url_created_location(&url, params).await
+    }
+
+    /// Perform an authenticated POST request against an absolute URL and
+    /// return the `Location` header from a successful response.
+    pub async fn post_url_created_location(
+        &self,
+        url: &str,
+        params: &HashMap<&str, &str>,
+    ) -> Result<String> {
+        let mut req = self
+            .http
+            .post(url)
+            .header("Accept", "application/json")
+            .form(params);
+
+        if let Some(creds) = &self.credentials {
+            let auth_header = auth::build_auth_header(creds)?;
+            req = req.header("Authorization", auth_header);
+        }
+
+        let resp = req.send().await?;
+        self.handle_created_location(resp).await
+    }
+
     /// Perform an authenticated DELETE on an absolute URL, discarding the body.
     pub async fn delete_url_ok(&self, url: &str) -> Result<()> {
         let mut req = self
@@ -237,6 +276,17 @@ impl LaunchpadClient {
         self.post_pairs_url_ok(&url, params).await
     }
 
+    /// POST with key-value pairs against a relative path and return the
+    /// `Location` header from a successful response.
+    pub async fn post_pairs_created_location(
+        &self,
+        path: &str,
+        params: &[(&str, &str)],
+    ) -> Result<String> {
+        let url = self.url(path);
+        self.post_pairs_url_created_location(&url, params).await
+    }
+
     /// POST with key-value pairs against an absolute URL, discarding the body.
     pub async fn post_pairs_url_ok(&self, url: &str, params: &[(&str, &str)]) -> Result<()> {
         let body = encode_pairs(params);
@@ -254,6 +304,30 @@ impl LaunchpadClient {
 
         let resp = req.send().await?;
         self.handle_response_ok(resp).await
+    }
+
+    /// POST with key-value pairs against an absolute URL and return the
+    /// `Location` header from a successful response.
+    pub async fn post_pairs_url_created_location(
+        &self,
+        url: &str,
+        params: &[(&str, &str)],
+    ) -> Result<String> {
+        let body = encode_pairs(params);
+        let mut req = self
+            .http
+            .post(url)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(body);
+
+        if let Some(creds) = &self.credentials {
+            let auth_header = auth::build_auth_header(creds)?;
+            req = req.header("Authorization", auth_header);
+        }
+
+        let resp = req.send().await?;
+        self.handle_created_location(resp).await
     }
 
     // -----------------------------------------------------------------------
@@ -335,6 +409,54 @@ impl LaunchpadClient {
             return Err(LpError::Api { status: code, message });
         }
         Ok(())
+    }
+
+    /// Like [`handle_response_ok`] but returns the `Location` header value on
+    /// success.
+    async fn handle_created_location(&self, resp: reqwest::Response) -> Result<String> {
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED {
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "(could not read response body)".to_string());
+            return Err(LpError::Api { status: 401, message: body });
+        }
+        if status == StatusCode::FORBIDDEN {
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "(could not read response body)".to_string());
+            return Err(LpError::Api {
+                status: 403,
+                message: format!(
+                    "Permission denied. Verify your Launchpad account has the \
+                     required permissions. {body}"
+                ),
+            });
+        }
+        if status == StatusCode::NOT_FOUND {
+            return Err(LpError::NotFound(
+                "The requested resource does not exist on Launchpad.".to_string(),
+            ));
+        }
+        if !status.is_success() {
+            let code = status.as_u16();
+            let message = resp.text().await.unwrap_or_else(|_| status.to_string());
+            return Err(LpError::Api { status: code, message });
+        }
+
+        let location = resp
+            .headers()
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                LpError::Other(
+                    "Launchpad response did not include a valid Location header".to_string(),
+                )
+            })?;
+
+        Ok(location.to_string())
     }
 }
 

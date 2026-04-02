@@ -108,7 +108,26 @@ pub fn save_credentials(creds: &Credentials) -> Result<()> {
     }
     let serialized = toml::to_string_pretty(creds)
         .map_err(|e| LpError::Config(format!("Failed to serialise credentials: {e}")))?;
-    std::fs::write(&path, serialized)?;
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(serialized.as_bytes())?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, serialized)?;
+    }
+
     Ok(())
 }
 

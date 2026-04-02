@@ -121,14 +121,15 @@ pub async fn get_team_members(
     Collection::fetch_all(client, &url).await
 }
 
-/// List bugs filed by a person (filed by `~{name}`).
+/// List bug tasks filed by a person (bug reporter `~{name}`).
 pub async fn get_person_bugs(
     client: &LaunchpadClient,
     name: &str,
-) -> Result<Vec<crate::bugs::Bug>> {
-    let enc_name = urlenc(name);
+) -> Result<Vec<crate::bugs::BugTask>> {
+    let person_url = client.url(&format!("/~{}", urlenc(name)));
     let url = client.url(&format!(
-        "/~{enc_name}/+bugs?ws.op=searchTasks&bug_reporter=~{enc_name}"
+        "/bugs?ws.op=searchTasks&bug_reporter={}",
+        urlenc(&person_url)
     ));
     Collection::fetch_all(client, &url).await
 }

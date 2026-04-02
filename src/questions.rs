@@ -111,7 +111,7 @@ pub async fn search_questions(
 ) -> Result<Vec<Question>> {
     let mut query = format!("/{}?ws.op=searchQuestions", urlenc(target));
     if let Some(text) = params.search_text {
-        query.push_str(&format!("&search={}", urlenc(text)));
+        query.push_str(&format!("&search_text={}", urlenc(text)));
     }
     if let Some(status) = params.status {
         query.push_str(&format!("&status={}", urlenc(status)));

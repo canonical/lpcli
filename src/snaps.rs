@@ -160,7 +160,10 @@ pub async fn request_snap_builds(
     params.insert("ws.op", "requestBuilds");
     params.insert("archive", archive_url);
     params.insert("pocket", pocket);
-    client.post(&format!("/~{}/+snap/{}", urlenc(owner), urlenc(name)), &params).await
+    let location = client
+        .post_created_location(&format!("/~{}/+snap/{}", urlenc(owner), urlenc(name)), &params)
+        .await?;
+    client.get_url(&location).await
 }
 
 // ---------------------------------------------------------------------------

@@ -129,7 +129,7 @@ pub async fn get_git_repository_by_unique_name(
 ) -> Result<GitRepository> {
     let enc: String =
         url::form_urlencoded::byte_serialize(unique_name.as_bytes()).collect();
-    let url = client.url(&format!("/+git?ws.op=getByUniqueName&unique_name={enc}"));
+    let url = client.url(&format!("/+git?ws.op=getByPath&path={enc}"));
     client.get_url(&url).await
 }
 

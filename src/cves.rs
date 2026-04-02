@@ -70,7 +70,7 @@ pub async fn search_cves(
     client: &LaunchpadClient,
     params: &CveSearchParams<'_>,
 ) -> Result<Vec<Cve>> {
-    let mut query = "/cves?ws.op=advancedSearch".to_string();
+    let mut query = "/bugs/cve?ws.op=advancedSearch".to_string();
 
     if let Some(dist) = params.in_distribution {
         let dist_url = client.url(&format!("/{}", enc(dist)));

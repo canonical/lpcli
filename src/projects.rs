@@ -144,7 +144,11 @@ pub async fn get_milestone(
     milestone_name: &str,
 ) -> Result<Milestone> {
     client
-        .get(&format!("/{}/{}", urlenc(project), urlenc(milestone_name)))
+        .get(&format!(
+            "/{}/+milestone/{}",
+            urlenc(project),
+            urlenc(milestone_name)
+        ))
         .await
 }
 
@@ -155,7 +159,11 @@ pub async fn get_release(
     milestone_name: &str,
 ) -> Result<Release> {
     client
-        .get(&format!("/{}/{}/release", urlenc(project), urlenc(milestone_name)))
+        .get(&format!(
+            "/{}/+milestone/{}/release",
+            urlenc(project),
+            urlenc(milestone_name)
+        ))
         .await
 }
 

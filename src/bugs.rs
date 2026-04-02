@@ -233,7 +233,12 @@ pub async fn search_bugs(
         query.push_str(&format!("&tags={}", urlenc(tag)));
     }
     if let Some(assignee) = params.assignee {
-        query.push_str(&format!("&assignee={}", urlenc(assignee)));
+        let assignee_link = if assignee.starts_with("http://") || assignee.starts_with("https://") {
+            assignee.to_string()
+        } else {
+            client.url(&format!("/~{}", urlenc(assignee.trim_start_matches('~'))))
+        };
+        query.push_str(&format!("&assignee={}", urlenc(&assignee_link)));
     }
     if let Some(text) = params.search_text {
         query.push_str(&format!("&search_text={}", urlenc(text)));
@@ -261,7 +266,8 @@ pub async fn create_bug(
     params.insert("title", title);
     params.insert("description", description);
     params.insert("target", target_url.as_str());
-    client.post("/bugs", &params).await
+    let location = client.post_created_location("/bugs", &params).await?;
+    client.get_url(&location).await
 }
 
 /// Update the status of a bug task identified by its API self-link.
