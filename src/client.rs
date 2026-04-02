@@ -48,6 +48,12 @@ pub struct LaunchpadClient {
     credentials: Option<Credentials>,
     /// Override the API base URL (useful in tests).
     base_url: String,
+    /// Maximum number of retry attempts for 429 and 5xx responses.
+    /// `0` means no retries (default).
+    max_retries: u32,
+    /// Initial delay between retry attempts in milliseconds.
+    /// Doubles after each retry (exponential backoff).  Defaults to 1000 ms.
+    initial_retry_delay_ms: u64,
 }
 
 impl LaunchpadClient {
@@ -63,12 +69,34 @@ impl LaunchpadClient {
                 .expect("Failed to build HTTP client"),
             credentials,
             base_url: API_BASE.to_string(),
+            max_retries: 0,
+            initial_retry_delay_ms: 1_000,
         }
     }
 
     /// Override the base URL (used in integration tests with a mock server).
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    /// Set the maximum number of retry attempts for rate-limited (429) and
+    /// server-error (5xx) responses.
+    ///
+    /// `0` (the default) disables retries. Each retry waits at least
+    /// `initial_retry_delay_ms` milliseconds, doubling after each attempt
+    /// (exponential backoff). For 429 responses the `Retry-After` header
+    /// value takes precedence when present.
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = max_retries;
+        self
+    }
+
+    /// Set the initial backoff delay in milliseconds used between retries.
+    ///
+    /// Defaults to `1000` ms. The delay doubles after each failed attempt.
+    pub fn with_retry_delay_ms(mut self, ms: u64) -> Self {
+        self.initial_retry_delay_ms = ms;
         self
     }
 
@@ -95,7 +123,7 @@ impl LaunchpadClient {
             req = req.header("Authorization", auth_header);
         }
 
-        let resp = req.send().await?;
+        let resp = self.send_with_retry(req).await?;
         self.handle_response(resp).await
     }
 
@@ -126,7 +154,7 @@ impl LaunchpadClient {
             req = req.header("Authorization", auth_header);
         }
 
-        let resp = req.send().await?;
+        let resp = self.send_with_retry(req).await?;
         self.handle_response(resp).await
     }
 
@@ -152,7 +180,7 @@ impl LaunchpadClient {
             req = req.header("Authorization", auth_header);
         }
 
-        let resp = req.send().await?;
+        let resp = self.send_with_retry(req).await?;
         self.handle_response(resp).await
     }
 
@@ -179,7 +207,7 @@ impl LaunchpadClient {
             req = req.header("Authorization", auth_header);
         }
 
-        let resp = req.send().await?;
+        let resp = self.send_with_retry(req).await?;
         self.handle_response_ok(resp).await
     }
 
@@ -215,7 +243,7 @@ impl LaunchpadClient {
             req = req.header("Authorization", auth_header);
         }
 
-        let resp = req.send().await?;
+        let resp = self.send_with_retry(req).await?;
         self.handle_created_location(resp).await
     }
 
@@ -231,7 +259,7 @@ impl LaunchpadClient {
             req = req.header("Authorization", auth_header);
         }
 
-        let resp = req.send().await?;
+        let resp = self.send_with_retry(req).await?;
         self.handle_response_ok(resp).await
     }
 
@@ -266,7 +294,7 @@ impl LaunchpadClient {
             req = req.header("Authorization", auth_header);
         }
 
-        let resp = req.send().await?;
+        let resp = self.send_with_retry(req).await?;
         self.handle_response(resp).await
     }
 
@@ -302,7 +330,7 @@ impl LaunchpadClient {
             req = req.header("Authorization", auth_header);
         }
 
-        let resp = req.send().await?;
+        let resp = self.send_with_retry(req).await?;
         self.handle_response_ok(resp).await
     }
 
@@ -326,8 +354,71 @@ impl LaunchpadClient {
             req = req.header("Authorization", auth_header);
         }
 
-        let resp = req.send().await?;
+        let resp = self.send_with_retry(req).await?;
         self.handle_created_location(resp).await
+    }
+
+    // -----------------------------------------------------------------------
+    // Retry helper
+    // -----------------------------------------------------------------------
+
+    /// Send a request, retrying on 429 and 5xx responses up to `max_retries`
+    /// times with exponential backoff.
+    ///
+    /// For 429 responses, the `Retry-After` header value (in seconds) is used
+    /// as the sleep duration when present; otherwise the current backoff delay
+    /// is used.  The delay starts at `initial_retry_delay_ms` and doubles after
+    /// each unsuccessful attempt.
+    ///
+    /// Returns the final `reqwest::Response` (which may still carry a 429 or
+    /// 5xx status if all retries were exhausted).  Transport-level errors
+    /// (`reqwest::Error`) are returned immediately without retry.
+    async fn send_with_retry(
+        &self,
+        builder: reqwest::RequestBuilder,
+    ) -> reqwest::Result<reqwest::Response> {
+        let mut delay_ms = self.initial_retry_delay_ms;
+        let mut current = builder;
+        let mut retries_left = self.max_retries;
+
+        loop {
+            // Clone the builder before sending so we can retry if needed.
+            let (to_send, saved) = if retries_left > 0 {
+                match current.try_clone() {
+                    Some(clone) => (current, Some(clone)),
+                    // Body is not cloneable (e.g. streaming); skip retry.
+                    None => (current, None),
+                }
+            } else {
+                (current, None)
+            };
+
+            let resp = to_send.send().await?;
+            let status = resp.status();
+
+            if let Some(next) = saved {
+                if status.as_u16() == 429 || status.is_server_error() {
+                    let sleep_ms = if status.as_u16() == 429 {
+                        // Honour the server's Retry-After hint when present.
+                        resp.headers()
+                            .get("Retry-After")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .map(|secs| secs.saturating_mul(1_000))
+                            .unwrap_or(delay_ms)
+                    } else {
+                        delay_ms
+                    };
+                    tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+                    delay_ms = delay_ms.saturating_mul(2);
+                    retries_left -= 1;
+                    current = next;
+                    continue;
+                }
+            }
+
+            return Ok(resp);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -362,6 +453,14 @@ impl LaunchpadClient {
             return Err(LpError::NotFound(
                 "The requested resource does not exist on Launchpad.".to_string(),
             ));
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = resp
+                .headers()
+                .get("Retry-After")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
+            return Err(LpError::RateLimit { retry_after_secs: retry_after });
         }
         if !status.is_success() {
             let code = status.as_u16();
@@ -403,6 +502,14 @@ impl LaunchpadClient {
                 "The requested resource does not exist on Launchpad.".to_string(),
             ));
         }
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = resp
+                .headers()
+                .get("Retry-After")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
+            return Err(LpError::RateLimit { retry_after_secs: retry_after });
+        }
         if !status.is_success() {
             let code = status.as_u16();
             let message = resp.text().await.unwrap_or_else(|_| status.to_string());
@@ -439,6 +546,14 @@ impl LaunchpadClient {
             return Err(LpError::NotFound(
                 "The requested resource does not exist on Launchpad.".to_string(),
             ));
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = resp
+                .headers()
+                .get("Retry-After")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
+            return Err(LpError::RateLimit { retry_after_secs: retry_after });
         }
         if !status.is_success() {
             let code = status.as_u16();
