@@ -43,5 +43,6 @@ pub mod projects;
 pub mod questions;
 pub mod snaps;
 pub mod specifications;
+pub mod status;
 pub mod translations;
 pub mod webhooks;

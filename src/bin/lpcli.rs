@@ -19,6 +19,7 @@ use lpcli::{
     questions::{self, QuestionSearchParams},
     snaps,
     specifications,
+    status,
     translations,
     webhooks,
 };
@@ -42,6 +43,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Check authentication status and verify the Launchpad server is reachable.
+    Status,
+
     /// Authenticate with Launchpad (OAuth login).
     Login,
 
@@ -714,6 +718,8 @@ async fn run() -> lpcli::error::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Status => handle_status().await?,
+
         Command::Login => {
             println!("{}", "Logging in to Launchpad...".bold());
             let creds = auth::login().await?;
@@ -2003,6 +2009,63 @@ async fn handle_access_token(cmd: AccessTokenCommand) -> lpcli::error::Result<()
             println!("{} Access token revoked.", "✓".green().bold());
         }
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Status handler
+// ---------------------------------------------------------------------------
+
+/// Display authentication status and Launchpad server reachability.
+///
+/// Both checks run concurrently to minimise latency.
+async fn handle_status() -> lpcli::error::Result<()> {
+    // Run both checks in parallel.
+    let (server, auth) = tokio::join!(status::check_server(), status::check_auth());
+
+    // Authentication section.
+    println!("{}", "Authentication".bold());
+    println!("{}", "─".repeat(40));
+    if auth.logged_in {
+        match &auth.username {
+            Some(name) => println!(
+                "{} Logged in as {}",
+                "✓".green().bold(),
+                name.cyan().bold()
+            ),
+            None => println!(
+                "{} Credentials found (could not verify with server)",
+                "~".yellow().bold()
+            ),
+        }
+    } else {
+        println!(
+            "{} Not logged in.  Run {} to authenticate.",
+            "✗".red().bold(),
+            "`lpcli login`".bold()
+        );
+    }
+
+    println!();
+
+    // Launchpad server section.
+    println!("{}", "Launchpad API Server".bold());
+    println!("{}", "─".repeat(40));
+    if server.reachable {
+        println!("{} Online", "✓".green().bold());
+        if let Some(ref rtl) = server.resource_type_link {
+            println!("  Endpoint: {rtl}");
+        }
+    } else {
+        println!("{} Unreachable", "✗".red().bold());
+        if let Some(status_code) = server.http_status {
+            println!("  HTTP status: {status_code}");
+        }
+        if let Some(ref err) = server.error {
+            println!("  Error: {err}");
+        }
+    }
+
     Ok(())
 }
 
