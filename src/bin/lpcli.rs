@@ -2,7 +2,7 @@
 //!
 //! Parse command-line arguments with `clap` and dispatch to the `lpcli` library.
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 use colored::Colorize;
 use comfy_table::{presets::UTF8_FULL_CONDENSED, Table};
 
@@ -175,56 +175,127 @@ enum BugCommand {
         description: String,
     },
     /// Change the status of a bug task.
+    #[command(
+        group(ArgGroup::new("target_spec")
+            .required(true)
+            .args(["target", "many_targets", "all_targets"])),
+        group(ArgGroup::new("series_spec")
+            .required(true)
+            .args(["series", "many_series", "all_series"])),
+    )]
     SetStatus {
         /// The Launchpad bug number.
         #[arg(short, long)]
         bug_id: u64,
-        /// Target name as shown by 'lpcli bug tasks' (e.g. "rust-alacritty", "ubuntu").
+        /// Single target as shown by 'lpcli bug tasks' (e.g. "rust-alacritty").
+        /// Mutually exclusive with --many-targets and --all-targets.
         #[arg(short, long)]
-        target: String,
-        /// Ubuntu series to update (e.g. "noble", "jammy").
-        /// Required when the target has tasks for multiple series.
+        target: Option<String>,
+        /// Comma-separated list of targets (e.g. "rust-alacritty, rust-eza").
+        /// Mutually exclusive with --target and --all-targets.
+        #[arg(long)]
+        many_targets: Option<String>,
+        /// Apply to every target present in the bug's current tasks.
+        /// Mutually exclusive with --target and --many-targets.
+        #[arg(long)]
+        all_targets: bool,
+        /// Single Ubuntu series to update (e.g. "noble").
+        /// Mutually exclusive with --many-series and --all-series.
         #[arg(long)]
         series: Option<String>,
+        /// Comma-separated list of Ubuntu series (e.g. "noble, jammy").
+        /// Mutually exclusive with --series and --all-series.
+        #[arg(long)]
+        many_series: Option<String>,
+        /// Apply to every Ubuntu series present in the bug's current tasks.
+        /// Mutually exclusive with --series and --many-series.
+        #[arg(long)]
+        all_series: bool,
         /// New status (e.g. "Confirmed", "Fix Released", "In Progress").
         #[arg(short, long)]
         status: String,
     },
     /// Change the importance of a bug task.
+    #[command(
+        group(ArgGroup::new("target_spec")
+            .required(true)
+            .args(["target", "many_targets", "all_targets"])),
+        group(ArgGroup::new("series_spec")
+            .required(true)
+            .args(["series", "many_series", "all_series"])),
+    )]
     SetImportance {
         /// The Launchpad bug number.
         #[arg(short, long)]
         bug_id: u64,
-        /// Target name as shown by 'lpcli bug tasks' (e.g. "rust-alacritty", "ubuntu").
+        /// Single target as shown by 'lpcli bug tasks' (e.g. "rust-alacritty").
+        /// Mutually exclusive with --many-targets and --all-targets.
         #[arg(short, long)]
-        target: String,
-        /// Ubuntu series to update (e.g. "noble", "jammy").
-        /// Required when the target has tasks for multiple series.
+        target: Option<String>,
+        /// Comma-separated list of targets (e.g. "rust-alacritty, rust-eza").
+        /// Mutually exclusive with --target and --all-targets.
+        #[arg(long)]
+        many_targets: Option<String>,
+        /// Apply to every target present in the bug's current tasks.
+        /// Mutually exclusive with --target and --many-targets.
+        #[arg(long)]
+        all_targets: bool,
+        /// Single Ubuntu series to update (e.g. "noble").
+        /// Mutually exclusive with --many-series and --all-series.
         #[arg(long)]
         series: Option<String>,
+        /// Comma-separated list of Ubuntu series (e.g. "noble, jammy").
+        /// Mutually exclusive with --series and --all-series.
+        #[arg(long)]
+        many_series: Option<String>,
+        /// Apply to every Ubuntu series present in the bug's current tasks.
+        /// Mutually exclusive with --series and --many-series.
+        #[arg(long)]
+        all_series: bool,
         /// New importance (e.g. "Critical", "High", "Medium", "Low").
         #[arg(short, long)]
         importance: String,
     },
     /// Assign a bug task to a Launchpad user.
+    #[command(
+        group(ArgGroup::new("target_spec")
+            .required(true)
+            .args(["target", "many_targets", "all_targets"])),
+        group(ArgGroup::new("series_spec")
+            .required(true)
+            .args(["series", "many_series", "all_series"])),
+    )]
     SetAssignee {
         /// The Launchpad bug number.
         #[arg(short, long)]
         bug_id: u64,
-        /// Target name as shown by 'lpcli bug tasks' (e.g. "rust-alacritty", "ubuntu").
-        /// Required unless --all-tasks is set.
+        /// Single target as shown by 'lpcli bug tasks' (e.g. "rust-alacritty").
+        /// Mutually exclusive with --many-targets and --all-targets.
         #[arg(short, long)]
         target: Option<String>,
-        /// Ubuntu series to update (e.g. "noble", "jammy").
-        /// Required when the target has tasks for multiple series.
+        /// Comma-separated list of targets (e.g. "rust-alacritty, rust-eza").
+        /// Mutually exclusive with --target and --all-targets.
+        #[arg(long)]
+        many_targets: Option<String>,
+        /// Apply to every target present in the bug's current tasks.
+        /// Mutually exclusive with --target and --many-targets.
+        #[arg(long)]
+        all_targets: bool,
+        /// Single Ubuntu series to update (e.g. "noble").
+        /// Mutually exclusive with --many-series and --all-series.
         #[arg(long)]
         series: Option<String>,
+        /// Comma-separated list of Ubuntu series (e.g. "noble, jammy").
+        /// Mutually exclusive with --series and --all-series.
+        #[arg(long)]
+        many_series: Option<String>,
+        /// Apply to every Ubuntu series present in the bug's current tasks.
+        /// Mutually exclusive with --series and --many-series.
+        #[arg(long)]
+        all_series: bool,
         /// Launchpad username to assign (without ~).
         #[arg(short, long)]
         name: String,
-        /// Assign all bug targets of this bug to the specified user.
-        #[arg(long)]
-        all_targets: bool,
     },
     /// Subscribe a person to a bug.
     Subscribe {
@@ -937,90 +1008,88 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
         BugCommand::SetStatus {
             bug_id,
             target,
+            many_targets,
+            all_targets,
             series,
+            many_series,
+            all_series,
             status,
         } => {
+            let target_filter = TargetFilter::from_args(target, many_targets, all_targets);
+            let series_filter = SeriesFilter::from_args(series, many_series, all_series);
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let task = find_bug_task(&tasks, bug_id, &target, series.as_deref())?;
-            let task_url = task
-                .self_link
-                .as_deref()
-                .ok_or(lpcli::error::LpError::Other(
-                    "Bug task has no self_link".into(),
-                ))?;
-            let updated = bugs::set_bug_status(&client, task_url, &status).await?;
+            let matched =
+                collect_matching_tasks(&tasks, bug_id, &target_filter, &series_filter)?;
+            for task in &matched {
+                let task_url = task.self_link.as_deref().ok_or_else(|| {
+                    lpcli::error::LpError::Other("Bug task has no self_link".into())
+                })?;
+                bugs::set_bug_status(&client, task_url, &status).await?;
+            }
             println!(
-                "{} Status updated to '{}'.",
+                "{} Status updated to '{}' for {} task(s) on bug #{bug_id}.",
                 "✓".green().bold(),
-                updated.status.as_deref().unwrap_or(&status)
+                status,
+                matched.len(),
             );
         }
 
         BugCommand::SetImportance {
             bug_id,
             target,
+            many_targets,
+            all_targets,
             series,
+            many_series,
+            all_series,
             importance,
         } => {
+            let target_filter = TargetFilter::from_args(target, many_targets, all_targets);
+            let series_filter = SeriesFilter::from_args(series, many_series, all_series);
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let task = find_bug_task(&tasks, bug_id, &target, series.as_deref())?;
-            let task_url = task
-                .self_link
-                .as_deref()
-                .ok_or(lpcli::error::LpError::Other(
-                    "Bug task has no self_link".into(),
-                ))?;
-            let updated = bugs::set_bug_importance(&client, task_url, &importance).await?;
+            let matched =
+                collect_matching_tasks(&tasks, bug_id, &target_filter, &series_filter)?;
+            for task in &matched {
+                let task_url = task.self_link.as_deref().ok_or_else(|| {
+                    lpcli::error::LpError::Other("Bug task has no self_link".into())
+                })?;
+                bugs::set_bug_importance(&client, task_url, &importance).await?;
+            }
             println!(
-                "{} Importance updated to '{}'.",
+                "{} Importance updated to '{}' for {} task(s) on bug #{bug_id}.",
                 "✓".green().bold(),
-                updated.importance.as_deref().unwrap_or(&importance)
+                importance,
+                matched.len(),
             );
         }
 
         BugCommand::SetAssignee {
             bug_id,
             target,
-            series,
-            name,
+            many_targets,
             all_targets,
+            series,
+            many_series,
+            all_series,
+            name,
         } => {
+            let target_filter = TargetFilter::from_args(target, many_targets, all_targets);
+            let series_filter = SeriesFilter::from_args(series, many_series, all_series);
             let assignee_url = client.url(&format!("/~{name}"));
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            if all_targets {
-                for task in &tasks {
-                    let task_url =
-                        task.self_link.as_deref().ok_or_else(|| {
-                            lpcli::error::LpError::Other(
-                                "Bug task has no self_link".into(),
-                            )
-                        })?;
-                    bugs::set_bug_assignee(&client, task_url, &assignee_url).await?;
-                }
-                println!(
-                    "{} Assigned all targets of bug #{bug_id} to ~{name}.",
-                    "✓".green().bold()
-                );
-            } else {
-                let target = target.ok_or_else(|| {
-                    lpcli::error::LpError::Other(
-                        "Either --target or --all-targets must be specified".into(),
-                    )
+            let matched =
+                collect_matching_tasks(&tasks, bug_id, &target_filter, &series_filter)?;
+            for task in &matched {
+                let task_url = task.self_link.as_deref().ok_or_else(|| {
+                    lpcli::error::LpError::Other("Bug task has no self_link".into())
                 })?;
-                let task =
-                    find_bug_task(&tasks, bug_id, &target, series.as_deref())?;
-                let task_url =
-                    task.self_link.as_deref().ok_or_else(|| {
-                        lpcli::error::LpError::Other(
-                            "Bug task has no self_link".into(),
-                        )
-                    })?;
                 bugs::set_bug_assignee(&client, task_url, &assignee_url).await?;
-                println!(
-                    "{} Assigned bug #{bug_id} ({target}) to ~{name}.",
-                    "✓".green().bold()
-                );
             }
+            println!(
+                "{} Assigned {} task(s) on bug #{bug_id} to ~{name}.",
+                "✓".green().bold(),
+                matched.len(),
+            );
         }
 
         BugCommand::Subscribe { bug_id, name } => {
@@ -2164,94 +2233,207 @@ fn build_table(headers: Vec<&str>) -> Table {
     table
 }
 
-/// Find the single bug task that matches `target` and, optionally, `series`.
+// ---------------------------------------------------------------------------
+// Target / series filter types and task collection helper
+// ---------------------------------------------------------------------------
+
+/// Split a comma-separated string into a trimmed, non-empty list of strings.
+fn parse_comma_separated(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|p| p.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Which targets to apply a bug-task operation to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TargetFilter {
+    /// Exactly one named target.
+    One(String),
+    /// An explicit set of named targets (OR logic within the set).
+    Many(Vec<String>),
+    /// Every target that already has a task on this bug.
+    All,
+}
+
+impl TargetFilter {
+    fn from_args(
+        target: Option<String>,
+        many_targets: Option<String>,
+        all_targets: bool,
+    ) -> Self {
+        match (all_targets, many_targets, target) {
+            (true, _, _) => TargetFilter::All,
+            (false, Some(many), _) => TargetFilter::Many(parse_comma_separated(&many)),
+            (false, None, Some(t)) => TargetFilter::One(t),
+            // Clap's required ArgGroup prevents this branch; defensive fallback.
+            (false, None, None) => TargetFilter::All,
+        }
+    }
+}
+
+/// Which Ubuntu series to apply a bug-task operation to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SeriesFilter {
+    /// Exactly one named series.
+    One(String),
+    /// An explicit set of named series (OR logic within the set).
+    Many(Vec<String>),
+    /// Every series that already has a task on this bug.
+    All,
+}
+
+impl SeriesFilter {
+    fn from_args(
+        series: Option<String>,
+        many_series: Option<String>,
+        all_series: bool,
+    ) -> Self {
+        match (all_series, many_series, series) {
+            (true, _, _) => SeriesFilter::All,
+            (false, Some(many), _) => SeriesFilter::Many(parse_comma_separated(&many)),
+            (false, None, Some(s)) => SeriesFilter::One(s),
+            // Clap's required ArgGroup prevents this branch; defensive fallback.
+            (false, None, None) => SeriesFilter::All,
+        }
+    }
+}
+
+/// Return all bug tasks that match `target_filter` AND `series_filter`.
 ///
-/// * If `series` is `None` and exactly one task matches `target`, that task is
-///   returned.
-/// * If `series` is `None` and multiple tasks match `target` (e.g. the same
-///   source package appears in more than one Ubuntu series), an error is
-///   returned listing the available series so the caller can retry with
-///   `--series`.
-/// * If `series` is `Some(s)` and no task has that series an error is returned
-///   listing the valid series for `target` on this bug.
-fn find_bug_task<'a>(
+/// Every explicitly named target and series is validated against what is
+/// actually present on the bug before filtering, so callers receive an
+/// actionable error message instead of a silent empty result.
+///
+/// The series filter only matches tasks that have a series component in their
+/// `target_link` (e.g. `/ubuntu/noble/+source/pkg`).  Series-less tasks
+/// (e.g. the distribution-level `/ubuntu/+source/pkg` row or an upstream
+/// project task) are excluded when `SeriesFilter::All` is used.
+fn collect_matching_tasks<'a>(
     tasks: &'a [bugs::BugTask],
     bug_id: u64,
-    target: &str,
-    series: Option<&str>,
-) -> std::result::Result<&'a bugs::BugTask, lpcli::error::LpError> {
-    // Collect every task whose target name (short package/project name) matches.
-    let matching: Vec<&bugs::BugTask> = tasks
+    target_filter: &TargetFilter,
+    series_filter: &SeriesFilter,
+) -> std::result::Result<Vec<&'a bugs::BugTask>, lpcli::error::LpError> {
+    // Parse every task's target link once.
+    let parsed: Vec<(&bugs::BugTask, String, Option<String>)> = tasks
         .iter()
-        .filter(|t| {
-            let (task_target, _) =
+        .map(|t| {
+            let (tgt, ser) =
                 bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
-            task_target.eq_ignore_ascii_case(target)
+            (t, tgt, ser)
         })
         .collect();
 
-    match series {
-        Some(s) => {
-            // Find the task whose series matches the requested series name.
-            matching
-                .iter()
-                .find(|t| {
-                    let (_, task_series) =
-                        bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
-                    task_series
-                        .as_deref()
-                        .map(|ts| ts.eq_ignore_ascii_case(s))
-                        .unwrap_or(false)
-                })
-                .copied()
-                .ok_or_else(|| {
-                    // Build a list of series that do exist for this target so the
-                    // user can see what valid choices are.
-                    let available: Vec<String> = matching
-                        .iter()
-                        .filter_map(|t| {
-                            let (_, ts) =
-                                bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
-                            ts
-                        })
-                        .collect();
-                    if available.is_empty() {
-                        lpcli::error::LpError::NotFound(format!(
-                            "Series '{s}' is not valid for target '{target}' on bug \
-                             #{bug_id}: that target has no series-specific tasks."
-                        ))
-                    } else {
-                        lpcli::error::LpError::NotFound(format!(
-                            "Series '{s}' is not valid for target '{target}' on bug \
-                             #{bug_id}. Valid series: {}.",
-                            available.join(", ")
-                        ))
-                    }
-                })
-        }
-        None => match matching.len() {
-            0 => Err(lpcli::error::LpError::NotFound(format!(
-                "No task for target '{target}' on bug #{bug_id}."
-            ))),
-            1 => Ok(matching[0]),
-            _ => {
-                // Multiple tasks match; require --series to disambiguate.
-                let series_list: Vec<String> = matching
-                    .iter()
-                    .filter_map(|t| {
-                        let (_, ts) =
-                            bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
-                        ts
-                    })
-                    .collect();
-                Err(lpcli::error::LpError::Other(format!(
-                    "Multiple tasks found for target '{target}' on bug #{bug_id}. \
-                     Use --series to specify which one. Available series: {}.",
-                    series_list.join(", ")
-                )))
+    // Sorted, de-duplicated lists of targets and series present on this bug —
+    // used to produce helpful "did you mean…?" error messages.
+    let available_targets: Vec<String> = parsed
+        .iter()
+        .filter(|(_, t, _)| !t.is_empty())
+        .map(|(_, t, _)| t.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    let available_series: Vec<String> = parsed
+        .iter()
+        .filter_map(|(_, _, ser)| ser.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    // Validate every explicitly named target.
+    match target_filter {
+        TargetFilter::One(t) => {
+            if !available_targets.iter().any(|a| a.eq_ignore_ascii_case(t)) {
+                return Err(lpcli::error::LpError::NotFound(format!(
+                    "Target '{t}' not found on bug #{bug_id}. \
+                     Available targets: {}.",
+                    available_targets.join(", ")
+                )));
             }
-        },
+        }
+        TargetFilter::Many(ts) => {
+            let missing: Vec<&str> = ts
+                .iter()
+                .filter(|t| !available_targets.iter().any(|a| a.eq_ignore_ascii_case(t)))
+                .map(String::as_str)
+                .collect();
+            if !missing.is_empty() {
+                return Err(lpcli::error::LpError::NotFound(format!(
+                    "Targets not found on bug #{bug_id}: {}. \
+                     Available targets: {}.",
+                    missing.join(", "),
+                    available_targets.join(", ")
+                )));
+            }
+        }
+        TargetFilter::All => {}
     }
+
+    // Validate every explicitly named series.
+    match series_filter {
+        SeriesFilter::One(s) => {
+            if !available_series.iter().any(|a| a.eq_ignore_ascii_case(s)) {
+                return Err(lpcli::error::LpError::NotFound(format!(
+                    "Series '{s}' not found on bug #{bug_id}. \
+                     Available series: {}.",
+                    available_series.join(", ")
+                )));
+            }
+        }
+        SeriesFilter::Many(ss) => {
+            let missing: Vec<&str> = ss
+                .iter()
+                .filter(|s| !available_series.iter().any(|a| a.eq_ignore_ascii_case(s)))
+                .map(String::as_str)
+                .collect();
+            if !missing.is_empty() {
+                return Err(lpcli::error::LpError::NotFound(format!(
+                    "Series not found on bug #{bug_id}: {}. \
+                     Available series: {}.",
+                    missing.join(", "),
+                    available_series.join(", ")
+                )));
+            }
+        }
+        SeriesFilter::All => {}
+    }
+
+    // Apply the combined filter (target AND series must both match).
+    let matched: Vec<&bugs::BugTask> = parsed
+        .iter()
+        .filter(|(_, task_tgt, task_ser)| {
+            let target_ok = match target_filter {
+                TargetFilter::One(t) => task_tgt.eq_ignore_ascii_case(t),
+                TargetFilter::Many(ts) => {
+                    ts.iter().any(|t| task_tgt.eq_ignore_ascii_case(t))
+                }
+                TargetFilter::All => true,
+            };
+            let series_ok = match series_filter {
+                SeriesFilter::One(s) => task_ser
+                    .as_deref()
+                    .map(|ts| ts.eq_ignore_ascii_case(s))
+                    .unwrap_or(false),
+                SeriesFilter::Many(ss) => task_ser
+                    .as_deref()
+                    .map(|ts| ss.iter().any(|s| ts.eq_ignore_ascii_case(s)))
+                    .unwrap_or(false),
+                SeriesFilter::All => task_ser.is_some(),
+            };
+            target_ok && series_ok
+        })
+        .map(|(t, _, _)| *t)
+        .collect();
+
+    if matched.is_empty() {
+        return Err(lpcli::error::LpError::NotFound(format!(
+            "No tasks found matching the given target and series filters on bug #{bug_id}."
+        )));
+    }
+
+    Ok(matched)
 }
 
 /// Truncate a string to at most `max` characters, appending `…` if truncated.
@@ -2270,6 +2452,409 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Helpers shared by multiple tests
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal `BugTask` whose only meaningful field is `target_link`.
+    fn make_task(target_link: &str) -> bugs::BugTask {
+        bugs::BugTask {
+            self_link: Some(format!(
+                "https://api.launchpad.net/devel{target_link}/+bugtask"
+            )),
+            bug_link: Some("https://api.launchpad.net/devel/bugs/1".to_string()),
+            title: Some("Test bug".to_string()),
+            status: Some("New".to_string()),
+            importance: Some("Undecided".to_string()),
+            assignee_link: None,
+            date_created: None,
+            bug_target_display_name: None,
+            target_link: Some(format!("https://api.launchpad.net/devel{target_link}")),
+        }
+    }
+
+    /// A representative set of tasks covering several targets, series, and
+    /// also series-less rows (distribution-level and upstream project tasks).
+    fn sample_tasks() -> Vec<bugs::BugTask> {
+        vec![
+            // rust-alacritty: noble and jammy only
+            make_task("/ubuntu/noble/+source/rust-alacritty"),
+            make_task("/ubuntu/jammy/+source/rust-alacritty"),
+            // rust-eza: noble, jammy, and focal
+            make_task("/ubuntu/noble/+source/rust-eza"),
+            make_task("/ubuntu/jammy/+source/rust-eza"),
+            make_task("/ubuntu/focal/+source/rust-eza"),
+            // Series-less rows — should NOT appear in series-filtered results
+            make_task("/ubuntu/+source/rust-alacritty"),
+            make_task("/rust-alacritty"),
+        ]
+    }
+
+    /// Extract the target_link strings from a slice of task references so that
+    /// test assertions stay readable.
+    fn target_links<'a>(tasks: &'a [&'a bugs::BugTask]) -> Vec<&'a str> {
+        tasks
+            .iter()
+            .filter_map(|t| t.target_link.as_deref())
+            .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_comma_separated
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_comma_separated_single() {
+        assert_eq!(parse_comma_separated("noble"), vec!["noble"]);
+    }
+
+    #[test]
+    fn parse_comma_separated_two() {
+        assert_eq!(
+            parse_comma_separated("noble, jammy"),
+            vec!["noble", "jammy"]
+        );
+    }
+
+    #[test]
+    fn parse_comma_separated_trims_whitespace() {
+        assert_eq!(
+            parse_comma_separated("  noble  ,  jammy  "),
+            vec!["noble", "jammy"]
+        );
+    }
+
+    #[test]
+    fn parse_comma_separated_ignores_empty_segments() {
+        assert_eq!(parse_comma_separated(",noble,,jammy,"), vec!["noble", "jammy"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // TargetFilter::from_args
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn target_filter_from_all_targets_flag() {
+        let f = TargetFilter::from_args(None, None, true);
+        assert_eq!(f, TargetFilter::All);
+    }
+
+    #[test]
+    fn target_filter_from_many_targets() {
+        let f = TargetFilter::from_args(None, Some("rust-alacritty, rust-eza".into()), false);
+        assert_eq!(f, TargetFilter::Many(vec!["rust-alacritty".into(), "rust-eza".into()]));
+    }
+
+    #[test]
+    fn target_filter_from_single_target() {
+        let f = TargetFilter::from_args(Some("rust-alacritty".into()), None, false);
+        assert_eq!(f, TargetFilter::One("rust-alacritty".into()));
+    }
+
+    // -----------------------------------------------------------------------
+    // SeriesFilter::from_args
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn series_filter_from_all_series_flag() {
+        let f = SeriesFilter::from_args(None, None, true);
+        assert_eq!(f, SeriesFilter::All);
+    }
+
+    #[test]
+    fn series_filter_from_many_series() {
+        let f = SeriesFilter::from_args(None, Some("noble, jammy".into()), false);
+        assert_eq!(f, SeriesFilter::Many(vec!["noble".into(), "jammy".into()]));
+    }
+
+    #[test]
+    fn series_filter_from_single_series() {
+        let f = SeriesFilter::from_args(Some("noble".into()), None, false);
+        assert_eq!(f, SeriesFilter::One("noble".into()));
+    }
+
+    // -----------------------------------------------------------------------
+    // collect_matching_tasks — successful combinations
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn collect_one_target_one_series() {
+        let tasks = sample_tasks();
+        let result = collect_matching_tasks(
+            &tasks,
+            1,
+            &TargetFilter::One("rust-alacritty".into()),
+            &SeriesFilter::One("noble".into()),
+        )
+        .unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(target_links(&result)[0].contains("noble/+source/rust-alacritty"));
+    }
+
+    #[test]
+    fn collect_one_target_one_series_case_insensitive() {
+        let tasks = sample_tasks();
+        let result = collect_matching_tasks(
+            &tasks,
+            1,
+            &TargetFilter::One("Rust-Alacritty".into()),
+            &SeriesFilter::One("Noble".into()),
+        )
+        .unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn collect_one_target_many_series() {
+        let tasks = sample_tasks();
+        let result = collect_matching_tasks(
+            &tasks,
+            1,
+            &TargetFilter::One("rust-alacritty".into()),
+            &SeriesFilter::Many(vec!["noble".into(), "jammy".into()]),
+        )
+        .unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn collect_many_targets_one_series() {
+        let tasks = sample_tasks();
+        let result = collect_matching_tasks(
+            &tasks,
+            1,
+            &TargetFilter::Many(vec!["rust-alacritty".into(), "rust-eza".into()]),
+            &SeriesFilter::One("noble".into()),
+        )
+        .unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn collect_many_targets_many_series() {
+        let tasks = sample_tasks();
+        // rust-alacritty × {noble, jammy} + rust-eza × {noble, jammy} = 4
+        let result = collect_matching_tasks(
+            &tasks,
+            1,
+            &TargetFilter::Many(vec!["rust-alacritty".into(), "rust-eza".into()]),
+            &SeriesFilter::Many(vec!["noble".into(), "jammy".into()]),
+        )
+        .unwrap();
+        assert_eq!(result.len(), 4);
+    }
+
+    #[test]
+    fn collect_all_targets_one_series() {
+        let tasks = sample_tasks();
+        // noble has rust-alacritty and rust-eza → 2 tasks
+        let result = collect_matching_tasks(
+            &tasks,
+            1,
+            &TargetFilter::All,
+            &SeriesFilter::One("noble".into()),
+        )
+        .unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn collect_one_target_all_series() {
+        let tasks = sample_tasks();
+        // rust-alacritty has tasks in noble and jammy (not focal); series-less rows excluded
+        let result = collect_matching_tasks(
+            &tasks,
+            1,
+            &TargetFilter::One("rust-alacritty".into()),
+            &SeriesFilter::All,
+        )
+        .unwrap();
+        assert_eq!(result.len(), 2);
+        for link in target_links(&result) {
+            assert!(link.contains("noble") || link.contains("jammy"));
+        }
+    }
+
+    #[test]
+    fn collect_all_targets_many_series() {
+        let tasks = sample_tasks();
+        // noble + jammy: rust-alacritty × 2 + rust-eza × 2 = 4
+        let result = collect_matching_tasks(
+            &tasks,
+            1,
+            &TargetFilter::All,
+            &SeriesFilter::Many(vec!["noble".into(), "jammy".into()]),
+        )
+        .unwrap();
+        assert_eq!(result.len(), 4);
+    }
+
+    #[test]
+    fn collect_all_targets_all_series() {
+        let tasks = sample_tasks();
+        // All series-specific tasks: noble/alacritty, jammy/alacritty,
+        //   noble/eza, jammy/eza, focal/eza = 5
+        // Series-less rows (ubuntu/+source/rust-alacritty, /rust-alacritty) excluded.
+        let result = collect_matching_tasks(
+            &tasks,
+            1,
+            &TargetFilter::All,
+            &SeriesFilter::All,
+        )
+        .unwrap();
+        assert_eq!(result.len(), 5);
+    }
+
+    #[test]
+    fn collect_many_targets_all_series() {
+        let tasks = sample_tasks();
+        // rust-eza has noble, jammy, focal → 3; rust-alacritty has noble, jammy → 2
+        let result = collect_matching_tasks(
+            &tasks,
+            1,
+            &TargetFilter::Many(vec!["rust-alacritty".into(), "rust-eza".into()]),
+            &SeriesFilter::All,
+        )
+        .unwrap();
+        assert_eq!(result.len(), 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // collect_matching_tasks — error cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn collect_invalid_single_target_returns_error() {
+        let tasks = sample_tasks();
+        let err = collect_matching_tasks(
+            &tasks,
+            42,
+            &TargetFilter::One("nonexistent-pkg".into()),
+            &SeriesFilter::One("noble".into()),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("nonexistent-pkg"), "msg: {msg}");
+        assert!(msg.contains("42"), "msg: {msg}");
+        assert!(msg.contains("rust-alacritty") || msg.contains("rust-eza"), "msg: {msg}");
+    }
+
+    #[test]
+    fn collect_invalid_one_of_many_targets_returns_error() {
+        let tasks = sample_tasks();
+        let err = collect_matching_tasks(
+            &tasks,
+            42,
+            &TargetFilter::Many(vec!["rust-alacritty".into(), "ghost-pkg".into()]),
+            &SeriesFilter::One("noble".into()),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        // The missing target must be named in the error.
+        assert!(msg.contains("ghost-pkg"), "msg: {msg}");
+        // The valid targets must appear in the 'Available targets' list.
+        assert!(msg.contains("rust-alacritty"), "msg: {msg}");
+    }
+
+    #[test]
+    fn collect_all_of_many_targets_invalid_returns_error() {
+        let tasks = sample_tasks();
+        let err = collect_matching_tasks(
+            &tasks,
+            42,
+            &TargetFilter::Many(vec!["ghost-a".into(), "ghost-b".into()]),
+            &SeriesFilter::One("noble".into()),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ghost-a") && msg.contains("ghost-b"), "msg: {msg}");
+    }
+
+    #[test]
+    fn collect_invalid_single_series_returns_error() {
+        let tasks = sample_tasks();
+        let err = collect_matching_tasks(
+            &tasks,
+            42,
+            &TargetFilter::One("rust-alacritty".into()),
+            &SeriesFilter::One("groovy".into()),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("groovy"), "msg: {msg}");
+        assert!(msg.contains("noble") || msg.contains("jammy"), "msg: {msg}");
+    }
+
+    #[test]
+    fn collect_invalid_one_of_many_series_returns_error() {
+        let tasks = sample_tasks();
+        let err = collect_matching_tasks(
+            &tasks,
+            42,
+            &TargetFilter::One("rust-alacritty".into()),
+            &SeriesFilter::Many(vec!["noble".into(), "eoan".into()]),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        // The missing series must be named in the error.
+        assert!(msg.contains("eoan"), "msg: {msg}");
+        // The valid series must appear in the 'Available series' list.
+        assert!(msg.contains("noble"), "msg: {msg}");
+    }
+
+    #[test]
+    fn collect_valid_target_and_series_but_no_intersection_returns_error() {
+        // rust-alacritty has no focal task; rust-eza has focal.
+        let tasks = sample_tasks();
+        let err = collect_matching_tasks(
+            &tasks,
+            42,
+            &TargetFilter::One("rust-alacritty".into()),
+            &SeriesFilter::One("focal".into()),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("No tasks found"), "msg: {msg}");
+    }
+
+    #[test]
+    fn collect_series_less_tasks_excluded_by_all_series() {
+        // The series-less rows (/ubuntu/+source/rust-alacritty, /rust-alacritty)
+        // must not appear when SeriesFilter::All is used.
+        let tasks = vec![
+            make_task("/ubuntu/+source/rust-alacritty"),
+            make_task("/rust-alacritty"),
+            make_task("/ubuntu/noble/+source/rust-alacritty"),
+        ];
+        let result = collect_matching_tasks(
+            &tasks,
+            1,
+            &TargetFilter::All,
+            &SeriesFilter::All,
+        )
+        .unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(target_links(&result)[0].contains("noble"));
+    }
+
+    #[test]
+    fn collect_empty_tasks_list_returns_error() {
+        let tasks: Vec<bugs::BugTask> = vec![];
+        let err = collect_matching_tasks(
+            &tasks,
+            1,
+            &TargetFilter::One("rust-alacritty".into()),
+            &SeriesFilter::One("noble".into()),
+        )
+        .unwrap_err();
+        // With no tasks the target validation fires first.
+        assert!(err.to_string().contains("rust-alacritty"));
+    }
+
+    // -----------------------------------------------------------------------
+    // truncate / build_table (pre-existing)
+    // -----------------------------------------------------------------------
 
     #[test]
     fn truncate_short_string_unchanged() {
