@@ -13,6 +13,7 @@
 //! | [`create_bug`] | File a new bug |
 //! | [`set_bug_status`] | Update the status of a bug task |
 //! | [`set_bug_importance`] | Update the importance of a bug task |
+//! | [`set_bug_assignee`] | Assign a bug task to a Launchpad user |
 //! | [`add_bug_comment`] | Add a comment to a bug |
 //! | [`get_bug_comments`] | List comments on a bug |
 
@@ -294,6 +295,27 @@ pub async fn set_bug_importance(
     client.patch_url(task_url, &params).await
 }
 
+/// Update the assignee of a bug task identified by its API self-link.
+///
+/// `assignee_url` must be the full Launchpad API URL for the person
+/// (e.g. `"https://api.launchpad.net/devel/~jdoe"`). Build it from a
+/// Launchpad username with [`LaunchpadClient::url`]:
+/// ```text
+/// client.url(&format!("/~{username}"))
+/// ```
+///
+/// The updated [`BugTask`] is returned on success.
+pub async fn set_bug_assignee(
+    client: &LaunchpadClient,
+    task_url: &str,
+    assignee_url: &str,
+) -> Result<BugTask> {
+    use std::collections::HashMap;
+    let mut params = HashMap::new();
+    params.insert("assignee_link", assignee_url);
+    client.patch_url(task_url, &params).await
+}
+
 /// Add a comment to a bug.
 ///
 /// The Launchpad `newMessage` operation returns `201 Created` with an empty
@@ -391,6 +413,46 @@ fn urlenc(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
+/// Parse a Launchpad `target_link` URL and return `(target_name, series)`.
+///
+/// Launchpad source-package tasks have two URL forms:
+///
+/// | URL path (relative to API root)        | target_name | series        |
+/// |----------------------------------------|-------------|---------------|
+/// | `/ubuntu/+source/{pkg}`                | `pkg`       | `None`        |
+/// | `/ubuntu/{series}/+source/{pkg}`       | `pkg`       | `Some(series)`|
+/// | `/{project}`                           | `project`   | `None`        |
+///
+/// The returned `target_name` is the short package or project name that matches
+/// the value accepted by `--target` on the `set-status`, `set-importance`, and
+/// `set-assignee` sub-commands.
+pub fn parse_target_link(url: &str) -> (String, Option<String>) {
+    // Strip common API base URL prefixes and leading slashes.
+    let stripped = url
+        .trim_start_matches("https://api.launchpad.net/devel")
+        .trim_start_matches("https://api.staging.launchpad.net/devel")
+        .trim_start_matches('/');
+
+    let parts: Vec<&str> = stripped.split('/').filter(|s| !s.is_empty()).collect();
+
+    if let Some(src_idx) = parts.iter().position(|&p| p == "+source") {
+        // Source-package task: name is the segment after "+source".
+        let pkg = parts.get(src_idx + 1).unwrap_or(&"").to_string();
+        // Series is the segment between the distro (index 0) and "+source" when
+        // src_idx > 1 (i.e. the path is /distro/series/+source/pkg).
+        let series = if src_idx > 1 {
+            parts.get(1).map(|s| s.to_string())
+        } else {
+            None
+        };
+        (pkg, series)
+    } else {
+        // Project task: the name is the first path segment.
+        let name = parts.first().unwrap_or(&"").to_string();
+        (name, None)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -457,6 +519,32 @@ mod tests {
     fn urlenc_encodes_spaces_and_special_chars() {
         assert!(!urlenc("Fix Released").contains(' '));
         assert!(!urlenc("Won't Fix").contains('\''));
+    }
+
+    #[test]
+    fn parse_target_link_project() {
+        let (name, series) =
+            parse_target_link("https://api.launchpad.net/devel/rust-alacritty");
+        assert_eq!(name, "rust-alacritty");
+        assert_eq!(series, None);
+    }
+
+    #[test]
+    fn parse_target_link_ubuntu_source_no_series() {
+        let (name, series) = parse_target_link(
+            "https://api.launchpad.net/devel/ubuntu/+source/rust-alacritty",
+        );
+        assert_eq!(name, "rust-alacritty");
+        assert_eq!(series, None);
+    }
+
+    #[test]
+    fn parse_target_link_ubuntu_source_with_series() {
+        let (name, series) = parse_target_link(
+            "https://api.launchpad.net/devel/ubuntu/noble/+source/rust-alacritty",
+        );
+        assert_eq!(name, "rust-alacritty");
+        assert_eq!(series, Some("noble".to_string()));
     }
 
     #[test]

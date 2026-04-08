@@ -161,8 +161,10 @@ impl LaunchpadClient {
     /// Perform an authenticated PATCH request (used to update Launchpad resources).
     ///
     /// The Launchpad REST API requires `PATCH` bodies to be `application/json`.
-    /// The `If-Match: *` header is included to satisfy Launchpad's optimistic
-    /// concurrency check without requiring a prior `GET` to obtain an `ETag`.
+    /// No `If-Match` header is sent: Launchpad applies the change unconditionally
+    /// when the header is absent.  Sending `If-Match: *` would cause Launchpad to
+    /// respond with 412 because it treats the literal string `"*"` as an ETag
+    /// value that never matches, rather than honouring the RFC wildcard semantics.
     pub async fn patch_url<T: DeserializeOwned>(
         &self,
         url: &str,
@@ -172,7 +174,6 @@ impl LaunchpadClient {
             .http
             .patch(url)
             .header("Accept", "application/json")
-            .header("If-Match", "*")
             .json(params);
 
         if let Some(creds) = &self.credentials {
@@ -462,6 +463,15 @@ impl LaunchpadClient {
                 .and_then(|s| s.parse::<u64>().ok());
             return Err(LpError::RateLimit { retry_after_secs: retry_after });
         }
+        if status == StatusCode::PRECONDITION_FAILED {
+            return Err(LpError::Api {
+                status: 412,
+                message: "Precondition failed: the resource was modified by another \
+                          client since it was last fetched. Retry the operation to \
+                          apply your change to the current version."
+                    .to_string(),
+            });
+        }
         if !status.is_success() {
             let code = status.as_u16();
             let message = resp.text().await.unwrap_or_else(|_| status.to_string());
@@ -509,6 +519,15 @@ impl LaunchpadClient {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok());
             return Err(LpError::RateLimit { retry_after_secs: retry_after });
+        }
+        if status == StatusCode::PRECONDITION_FAILED {
+            return Err(LpError::Api {
+                status: 412,
+                message: "Precondition failed: the resource was modified by another \
+                          client since it was last fetched. Retry the operation to \
+                          apply your change to the current version."
+                    .to_string(),
+            });
         }
         if !status.is_success() {
             let code = status.as_u16();

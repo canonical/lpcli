@@ -179,9 +179,13 @@ enum BugCommand {
         /// The Launchpad bug number.
         #[arg(short, long)]
         bug_id: u64,
-        /// Target project or distribution to find the bug task for.
+        /// Target name as shown by 'lpcli bug tasks' (e.g. "rust-alacritty", "ubuntu").
         #[arg(short, long)]
         target: String,
+        /// Ubuntu series to update (e.g. "noble", "jammy").
+        /// Required when the target has tasks for multiple series.
+        #[arg(long)]
+        series: Option<String>,
         /// New status (e.g. "Confirmed", "Fix Released", "In Progress").
         #[arg(short, long)]
         status: String,
@@ -191,12 +195,36 @@ enum BugCommand {
         /// The Launchpad bug number.
         #[arg(short, long)]
         bug_id: u64,
-        /// Target project or distribution to find the bug task for.
+        /// Target name as shown by 'lpcli bug tasks' (e.g. "rust-alacritty", "ubuntu").
         #[arg(short, long)]
         target: String,
+        /// Ubuntu series to update (e.g. "noble", "jammy").
+        /// Required when the target has tasks for multiple series.
+        #[arg(long)]
+        series: Option<String>,
         /// New importance (e.g. "Critical", "High", "Medium", "Low").
         #[arg(short, long)]
         importance: String,
+    },
+    /// Assign a bug task to a Launchpad user.
+    SetAssignee {
+        /// The Launchpad bug number.
+        #[arg(short, long)]
+        bug_id: u64,
+        /// Target name as shown by 'lpcli bug tasks' (e.g. "rust-alacritty", "ubuntu").
+        /// Required unless --all-tasks is set.
+        #[arg(short, long)]
+        target: Option<String>,
+        /// Ubuntu series to update (e.g. "noble", "jammy").
+        /// Required when the target has tasks for multiple series.
+        #[arg(long)]
+        series: Option<String>,
+        /// Launchpad username to assign (without ~).
+        #[arg(short, long)]
+        name: String,
+        /// Assign all bug targets of this bug to the specified user.
+        #[arg(long)]
+        all_targets: bool,
     },
     /// Subscribe a person to a bug.
     Subscribe {
@@ -781,13 +809,45 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
 
         BugCommand::Tasks { bug_id } => {
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let mut table = build_table(vec!["Target", "Status", "Importance", "Assignee"]);
+            let mut table = build_table(vec!["Target", "Series", "Status", "Importance", "Assignee"]);
             for t in &tasks {
+                // Use parse_target_link to extract the short package/project name
+                // and the optional Ubuntu series. The target name is the exact value
+                // accepted by --target in set-status, set-importance, and set-assignee.
+                let (target_name, series) =
+                    bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
+
+                // Only show tasks that are scoped to a specific Ubuntu series;
+                // skip distribution-level tasks (where series is None) to avoid
+                // duplicating information already represented by the per-series rows.
+                let series_str = match series {
+                    Some(s) => s,
+                    None => continue,
+                };
+
+                let target_str = if !target_name.is_empty() {
+                    target_name
+                } else {
+                    t.bug_target_display_name.as_deref().unwrap_or("—").to_string()
+                };
+
+                // Show only the Launchpad username (the path segment after "~") rather
+                // than the full API URL, e.g. "petrakat" instead of
+                // "https://api.launchpad.net/devel/~petrakat".
+                let assignee_str = t
+                    .assignee_link
+                    .as_deref()
+                    .and_then(|url| {
+                        url.rsplit('/').next().map(|seg| seg.trim_start_matches('~').to_string())
+                    })
+                    .unwrap_or_else(|| "—".to_string());
+
                 table.add_row(vec![
-                    t.bug_target_display_name.as_deref().unwrap_or("—"),
-                    t.status.as_deref().unwrap_or("—"),
-                    t.importance.as_deref().unwrap_or("—"),
-                    t.assignee_link.as_deref().unwrap_or("—"),
+                    target_str,
+                    series_str,
+                    t.status.as_deref().unwrap_or("—").to_string(),
+                    t.importance.as_deref().unwrap_or("—").to_string(),
+                    assignee_str,
                 ]);
             }
             println!("{table}");
@@ -877,27 +937,11 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
         BugCommand::SetStatus {
             bug_id,
             target,
+            series,
             status,
         } => {
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let task = tasks
-                .iter()
-                .find(|t| {
-                    t.bug_target_display_name
-                        .as_deref()
-                        .map(|n| n.eq_ignore_ascii_case(&target))
-                        .unwrap_or(false)
-                        || t.target_link
-                            .as_deref()
-                            .and_then(|u| u.rsplit('/').next())
-                            .map(|n| n.eq_ignore_ascii_case(&target))
-                            .unwrap_or(false)
-                })
-                .ok_or_else(|| {
-                    lpcli::error::LpError::NotFound(format!(
-                        "No task for target '{target}' on bug #{bug_id}"
-                    ))
-                })?;
+            let task = find_bug_task(&tasks, bug_id, &target, series.as_deref())?;
             let task_url = task
                 .self_link
                 .as_deref()
@@ -915,27 +959,11 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
         BugCommand::SetImportance {
             bug_id,
             target,
+            series,
             importance,
         } => {
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let task = tasks
-                .iter()
-                .find(|t| {
-                    t.bug_target_display_name
-                        .as_deref()
-                        .map(|n| n.eq_ignore_ascii_case(&target))
-                        .unwrap_or(false)
-                        || t.target_link
-                            .as_deref()
-                            .and_then(|u| u.rsplit('/').next())
-                            .map(|n| n.eq_ignore_ascii_case(&target))
-                            .unwrap_or(false)
-                })
-                .ok_or_else(|| {
-                    lpcli::error::LpError::NotFound(format!(
-                        "No task for target '{target}' on bug #{bug_id}"
-                    ))
-                })?;
+            let task = find_bug_task(&tasks, bug_id, &target, series.as_deref())?;
             let task_url = task
                 .self_link
                 .as_deref()
@@ -948,6 +976,51 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 "✓".green().bold(),
                 updated.importance.as_deref().unwrap_or(&importance)
             );
+        }
+
+        BugCommand::SetAssignee {
+            bug_id,
+            target,
+            series,
+            name,
+            all_targets,
+        } => {
+            let assignee_url = client.url(&format!("/~{name}"));
+            let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
+            if all_targets {
+                for task in &tasks {
+                    let task_url =
+                        task.self_link.as_deref().ok_or_else(|| {
+                            lpcli::error::LpError::Other(
+                                "Bug task has no self_link".into(),
+                            )
+                        })?;
+                    bugs::set_bug_assignee(&client, task_url, &assignee_url).await?;
+                }
+                println!(
+                    "{} Assigned all targets of bug #{bug_id} to ~{name}.",
+                    "✓".green().bold()
+                );
+            } else {
+                let target = target.ok_or_else(|| {
+                    lpcli::error::LpError::Other(
+                        "Either --target or --all-targets must be specified".into(),
+                    )
+                })?;
+                let task =
+                    find_bug_task(&tasks, bug_id, &target, series.as_deref())?;
+                let task_url =
+                    task.self_link.as_deref().ok_or_else(|| {
+                        lpcli::error::LpError::Other(
+                            "Bug task has no self_link".into(),
+                        )
+                    })?;
+                bugs::set_bug_assignee(&client, task_url, &assignee_url).await?;
+                println!(
+                    "{} Assigned bug #{bug_id} ({target}) to ~{name}.",
+                    "✓".green().bold()
+                );
+            }
         }
 
         BugCommand::Subscribe { bug_id, name } => {
@@ -2089,6 +2162,96 @@ fn build_table(headers: Vec<&str>) -> Table {
     table.load_preset(UTF8_FULL_CONDENSED);
     table.set_header(headers);
     table
+}
+
+/// Find the single bug task that matches `target` and, optionally, `series`.
+///
+/// * If `series` is `None` and exactly one task matches `target`, that task is
+///   returned.
+/// * If `series` is `None` and multiple tasks match `target` (e.g. the same
+///   source package appears in more than one Ubuntu series), an error is
+///   returned listing the available series so the caller can retry with
+///   `--series`.
+/// * If `series` is `Some(s)` and no task has that series an error is returned
+///   listing the valid series for `target` on this bug.
+fn find_bug_task<'a>(
+    tasks: &'a [bugs::BugTask],
+    bug_id: u64,
+    target: &str,
+    series: Option<&str>,
+) -> std::result::Result<&'a bugs::BugTask, lpcli::error::LpError> {
+    // Collect every task whose target name (short package/project name) matches.
+    let matching: Vec<&bugs::BugTask> = tasks
+        .iter()
+        .filter(|t| {
+            let (task_target, _) =
+                bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
+            task_target.eq_ignore_ascii_case(target)
+        })
+        .collect();
+
+    match series {
+        Some(s) => {
+            // Find the task whose series matches the requested series name.
+            matching
+                .iter()
+                .find(|t| {
+                    let (_, task_series) =
+                        bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
+                    task_series
+                        .as_deref()
+                        .map(|ts| ts.eq_ignore_ascii_case(s))
+                        .unwrap_or(false)
+                })
+                .copied()
+                .ok_or_else(|| {
+                    // Build a list of series that do exist for this target so the
+                    // user can see what valid choices are.
+                    let available: Vec<String> = matching
+                        .iter()
+                        .filter_map(|t| {
+                            let (_, ts) =
+                                bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
+                            ts
+                        })
+                        .collect();
+                    if available.is_empty() {
+                        lpcli::error::LpError::NotFound(format!(
+                            "Series '{s}' is not valid for target '{target}' on bug \
+                             #{bug_id}: that target has no series-specific tasks."
+                        ))
+                    } else {
+                        lpcli::error::LpError::NotFound(format!(
+                            "Series '{s}' is not valid for target '{target}' on bug \
+                             #{bug_id}. Valid series: {}.",
+                            available.join(", ")
+                        ))
+                    }
+                })
+        }
+        None => match matching.len() {
+            0 => Err(lpcli::error::LpError::NotFound(format!(
+                "No task for target '{target}' on bug #{bug_id}."
+            ))),
+            1 => Ok(matching[0]),
+            _ => {
+                // Multiple tasks match; require --series to disambiguate.
+                let series_list: Vec<String> = matching
+                    .iter()
+                    .filter_map(|t| {
+                        let (_, ts) =
+                            bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
+                        ts
+                    })
+                    .collect();
+                Err(lpcli::error::LpError::Other(format!(
+                    "Multiple tasks found for target '{target}' on bug #{bug_id}. \
+                     Use --series to specify which one. Available series: {}.",
+                    series_list.join(", ")
+                )))
+            }
+        },
+    }
 }
 
 /// Truncate a string to at most `max` characters, appending `…` if truncated.
