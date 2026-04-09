@@ -11,6 +11,8 @@
 //! | [`get_bug_tasks`] | List all bug tasks (project assignments) for a bug |
 //! | [`search_bugs`] | Search bugs on a project or source package |
 //! | [`create_bug`] | File a new bug |
+//! | [`add_bug_task`] | Add a new bug task to an existing bug |
+//! | [`delete_bug_task`] | Delete a bug task by its API self-link |
 //! | [`set_bug_status`] | Update the status of a bug task |
 //! | [`set_bug_importance`] | Update the importance of a bug task |
 //! | [`set_bug_assignee`] | Assign a bug task to a Launchpad user |
@@ -269,6 +271,36 @@ pub async fn create_bug(
     params.insert("target", target_url.as_str());
     let location = client.post_created_location("/bugs", &params).await?;
     client.get_url(&location).await
+}
+
+/// Add a new bug task to an existing bug.
+///
+/// `target_url` must be the full Launchpad API URL of the target
+/// (e.g. `"https://api.launchpad.net/devel/ubuntu/noble/+source/linux"`).
+///
+/// Returns the newly created [`BugTask`].
+pub async fn add_bug_task(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    target_url: &str,
+) -> Result<BugTask> {
+    use std::collections::HashMap;
+    let mut params = HashMap::new();
+    params.insert("ws.op", "addTask");
+    params.insert("target", target_url);
+    let location = client
+        .post_created_location(&format!("/bugs/{bug_id}"), &params)
+        .await?;
+    client.get_url(&location).await
+}
+
+/// Delete a bug task identified by its API self-link.
+///
+/// The `task_url` must be the full Launchpad API URL returned in the
+/// `self_link` field of a [`BugTask`] (e.g. the value from
+/// [`get_bug_tasks`]).
+pub async fn delete_bug_task(client: &LaunchpadClient, task_url: &str) -> Result<()> {
+    client.delete_url_ok(task_url).await
 }
 
 /// Update the status of a bug task identified by its API self-link.

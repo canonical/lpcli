@@ -162,7 +162,7 @@ enum BugCommand {
     /// Create a new bug on a project or distribution.
     Create {
         /// Project or distribution name (e.g. "ubuntu", "launchpad").
-        #[arg(short, long)]
+        #[arg(short, long, default_value = "ubuntu")]
         target: String,
         /// Source package name (only meaningful for distributions).
         #[arg(short, long)]
@@ -320,6 +320,63 @@ enum BugCommand {
         /// The Launchpad bug number.
         #[arg(short, long)]
         bug_id: u64,
+    },
+    /// Add a new bug task to a bug, optionally targeting a specific series.
+    #[command(
+        group(ArgGroup::new("series_spec")
+            .args(["series", "many_series"])),
+    )]
+    AddTask {
+        /// The Launchpad bug number.
+        #[arg(short, long)]
+        bug_id: u64,
+        /// Project or distribution name (e.g. "ubuntu", "launchpad").
+        #[arg(short, long, default_value = "ubuntu")]
+        target: String,
+        /// Source package name (only meaningful for distributions).
+        #[arg(short, long)]
+        package: Option<String>,
+        /// Single Ubuntu series (e.g. "noble").
+        /// Mutually exclusive with --many-series.
+        #[arg(long)]
+        series: Option<String>,
+        /// Comma-separated list of Ubuntu series (e.g. "noble, jammy").
+        /// Mutually exclusive with --series.
+        #[arg(long)]
+        many_series: Option<String>,
+        /// Task importance (e.g. "Undecided", "Critical", "High", "Medium", "Low").
+        #[arg(long)]
+        importance: Option<String>,
+        /// Task status (e.g. "New", "Confirmed", "In Progress").
+        #[arg(long)]
+        status: Option<String>,
+        /// Launchpad username to assign (without ~).
+        #[arg(long)]
+        assignee: Option<String>,
+    },
+    /// Delete bug tasks from a bug matching the given target and optional series.
+    #[command(
+        group(ArgGroup::new("series_spec")
+            .args(["series", "many_series"])),
+    )]
+    DeleteTask {
+        /// The Launchpad bug number.
+        #[arg(short, long)]
+        bug_id: u64,
+        /// Project or distribution name (e.g. "ubuntu", "launchpad").
+        #[arg(short, long, default_value = "ubuntu")]
+        target: String,
+        /// Source package name (only meaningful for distributions).
+        #[arg(short, long)]
+        package: Option<String>,
+        /// Single Ubuntu series (e.g. "noble").
+        /// Mutually exclusive with --many-series.
+        #[arg(long)]
+        series: Option<String>,
+        /// Comma-separated list of Ubuntu series (e.g. "noble, jammy").
+        /// Mutually exclusive with --series.
+        #[arg(long)]
+        many_series: Option<String>,
     },
 }
 
@@ -880,46 +937,69 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
 
         BugCommand::Tasks { bug_id } => {
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let mut table = build_table(vec!["Target", "Series", "Status", "Importance", "Assignee"]);
+
+            // Parse every task into (target_name, series, task) and collect
+            // into a BTreeMap keyed by target_name so tasks are grouped by
+            // target and ordered deterministically.
+            struct ParsedTask<'a> {
+                series: Option<String>,
+                task: &'a bugs::BugTask,
+            }
+            let mut by_target: std::collections::BTreeMap<String, Vec<ParsedTask>> =
+                std::collections::BTreeMap::new();
             for t in &tasks {
-                // Use parse_target_link to extract the short package/project name
-                // and the optional Ubuntu series. The target name is the exact value
-                // accepted by --target in set-status, set-importance, and set-assignee.
                 let (target_name, series) =
                     bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
-
-                // Only show tasks that are scoped to a specific Ubuntu series;
-                // skip distribution-level tasks (where series is None) to avoid
-                // duplicating information already represented by the per-series rows.
-                let series_str = match series {
-                    Some(s) => s,
-                    None => continue,
-                };
-
-                let target_str = if !target_name.is_empty() {
+                let key = if !target_name.is_empty() {
                     target_name
                 } else {
                     t.bug_target_display_name.as_deref().unwrap_or("—").to_string()
                 };
+                by_target
+                    .entry(key)
+                    .or_default()
+                    .push(ParsedTask { series, task: t });
+            }
 
-                // Show only the Launchpad username (the path segment after "~") rather
-                // than the full API URL, e.g. "petrakat" instead of
-                // "https://api.launchpad.net/devel/~petrakat".
-                let assignee_str = t
-                    .assignee_link
-                    .as_deref()
-                    .and_then(|url| {
-                        url.rsplit('/').next().map(|seg| seg.trim_start_matches('~').to_string())
-                    })
-                    .unwrap_or_else(|| "—".to_string());
+            // Within each target group: the series-less task first, then
+            // series tasks ordered alphabetically.
+            for tasks_for_target in by_target.values_mut() {
+                tasks_for_target.sort_by(|a, b| match (&a.series, &b.series) {
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => std::cmp::Ordering::Less,
+                    (Some(_), None) => std::cmp::Ordering::Greater,
+                    (Some(sa), Some(sb)) => sa.cmp(sb),
+                });
+            }
 
-                table.add_row(vec![
-                    target_str,
-                    series_str,
-                    t.status.as_deref().unwrap_or("—").to_string(),
-                    t.importance.as_deref().unwrap_or("—").to_string(),
-                    assignee_str,
-                ]);
+            let mut table = build_table(vec!["Target", "Series", "Status", "Importance", "Assignee"]);
+            for (target_name, tasks_for_target) in &by_target {
+                for pt in tasks_for_target {
+                    // Tasks with a series are indented; base tasks are not.
+                    let display_target = match &pt.series {
+                        None => target_name.clone(),
+                        Some(_) => format!("    {target_name}"),
+                    };
+                    let series_str = pt.series.as_deref().unwrap_or("").to_string();
+
+                    // Show only the Launchpad username rather than the full API URL.
+                    let assignee_str = pt
+                        .task
+                        .assignee_link
+                        .as_deref()
+                        .and_then(|url| {
+                            url.rsplit('/').next().map(|seg| seg.trim_start_matches('~').to_string())
+                        })
+                        .unwrap_or_else(|| "—".to_string());
+
+                    table.add_row(vec![
+                        display_target,
+                        series_str,
+                        pt.task.status.as_deref().unwrap_or("—").to_string(),
+                        pt.task.importance.as_deref().unwrap_or("—").to_string(),
+                        assignee_str,
+                    ]);
+                }
             }
             println!("{table}");
         }
@@ -1134,6 +1214,221 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 table.add_row(vec![person, by, &date]);
             }
             println!("{table}");
+        }
+
+        BugCommand::AddTask {
+            bug_id,
+            target,
+            package,
+            series,
+            many_series,
+            importance,
+            status,
+            assignee,
+        } => {
+            // Build the list of target URLs to add tasks for.  When no series
+            // is supplied we add a single task directly against the base target
+            // (i.e. the distribution or project without a series component).
+            enum TaskTarget {
+                Base,
+                Series(Vec<String>),
+            }
+            let task_target = match (series, many_series) {
+                (Some(s), _) => TaskTarget::Series(vec![s]),
+                (None, Some(many)) => TaskTarget::Series(parse_comma_separated(&many)),
+                (None, None) => TaskTarget::Base,
+            };
+
+            // Resolve to a list of (label, url) pairs.
+            let targets: Vec<(String, String)> = match task_target {
+                TaskTarget::Base => {
+                    let path = if let Some(pkg) = &package {
+                        format!("/{target}/+source/{pkg}")
+                    } else {
+                        format!("/{target}")
+                    };
+                    vec![(target.clone(), client.url(&path))]
+                }
+                TaskTarget::Series(series_list) => series_list
+                    .into_iter()
+                    .map(|s| {
+                        let path = if let Some(pkg) = &package {
+                            format!("/{target}/{s}/+source/{pkg}")
+                        } else {
+                            format!("/{target}/{s}")
+                        };
+                        let url = client.url(&path);
+                        (s, url)
+                    })
+                    .collect(),
+            };
+
+            let mut created = 0usize;
+            for (series_name, target_url) in &targets {
+                let task = match bugs::add_bug_task(&client, bug_id, target_url).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!(
+                            "{} Failed to add task for series '{}' on bug #{bug_id}: {e}",
+                            "✗".red().bold(),
+                            series_name,
+                        );
+                        continue;
+                    }
+                };
+
+                let task_url = match task.self_link.as_deref() {
+                    Some(url) => url.to_string(),
+                    None => {
+                        eprintln!(
+                            "{} Task for series '{}' has no self_link; skipping attribute updates.",
+                            "!".yellow().bold(),
+                            series_name,
+                        );
+                        created += 1;
+                        continue;
+                    }
+                };
+
+                if let Some(imp) = &importance {
+                    if let Err(e) = bugs::set_bug_importance(&client, &task_url, imp).await {
+                        eprintln!(
+                            "{} Failed to set importance on task for '{}': {e}",
+                            "!".yellow().bold(),
+                            series_name,
+                        );
+                    }
+                }
+                if let Some(st) = &status {
+                    if let Err(e) = bugs::set_bug_status(&client, &task_url, st).await {
+                        eprintln!(
+                            "{} Failed to set status on task for '{}': {e}",
+                            "!".yellow().bold(),
+                            series_name,
+                        );
+                    }
+                }
+                if let Some(assignee_name) = &assignee {
+                    let assignee_api_url = client.url(&format!("/~{assignee_name}"));
+                    if let Err(e) =
+                        bugs::set_bug_assignee(&client, &task_url, &assignee_api_url).await
+                    {
+                        eprintln!(
+                            "{} Failed to set assignee on task for '{}': {e}",
+                            "!".yellow().bold(),
+                            series_name,
+                        );
+                    }
+                }
+
+                let display_name = task
+                    .bug_target_display_name
+                    .as_deref()
+                    .unwrap_or(series_name.as_str());
+                println!(
+                    "{} Bug task added: {}",
+                    "✓".green().bold(),
+                    display_name,
+                );
+                created += 1;
+            }
+
+            if created == 0 {
+                return Err(lpcli::error::LpError::Other(format!(
+                    "No bug tasks were created on bug #{bug_id}."
+                )));
+            }
+        }
+
+        BugCommand::DeleteTask {
+            bug_id,
+            target,
+            package,
+            series,
+            many_series,
+        } => {
+            // The effective target name is the package name when a package is
+            // provided, otherwise the distribution/project name — matching how
+            // parse_target_link returns the package name (not the distro) for
+            // source-package tasks.
+            let effective_target = match &package {
+                Some(pkg) => pkg.clone(),
+                None => target.clone(),
+            };
+            let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
+
+            // When no series is given, delete every task that matches the
+            // target regardless of series.  Otherwise apply the series filter.
+            let matched: Vec<&bugs::BugTask> = if series.is_none() && many_series.is_none() {
+                let parsed: Vec<(&bugs::BugTask, String, Option<String>)> = tasks
+                    .iter()
+                    .map(|t| {
+                        let (tgt, ser) =
+                            bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
+                        (t, tgt, ser)
+                    })
+                    .collect();
+                let result: Vec<&bugs::BugTask> = parsed
+                    .iter()
+                    .filter(|(_, tgt, _)| tgt.eq_ignore_ascii_case(&effective_target))
+                    .map(|(t, _, _)| *t)
+                    .collect();
+                if result.is_empty() {
+                    return Err(lpcli::error::LpError::NotFound(format!(
+                        "No tasks found for target '{}' on bug #{bug_id}.",
+                        effective_target,
+                    )));
+                }
+                result
+            } else {
+                let series_filter = match (series, many_series) {
+                    (Some(s), _) => SeriesFilter::One(s),
+                    (None, Some(many)) => SeriesFilter::Many(parse_comma_separated(&many)),
+                    (None, None) => unreachable!(),
+                };
+                let target_filter = TargetFilter::One(effective_target);
+                collect_matching_tasks(&tasks, bug_id, &target_filter, &series_filter)?
+            };
+
+            let mut deleted = 0usize;
+            let mut errors = 0usize;
+            for task in &matched {
+                let task_url = task.self_link.as_deref().ok_or_else(|| {
+                    lpcli::error::LpError::Other("Bug task has no self_link".into())
+                })?;
+                let display_name = task
+                    .bug_target_display_name
+                    .as_deref()
+                    .unwrap_or("(unknown)");
+                match bugs::delete_bug_task(&client, task_url).await {
+                    Ok(()) => {
+                        println!(
+                            "{} Deleted bug task: {}",
+                            "✓".green().bold(),
+                            display_name,
+                        );
+                        deleted += 1;
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{} Failed to delete task '{}': {e}",
+                            "✗".red().bold(),
+                            display_name,
+                        );
+                        errors += 1;
+                    }
+                }
+            }
+
+            println!(
+                "\n{} Deleted {deleted} task(s) on bug #{bug_id}{}.",
+                "✓".green().bold(),
+                if errors > 0 {
+                    format!(", {} error(s)", errors)
+                } else {
+                    String::new()
+                },
+            );
         }
     }
     Ok(())
