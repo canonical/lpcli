@@ -181,7 +181,7 @@ enum BugCommand {
             .args(["target", "many_targets", "all_targets"])),
         group(ArgGroup::new("series_spec")
             .required(true)
-            .args(["series", "many_series", "all_series"])),
+            .args(["series", "many_series", "all_series", "no_series"])),
     )]
     SetStatus {
         /// The Launchpad bug number.
@@ -200,17 +200,24 @@ enum BugCommand {
         #[arg(long)]
         all_targets: bool,
         /// Single Ubuntu series to update (e.g. "noble").
-        /// Mutually exclusive with --many-series and --all-series.
+        /// Mutually exclusive with --many-series, --all-series, and --no-series.
         #[arg(long)]
         series: Option<String>,
         /// Comma-separated list of Ubuntu series (e.g. "noble, jammy").
-        /// Mutually exclusive with --series and --all-series.
+        /// Mutually exclusive with --series, --all-series, and --no-series.
         #[arg(long)]
         many_series: Option<String>,
-        /// Apply to every Ubuntu series present in the bug's current tasks.
-        /// Mutually exclusive with --series and --many-series.
+        /// Apply to every Ubuntu series present in the bug's current tasks,
+        /// including series-less tasks for the matching targets.
+        /// Mutually exclusive with --series, --many-series, and --no-series.
         #[arg(long)]
         all_series: bool,
+        /// Only apply to series-less tasks for the matching targets
+        /// (e.g. the distribution-level /ubuntu/+source/pkg task or an
+        /// upstream project task). Mutually exclusive with --series,
+        /// --many-series, and --all-series.
+        #[arg(long)]
+        no_series: bool,
         /// New status (e.g. "Confirmed", "Fix Released", "In Progress").
         #[arg(short, long)]
         status: String,
@@ -222,7 +229,7 @@ enum BugCommand {
             .args(["target", "many_targets", "all_targets"])),
         group(ArgGroup::new("series_spec")
             .required(true)
-            .args(["series", "many_series", "all_series"])),
+            .args(["series", "many_series", "all_series", "no_series"])),
     )]
     SetImportance {
         /// The Launchpad bug number.
@@ -241,17 +248,24 @@ enum BugCommand {
         #[arg(long)]
         all_targets: bool,
         /// Single Ubuntu series to update (e.g. "noble").
-        /// Mutually exclusive with --many-series and --all-series.
+        /// Mutually exclusive with --many-series, --all-series, and --no-series.
         #[arg(long)]
         series: Option<String>,
         /// Comma-separated list of Ubuntu series (e.g. "noble, jammy").
-        /// Mutually exclusive with --series and --all-series.
+        /// Mutually exclusive with --series, --all-series, and --no-series.
         #[arg(long)]
         many_series: Option<String>,
-        /// Apply to every Ubuntu series present in the bug's current tasks.
-        /// Mutually exclusive with --series and --many-series.
+        /// Apply to every Ubuntu series present in the bug's current tasks,
+        /// including series-less tasks for the matching targets.
+        /// Mutually exclusive with --series, --many-series, and --no-series.
         #[arg(long)]
         all_series: bool,
+        /// Only apply to series-less tasks for the matching targets
+        /// (e.g. the distribution-level /ubuntu/+source/pkg task or an
+        /// upstream project task). Mutually exclusive with --series,
+        /// --many-series, and --all-series.
+        #[arg(long)]
+        no_series: bool,
         /// New importance (e.g. "Critical", "High", "Medium", "Low").
         #[arg(short, long)]
         importance: String,
@@ -263,7 +277,7 @@ enum BugCommand {
             .args(["target", "many_targets", "all_targets"])),
         group(ArgGroup::new("series_spec")
             .required(true)
-            .args(["series", "many_series", "all_series"])),
+            .args(["series", "many_series", "all_series", "no_series"])),
     )]
     SetAssignee {
         /// The Launchpad bug number.
@@ -282,17 +296,24 @@ enum BugCommand {
         #[arg(long)]
         all_targets: bool,
         /// Single Ubuntu series to update (e.g. "noble").
-        /// Mutually exclusive with --many-series and --all-series.
+        /// Mutually exclusive with --many-series, --all-series, and --no-series.
         #[arg(long)]
         series: Option<String>,
         /// Comma-separated list of Ubuntu series (e.g. "noble, jammy").
-        /// Mutually exclusive with --series and --all-series.
+        /// Mutually exclusive with --series, --all-series, and --no-series.
         #[arg(long)]
         many_series: Option<String>,
-        /// Apply to every Ubuntu series present in the bug's current tasks.
-        /// Mutually exclusive with --series and --many-series.
+        /// Apply to every Ubuntu series present in the bug's current tasks,
+        /// including series-less tasks for the matching targets.
+        /// Mutually exclusive with --series, --many-series, and --no-series.
         #[arg(long)]
         all_series: bool,
+        /// Only apply to series-less tasks for the matching targets
+        /// (e.g. the distribution-level /ubuntu/+source/pkg task or an
+        /// upstream project task). Mutually exclusive with --series,
+        /// --many-series, and --all-series.
+        #[arg(long)]
+        no_series: bool,
         /// Launchpad username to assign (without ~).
         #[arg(short, long)]
         name: String,
@@ -1093,10 +1114,11 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             series,
             many_series,
             all_series,
+            no_series,
             status,
         } => {
             let target_filter = TargetFilter::from_args(target, many_targets, all_targets);
-            let series_filter = SeriesFilter::from_args(series, many_series, all_series);
+            let series_filter = SeriesFilter::from_args(series, many_series, all_series, no_series);
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
             let matched =
                 collect_matching_tasks(&tasks, bug_id, &target_filter, &series_filter)?;
@@ -1122,10 +1144,11 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             series,
             many_series,
             all_series,
+            no_series,
             importance,
         } => {
             let target_filter = TargetFilter::from_args(target, many_targets, all_targets);
-            let series_filter = SeriesFilter::from_args(series, many_series, all_series);
+            let series_filter = SeriesFilter::from_args(series, many_series, all_series, no_series);
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
             let matched =
                 collect_matching_tasks(&tasks, bug_id, &target_filter, &series_filter)?;
@@ -1151,10 +1174,11 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             series,
             many_series,
             all_series,
+            no_series,
             name,
         } => {
             let target_filter = TargetFilter::from_args(target, many_targets, all_targets);
-            let series_filter = SeriesFilter::from_args(series, many_series, all_series);
+            let series_filter = SeriesFilter::from_args(series, many_series, all_series, no_series);
             let assignee_url = client.url(&format!("/~{name}"));
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
             let matched =
@@ -2576,6 +2600,8 @@ enum SeriesFilter {
     Many(Vec<String>),
     /// Every series that already has a task on this bug.
     All,
+    /// Only series-less tasks (no Ubuntu series component in the target link).
+    NoSeries,
 }
 
 impl SeriesFilter {
@@ -2583,13 +2609,15 @@ impl SeriesFilter {
         series: Option<String>,
         many_series: Option<String>,
         all_series: bool,
+        no_series: bool,
     ) -> Self {
-        match (all_series, many_series, series) {
-            (true, _, _) => SeriesFilter::All,
-            (false, Some(many), _) => SeriesFilter::Many(parse_comma_separated(&many)),
-            (false, None, Some(s)) => SeriesFilter::One(s),
+        match (all_series, no_series, many_series, series) {
+            (true, _, _, _) => SeriesFilter::All,
+            (_, true, _, _) => SeriesFilter::NoSeries,
+            (false, false, Some(many), _) => SeriesFilter::Many(parse_comma_separated(&many)),
+            (false, false, None, Some(s)) => SeriesFilter::One(s),
             // Clap's required ArgGroup prevents this branch; defensive fallback.
-            (false, None, None) => SeriesFilter::All,
+            (false, false, None, None) => SeriesFilter::All,
         }
     }
 }
@@ -2600,10 +2628,11 @@ impl SeriesFilter {
 /// actually present on the bug before filtering, so callers receive an
 /// actionable error message instead of a silent empty result.
 ///
-/// The series filter only matches tasks that have a series component in their
-/// `target_link` (e.g. `/ubuntu/noble/+source/pkg`).  Series-less tasks
+/// When `SeriesFilter::All` is used, both series-specific tasks
+/// (e.g. `/ubuntu/noble/+source/pkg`) and series-less tasks
 /// (e.g. the distribution-level `/ubuntu/+source/pkg` row or an upstream
-/// project task) are excluded when `SeriesFilter::All` is used.
+/// project task) are included.  `SeriesFilter::NoSeries` matches only
+/// series-less tasks.
 fn collect_matching_tasks<'a>(
     tasks: &'a [bugs::BugTask],
     bug_id: u64,
@@ -2693,6 +2722,7 @@ fn collect_matching_tasks<'a>(
             }
         }
         SeriesFilter::All => {}
+        SeriesFilter::NoSeries => {}
     }
 
     // Apply the combined filter (target AND series must both match).
@@ -2715,7 +2745,8 @@ fn collect_matching_tasks<'a>(
                     .as_deref()
                     .map(|ts| ss.iter().any(|s| ts.eq_ignore_ascii_case(s)))
                     .unwrap_or(false),
-                SeriesFilter::All => task_ser.is_some(),
+                SeriesFilter::All => true,
+                SeriesFilter::NoSeries => task_ser.is_none(),
             };
             target_ok && series_ok
         })
@@ -2780,7 +2811,7 @@ mod tests {
             make_task("/ubuntu/noble/+source/rust-eza"),
             make_task("/ubuntu/jammy/+source/rust-eza"),
             make_task("/ubuntu/focal/+source/rust-eza"),
-            // Series-less rows — should NOT appear in series-filtered results
+            // Series-less rows — included when SeriesFilter::All is used
             make_task("/ubuntu/+source/rust-alacritty"),
             make_task("/rust-alacritty"),
         ]
@@ -2853,20 +2884,26 @@ mod tests {
 
     #[test]
     fn series_filter_from_all_series_flag() {
-        let f = SeriesFilter::from_args(None, None, true);
+        let f = SeriesFilter::from_args(None, None, true, false);
         assert_eq!(f, SeriesFilter::All);
     }
 
     #[test]
     fn series_filter_from_many_series() {
-        let f = SeriesFilter::from_args(None, Some("noble, jammy".into()), false);
+        let f = SeriesFilter::from_args(None, Some("noble, jammy".into()), false, false);
         assert_eq!(f, SeriesFilter::Many(vec!["noble".into(), "jammy".into()]));
     }
 
     #[test]
     fn series_filter_from_single_series() {
-        let f = SeriesFilter::from_args(Some("noble".into()), None, false);
+        let f = SeriesFilter::from_args(Some("noble".into()), None, false, false);
         assert_eq!(f, SeriesFilter::One("noble".into()));
+    }
+
+    #[test]
+    fn series_filter_from_no_series_flag() {
+        let f = SeriesFilter::from_args(None, None, false, true);
+        assert_eq!(f, SeriesFilter::NoSeries);
     }
 
     // -----------------------------------------------------------------------
@@ -2957,7 +2994,8 @@ mod tests {
     #[test]
     fn collect_one_target_all_series() {
         let tasks = sample_tasks();
-        // rust-alacritty has tasks in noble and jammy (not focal); series-less rows excluded
+        // rust-alacritty: noble, jammy (series-specific) + ubuntu/+source (series-less)
+        // + /rust-alacritty (project task, also series-less) = 4
         let result = collect_matching_tasks(
             &tasks,
             1,
@@ -2965,10 +3003,12 @@ mod tests {
             &SeriesFilter::All,
         )
         .unwrap();
-        assert_eq!(result.len(), 2);
-        for link in target_links(&result) {
-            assert!(link.contains("noble") || link.contains("jammy"));
-        }
+        assert_eq!(result.len(), 4);
+        let links = target_links(&result);
+        assert!(links.iter().any(|l| l.contains("noble")));
+        assert!(links.iter().any(|l| l.contains("jammy")));
+        assert!(links.iter().any(|l| l.contains("/ubuntu/+source/rust-alacritty")));
+        assert!(links.iter().any(|l| l.ends_with("/rust-alacritty")));
     }
 
     #[test]
@@ -2988,9 +3028,9 @@ mod tests {
     #[test]
     fn collect_all_targets_all_series() {
         let tasks = sample_tasks();
-        // All series-specific tasks: noble/alacritty, jammy/alacritty,
-        //   noble/eza, jammy/eza, focal/eza = 5
-        // Series-less rows (ubuntu/+source/rust-alacritty, /rust-alacritty) excluded.
+        // Series-specific: noble/alacritty, jammy/alacritty, noble/eza, jammy/eza, focal/eza = 5
+        // Series-less: ubuntu/+source/rust-alacritty, /rust-alacritty = 2
+        // Total = 7
         let result = collect_matching_tasks(
             &tasks,
             1,
@@ -2998,13 +3038,15 @@ mod tests {
             &SeriesFilter::All,
         )
         .unwrap();
-        assert_eq!(result.len(), 5);
+        assert_eq!(result.len(), 7);
     }
 
     #[test]
     fn collect_many_targets_all_series() {
         let tasks = sample_tasks();
-        // rust-eza has noble, jammy, focal → 3; rust-alacritty has noble, jammy → 2
+        // rust-eza: noble, jammy, focal = 3 (no series-less row)
+        // rust-alacritty: noble, jammy = 2 + ubuntu/+source (series-less) + /rust-alacritty = 4
+        // Total = 7
         let result = collect_matching_tasks(
             &tasks,
             1,
@@ -3012,7 +3054,7 @@ mod tests {
             &SeriesFilter::All,
         )
         .unwrap();
-        assert_eq!(result.len(), 5);
+        assert_eq!(result.len(), 7);
     }
 
     // -----------------------------------------------------------------------
@@ -3114,9 +3156,42 @@ mod tests {
     }
 
     #[test]
-    fn collect_series_less_tasks_excluded_by_all_series() {
-        // The series-less rows (/ubuntu/+source/rust-alacritty, /rust-alacritty)
-        // must not appear when SeriesFilter::All is used.
+    fn collect_one_target_no_series() {
+        let tasks = sample_tasks();
+        // rust-alacritty series-less rows: /ubuntu/+source/rust-alacritty, /rust-alacritty = 2
+        let result = collect_matching_tasks(
+            &tasks,
+            1,
+            &TargetFilter::One("rust-alacritty".into()),
+            &SeriesFilter::NoSeries,
+        )
+        .unwrap();
+        assert_eq!(result.len(), 2);
+        for link in target_links(&result) {
+            assert!(
+                !link.contains("/noble/") && !link.contains("/jammy/") && !link.contains("/focal/"),
+                "expected no series in link: {link}"
+            );
+        }
+    }
+
+    #[test]
+    fn collect_all_targets_no_series() {
+        let tasks = sample_tasks();
+        // Only series-less tasks in sample_tasks: /ubuntu/+source/rust-alacritty, /rust-alacritty = 2
+        let result = collect_matching_tasks(
+            &tasks,
+            1,
+            &TargetFilter::All,
+            &SeriesFilter::NoSeries,
+        )
+        .unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn collect_series_less_tasks_included_by_all_series() {
+        // SeriesFilter::All includes both series-specific and series-less tasks.
         let tasks = vec![
             make_task("/ubuntu/+source/rust-alacritty"),
             make_task("/rust-alacritty"),
@@ -3129,8 +3204,11 @@ mod tests {
             &SeriesFilter::All,
         )
         .unwrap();
-        assert_eq!(result.len(), 1);
-        assert!(target_links(&result)[0].contains("noble"));
+        assert_eq!(result.len(), 3);
+        let links = target_links(&result);
+        assert!(links.iter().any(|l| l.contains("noble")));
+        assert!(links.iter().any(|l| l.contains("/ubuntu/+source/rust-alacritty")));
+        assert!(links.iter().any(|l| l.ends_with("/rust-alacritty")));
     }
 
     #[test]
