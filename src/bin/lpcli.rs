@@ -932,12 +932,76 @@ async fn run() -> lpcli::error::Result<()> {
 // Bug handlers
 // ---------------------------------------------------------------------------
 
+/// Render a list of bug tasks as a grouped table to stdout.
+fn print_bug_tasks(tasks: &[bugs::BugTask]) {
+    struct ParsedTask<'a> {
+        series: Option<String>,
+        task: &'a bugs::BugTask,
+    }
+    let mut by_target: std::collections::BTreeMap<String, Vec<ParsedTask>> =
+        std::collections::BTreeMap::new();
+    for t in tasks {
+        let (target_name, series) =
+            bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
+        let key = if !target_name.is_empty() {
+            target_name
+        } else {
+            t.bug_target_display_name.as_deref().unwrap_or("—").to_string()
+        };
+        by_target
+            .entry(key)
+            .or_default()
+            .push(ParsedTask { series, task: t });
+    }
+
+    // Within each target group: the series-less task first, then series tasks
+    // ordered alphabetically.
+    for tasks_for_target in by_target.values_mut() {
+        tasks_for_target.sort_by(|a, b| match (&a.series, &b.series) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(sa), Some(sb)) => sa.cmp(sb),
+        });
+    }
+
+    let mut table = build_table(vec!["Target", "Series", "Status", "Importance", "Assignee"]);
+    for (target_name, tasks_for_target) in &by_target {
+        for pt in tasks_for_target {
+            let display_target = match &pt.series {
+                None => target_name.clone(),
+                Some(_) => format!("    {target_name}"),
+            };
+            let series_str = pt.series.as_deref().unwrap_or("").to_string();
+            let assignee_str = pt
+                .task
+                .assignee_link
+                .as_deref()
+                .and_then(|url| {
+                    url.rsplit('/').next().map(|seg| seg.trim_start_matches('~').to_string())
+                })
+                .unwrap_or_else(|| "—".to_string());
+            table.add_row(vec![
+                display_target,
+                series_str,
+                pt.task.status.as_deref().unwrap_or("—").to_string(),
+                pt.task.importance.as_deref().unwrap_or("—").to_string(),
+                assignee_str,
+            ]);
+        }
+    }
+    println!("{table}");
+}
+
 async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
     let client = authenticated_client()?;
 
     match cmd {
         BugCommand::Show { bug_id } => {
-            let bug = bugs::get_bug(&client, bug_id).await?;
+            let (bug, tasks) = tokio::try_join!(
+                bugs::get_bug(&client, bug_id),
+                bugs::get_bug_tasks(&client, bug_id),
+            )?;
             println!("{}", format!("Bug #{}", bug.id).bold());
             println!("{}", "─".repeat(60));
             println!("{}", bug.title.bold());
@@ -954,75 +1018,13 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             if let Some(link) = &bug.web_link {
                 println!("URL:     {}", link.underline());
             }
+            println!();
+            print_bug_tasks(&tasks);
         }
 
         BugCommand::Tasks { bug_id } => {
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-
-            // Parse every task into (target_name, series, task) and collect
-            // into a BTreeMap keyed by target_name so tasks are grouped by
-            // target and ordered deterministically.
-            struct ParsedTask<'a> {
-                series: Option<String>,
-                task: &'a bugs::BugTask,
-            }
-            let mut by_target: std::collections::BTreeMap<String, Vec<ParsedTask>> =
-                std::collections::BTreeMap::new();
-            for t in &tasks {
-                let (target_name, series) =
-                    bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
-                let key = if !target_name.is_empty() {
-                    target_name
-                } else {
-                    t.bug_target_display_name.as_deref().unwrap_or("—").to_string()
-                };
-                by_target
-                    .entry(key)
-                    .or_default()
-                    .push(ParsedTask { series, task: t });
-            }
-
-            // Within each target group: the series-less task first, then
-            // series tasks ordered alphabetically.
-            for tasks_for_target in by_target.values_mut() {
-                tasks_for_target.sort_by(|a, b| match (&a.series, &b.series) {
-                    (None, None) => std::cmp::Ordering::Equal,
-                    (None, Some(_)) => std::cmp::Ordering::Less,
-                    (Some(_), None) => std::cmp::Ordering::Greater,
-                    (Some(sa), Some(sb)) => sa.cmp(sb),
-                });
-            }
-
-            let mut table = build_table(vec!["Target", "Series", "Status", "Importance", "Assignee"]);
-            for (target_name, tasks_for_target) in &by_target {
-                for pt in tasks_for_target {
-                    // Tasks with a series are indented; base tasks are not.
-                    let display_target = match &pt.series {
-                        None => target_name.clone(),
-                        Some(_) => format!("    {target_name}"),
-                    };
-                    let series_str = pt.series.as_deref().unwrap_or("").to_string();
-
-                    // Show only the Launchpad username rather than the full API URL.
-                    let assignee_str = pt
-                        .task
-                        .assignee_link
-                        .as_deref()
-                        .and_then(|url| {
-                            url.rsplit('/').next().map(|seg| seg.trim_start_matches('~').to_string())
-                        })
-                        .unwrap_or_else(|| "—".to_string());
-
-                    table.add_row(vec![
-                        display_target,
-                        series_str,
-                        pt.task.status.as_deref().unwrap_or("—").to_string(),
-                        pt.task.importance.as_deref().unwrap_or("—").to_string(),
-                        assignee_str,
-                    ]);
-                }
-            }
-            println!("{table}");
+            print_bug_tasks(&tasks);
         }
 
         BugCommand::Search {
