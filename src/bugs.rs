@@ -18,6 +18,7 @@
 //! | [`set_bug_assignee`] | Assign a bug task to a Launchpad user |
 //! | [`add_bug_comment`] | Add a comment to a bug |
 //! | [`get_bug_comments`] | List comments on a bug |
+//! | [`set_bug_tags`] | Replace the tag list on a bug |
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -372,6 +373,23 @@ pub async fn get_bug_comments(
 ) -> Result<Vec<BugComment>> {
     let url = client.url(&format!("/bugs/{bug_id}/messages"));
     Collection::fetch_all(client, &url).await
+}
+
+/// Replace the complete tag list on a bug.
+///
+/// The supplied `tags` slice becomes the new and only set of tags on the bug.
+/// To add or remove individual tags, first call [`get_bug`] to read the
+/// current tags, modify the list, then call this function.
+///
+/// Returns the updated [`Bug`] on success.
+pub async fn set_bug_tags(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    tags: &[String],
+) -> Result<Bug> {
+    let url = client.url(&format!("/bugs/{bug_id}"));
+    let body = serde_json::json!({ "tags": tags });
+    client.patch_url_with_value(&url, &body).await
 }
 
 // ---------------------------------------------------------------------------

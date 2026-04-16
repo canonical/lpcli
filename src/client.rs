@@ -185,6 +185,33 @@ impl LaunchpadClient {
         self.handle_response(resp).await
     }
 
+    /// Perform an authenticated PATCH request with an arbitrary JSON value body.
+    ///
+    /// Use this when the PATCH body contains non-string fields such as arrays
+    /// (e.g. for updating a bug's `tags` field on the Launchpad API, which
+    /// requires `{"tags": ["tag1", "tag2"]}` rather than a flat string map).
+    ///
+    /// The same `If-Match` caveat as [`patch_url`] applies.
+    pub async fn patch_url_with_value<T: DeserializeOwned>(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<T> {
+        let mut req = self
+            .http
+            .patch(url)
+            .header("Accept", "application/json")
+            .json(body);
+
+        if let Some(creds) = &self.credentials {
+            let auth_header = auth::build_auth_header(creds)?;
+            req = req.header("Authorization", auth_header);
+        }
+
+        let resp = self.send_with_retry(req).await?;
+        self.handle_response(resp).await
+    }
+
     /// Perform an authenticated POST request and return `Ok(())` on success,
     /// discarding the response body.
     ///

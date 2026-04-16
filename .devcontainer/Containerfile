@@ -1,0 +1,26 @@
+ARG UBUNTU_RELEASE=26.04
+ARG BASE_IMAGE=scratch-alias
+
+FROM ubuntu:$UBUNTU_RELEASE AS builder
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        ca-certificates \
+        build-essential pkgconf libssl-dev \
+        rust-1.93-all cargo rustc \ 
+        vim git \
+        hyperfine ripgrep cargo-auditable \
+        bash fish \
+    && apt-get clean -y \
+    && rm -rf /var/lib/apt/lists/*
+
+
+FROM ${BASE_IMAGE}
+COPY --from=builder / /
+
+USER root
+
+EXPOSE 8000 8080
+
+ENTRYPOINT [ "/usr/bin/fish" ]

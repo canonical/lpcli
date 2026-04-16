@@ -1,0 +1,21 @@
+{
+    "name": "Ubuntu Rust Development Container",
+    "initializeCommand": "echo 'FROM scratch' | podman build -t scratch-alias -",
+    "dockerFile": "Containerfile",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "matklad.rust-analyzer"
+            ]
+        }
+    },
+    "forwardPorts": [
+        8000,
+        8080
+    ],
+    "runArgs": [
+        "--gpus", "all",
+        "--userns=keep-id",
+        "--security-opt=label=disable"
+    ]
+}

@@ -399,6 +399,47 @@ enum BugCommand {
         #[arg(long)]
         many_series: Option<String>,
     },
+    /// Add, remove, or clear tags on a bug.
+    ///
+    /// Remove operations run before add operations, so existing tags can be
+    /// cleared and replaced in a single invocation.
+    #[command(
+        group(ArgGroup::new("add_spec")
+            .args(["add_tag", "add_many_tags"])),
+        group(ArgGroup::new("remove_spec")
+            .args(["remove_tag", "remove_many_tags", "remove_all_tags"])),
+    )]
+    Tag {
+        /// The Launchpad bug number.
+        #[arg(short, long)]
+        bug_id: u64,
+        /// Add a single tag to the bug.
+        /// Mutually exclusive with --add-many-tags.
+        #[arg(long)]
+        add_tag: Option<String>,
+        /// Add multiple tags to the bug. Values may be space-separated or
+        /// comma-separated (or both). For example:
+        ///   --add-many-tags homestar cheat strongbad
+        ///   --add-many-tags "homestar, cheat, strongbad"
+        /// Mutually exclusive with --add-tag.
+        #[arg(long, num_args = 1..)]
+        add_many_tags: Option<Vec<String>>,
+        /// Remove a single tag from the bug.
+        /// Mutually exclusive with --remove-many-tags and --remove-all-tags.
+        #[arg(long)]
+        remove_tag: Option<String>,
+        /// Remove multiple tags from the bug. Values may be space-separated or
+        /// comma-separated (or both). For example:
+        ///   --remove-many-tags lettuce tomato
+        ///   --remove-many-tags "lettuce, tomato"
+        /// Mutually exclusive with --remove-tag and --remove-all-tags.
+        #[arg(long, num_args = 1..)]
+        remove_many_tags: Option<Vec<String>>,
+        /// Remove all existing tags from the bug.
+        /// Mutually exclusive with --remove-tag and --remove-many-tags.
+        #[arg(long)]
+        remove_all_tags: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1455,6 +1496,37 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                     String::new()
                 },
             );
+        }
+
+        BugCommand::Tag {
+            bug_id,
+            add_tag,
+            add_many_tags,
+            remove_tag,
+            remove_many_tags,
+            remove_all_tags,
+        } => {
+            // Fetch the bug to get its current tags.
+            let bug = bugs::get_bug(&client, bug_id).await?;
+
+            // Apply removals first (per spec), then additions.
+            let after_remove =
+                apply_tag_removals(bug.tags, remove_tag, remove_many_tags, remove_all_tags);
+            let final_tags = apply_tag_additions(after_remove, add_tag, add_many_tags);
+
+            let updated = bugs::set_bug_tags(&client, bug_id, &final_tags).await?;
+            if updated.tags.is_empty() {
+                println!(
+                    "{} Bug #{bug_id} tags cleared (no tags).",
+                    "✓".green().bold()
+                );
+            } else {
+                println!(
+                    "{} Bug #{bug_id} tags updated: {}",
+                    "✓".green().bold(),
+                    updated.tags.join(", ").cyan()
+                );
+            }
         }
     }
     Ok(())
@@ -2773,6 +2845,72 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Parse a list of tags from a `Vec<String>` where each element may contain
+/// comma-separated values (e.g. `"homestar,"` or `"homestar, cheat, strongbad"`).
+///
+/// This handles all three user-facing input forms:
+/// * Space-separated on the command line: `--add-many-tags homestar cheat strongbad`
+///   → each word is a separate element already, just needs trailing comma stripping.
+/// * Quoted comma-separated: `--add-many-tags "homestar, cheat, strongbad"`
+///   → a single element containing commas that must be split.
+/// * Shell-split with trailing commas: `--add-many-tags homestar, cheat, strongbad`
+///   → elements like `"homestar,"` that need trimming.
+fn parse_tags_from_vec(args: &[String]) -> Vec<String> {
+    args.iter()
+        .flat_map(|s| s.split(','))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Remove tags from `current_tags` according to the supplied remove flags.
+///
+/// `remove_all_tags` takes precedence: when `true`, the result is always empty.
+/// Otherwise, `remove_tag` (single) or `remove_many_tags` (multiple) specify
+/// which tags to drop (case-insensitive comparison).
+fn apply_tag_removals(
+    current_tags: Vec<String>,
+    remove_tag: Option<String>,
+    remove_many_tags: Option<Vec<String>>,
+    remove_all_tags: bool,
+) -> Vec<String> {
+    if remove_all_tags {
+        return Vec::new();
+    }
+    let to_remove: Vec<String> = match (remove_tag, remove_many_tags) {
+        (Some(t), _) => vec![t],
+        (None, Some(many)) => parse_tags_from_vec(&many),
+        (None, None) => return current_tags,
+    };
+    current_tags
+        .into_iter()
+        .filter(|t| !to_remove.iter().any(|r| r.eq_ignore_ascii_case(t)))
+        .collect()
+}
+
+/// Add tags to `current_tags` according to the supplied add flags.
+///
+/// `add_tag` (single) or `add_many_tags` (multiple) specify which tags to add.
+/// Tags that already exist in `current_tags` (case-insensitive) are not
+/// duplicated.
+fn apply_tag_additions(
+    mut current_tags: Vec<String>,
+    add_tag: Option<String>,
+    add_many_tags: Option<Vec<String>>,
+) -> Vec<String> {
+    let to_add: Vec<String> = match (add_tag, add_many_tags) {
+        (Some(t), _) => vec![t],
+        (None, Some(many)) => parse_tags_from_vec(&many),
+        (None, None) => return current_tags,
+    };
+    for tag in to_add {
+        if !tag.is_empty() && !current_tags.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
+            current_tags.push(tag);
+        }
+    }
+    current_tags
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -3254,5 +3392,379 @@ mod tests {
         let rendered = table.to_string();
         assert!(rendered.contains("Col A"));
         assert!(rendered.contains("Col B"));
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_tags_from_vec
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_tags_from_vec_space_separated() {
+        let args = vec!["homestar".into(), "cheat".into(), "strongbad".into()];
+        assert_eq!(
+            parse_tags_from_vec(&args),
+            vec!["homestar", "cheat", "strongbad"]
+        );
+    }
+
+    #[test]
+    fn parse_tags_from_vec_single_comma_separated_string() {
+        let args = vec!["homestar, cheat, strongbad".into()];
+        assert_eq!(
+            parse_tags_from_vec(&args),
+            vec!["homestar", "cheat", "strongbad"]
+        );
+    }
+
+    #[test]
+    fn parse_tags_from_vec_shell_split_trailing_commas() {
+        // Simulates what the shell hands to the process when the user types:
+        //   --add-many-tags homestar, cheat, strongbad
+        let args = vec!["homestar,".into(), "cheat,".into(), "strongbad".into()];
+        assert_eq!(
+            parse_tags_from_vec(&args),
+            vec!["homestar", "cheat", "strongbad"]
+        );
+    }
+
+    #[test]
+    fn parse_tags_from_vec_filters_empty_segments() {
+        let args = vec![",,,".into(), "  ".into(), "  java  ".into()];
+        assert_eq!(parse_tags_from_vec(&args), vec!["java"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_tag_removals
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_tag_removals_single_tag() {
+        let current = vec!["apple".into(), "banana".into(), "pear".into()];
+        let result = apply_tag_removals(current, Some("pear".into()), None, false);
+        assert_eq!(result, vec!["apple", "banana"]);
+    }
+
+    #[test]
+    fn apply_tag_removals_many_tags_space_separated() {
+        let current = vec!["lettuce".into(), "tomato".into(), "cucumber".into()];
+        let result = apply_tag_removals(
+            current,
+            None,
+            Some(vec!["lettuce".into(), "tomato".into()]),
+            false,
+        );
+        assert_eq!(result, vec!["cucumber"]);
+    }
+
+    #[test]
+    fn apply_tag_removals_many_tags_comma_separated_string() {
+        let current = vec!["lettuce".into(), "tomato".into(), "cucumber".into()];
+        let result = apply_tag_removals(
+            current,
+            None,
+            Some(vec!["lettuce, tomato".into()]),
+            false,
+        );
+        assert_eq!(result, vec!["cucumber"]);
+    }
+
+    #[test]
+    fn apply_tag_removals_all_tags() {
+        let current = vec!["spam".into(), "eggs".into(), "sausage".into()];
+        let result = apply_tag_removals(current, None, None, true);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn apply_tag_removals_all_tags_ignores_other_flags() {
+        // remove_all_tags takes precedence over the specific remove flags.
+        let current = vec!["spam".into(), "eggs".into()];
+        let result = apply_tag_removals(
+            current,
+            Some("spam".into()),
+            Some(vec!["eggs".into()]),
+            true,
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn apply_tag_removals_no_flags_returns_unchanged() {
+        let current = vec!["alpha".into(), "beta".into()];
+        let result = apply_tag_removals(current.clone(), None, None, false);
+        assert_eq!(result, current);
+    }
+
+    #[test]
+    fn apply_tag_removals_case_insensitive() {
+        let current = vec!["Apple".into(), "Banana".into()];
+        let result = apply_tag_removals(current, Some("APPLE".into()), None, false);
+        assert_eq!(result, vec!["Banana"]);
+    }
+
+    #[test]
+    fn apply_tag_removals_nonexistent_tag_leaves_list_unchanged() {
+        let current = vec!["alpha".into(), "beta".into()];
+        let result = apply_tag_removals(current.clone(), Some("gamma".into()), None, false);
+        assert_eq!(result, current);
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_tag_additions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_tag_additions_single_tag() {
+        let current = vec!["existing".into()];
+        let result = apply_tag_additions(current, Some("java".into()), None);
+        assert_eq!(result, vec!["existing", "java"]);
+    }
+
+    #[test]
+    fn apply_tag_additions_many_tags_space_separated() {
+        let current: Vec<String> = vec![];
+        let result = apply_tag_additions(
+            current,
+            None,
+            Some(vec!["homestar".into(), "cheat".into(), "strongbad".into()]),
+        );
+        assert_eq!(result, vec!["homestar", "cheat", "strongbad"]);
+    }
+
+    #[test]
+    fn apply_tag_additions_many_tags_comma_separated_string() {
+        let current: Vec<String> = vec![];
+        let result = apply_tag_additions(
+            current,
+            None,
+            Some(vec!["homestar, cheat, strongbad".into()]),
+        );
+        assert_eq!(result, vec!["homestar", "cheat", "strongbad"]);
+    }
+
+    #[test]
+    fn apply_tag_additions_no_flags_returns_unchanged() {
+        let current = vec!["alpha".into(), "beta".into()];
+        let result = apply_tag_additions(current.clone(), None, None);
+        assert_eq!(result, current);
+    }
+
+    #[test]
+    fn apply_tag_additions_skips_duplicates() {
+        let current = vec!["java".into(), "python".into()];
+        let result = apply_tag_additions(current, Some("java".into()), None);
+        // "java" must not appear twice.
+        assert_eq!(result, vec!["java", "python"]);
+    }
+
+    #[test]
+    fn apply_tag_additions_case_insensitive_duplicate_check() {
+        let current = vec!["Java".into()];
+        let result = apply_tag_additions(current, Some("JAVA".into()), None);
+        // Case-insensitive match: "JAVA" is already present as "Java".
+        assert_eq!(result, vec!["Java"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // remove + add combined
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn remove_all_then_add_many() {
+        // Bug has: baseball, football, basketball
+        // --remove-all-tags --add-many-tags "cricket, badminton"
+        let current = vec!["baseball".into(), "football".into(), "basketball".into()];
+        let after_remove = apply_tag_removals(current, None, None, true);
+        let final_tags = apply_tag_additions(
+            after_remove,
+            None,
+            Some(vec!["cricket, badminton".into()]),
+        );
+        assert_eq!(final_tags, vec!["cricket", "badminton"]);
+    }
+
+    #[test]
+    fn remove_one_then_add_one() {
+        let current = vec!["apple".into(), "banana".into(), "pear".into()];
+        let after_remove = apply_tag_removals(current, Some("pear".into()), None, false);
+        let final_tags = apply_tag_additions(after_remove, Some("mango".into()), None);
+        assert_eq!(final_tags, vec!["apple", "banana", "mango"]);
+    }
+
+    #[test]
+    fn remove_many_then_add_single() {
+        let current = vec!["lettuce".into(), "tomato".into(), "cucumber".into()];
+        let after_remove = apply_tag_removals(
+            current,
+            None,
+            Some(vec!["lettuce".into(), "tomato".into()]),
+            false,
+        );
+        let final_tags = apply_tag_additions(after_remove, Some("spinach".into()), None);
+        assert_eq!(final_tags, vec!["cucumber", "spinach"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // CLI argument parsing — Tag subcommand
+    // -----------------------------------------------------------------------
+
+    /// Helper: parse a `BugCommand::Tag` from CLI tokens and return the variant.
+    fn parse_tag_cmd(args: &[&str]) -> BugCommand {
+        let full: Vec<&str> = std::iter::once("lpcli")
+            .chain(std::iter::once("bug"))
+            .chain(std::iter::once("tag"))
+            .chain(args.iter().copied())
+            .collect();
+        let cli = Cli::try_parse_from(full).expect("CLI parsing failed");
+        match cli.command {
+            Command::Bug(cmd) => cmd,
+            _ => panic!("Expected Bug command"),
+        }
+    }
+
+    #[test]
+    fn cli_tag_add_tag_single() {
+        let cmd = parse_tag_cmd(&["--bug-id", "42", "--add-tag", "java"]);
+        let BugCommand::Tag { bug_id, add_tag, add_many_tags, remove_tag, remove_many_tags, remove_all_tags } = cmd else {
+            panic!("Expected Tag variant");
+        };
+        assert_eq!(bug_id, 42);
+        assert_eq!(add_tag, Some("java".to_string()));
+        assert!(add_many_tags.is_none());
+        assert!(remove_tag.is_none());
+        assert!(remove_many_tags.is_none());
+        assert!(!remove_all_tags);
+    }
+
+    #[test]
+    fn cli_tag_add_many_tags_space_separated() {
+        let cmd = parse_tag_cmd(&[
+            "--bug-id", "42",
+            "--add-many-tags", "homestar", "cheat", "strongbad",
+        ]);
+        let BugCommand::Tag { add_many_tags, .. } = cmd else { panic!() };
+        let tags = parse_tags_from_vec(&add_many_tags.unwrap());
+        assert_eq!(tags, vec!["homestar", "cheat", "strongbad"]);
+    }
+
+    #[test]
+    fn cli_tag_add_many_tags_comma_separated() {
+        let cmd = parse_tag_cmd(&[
+            "--bug-id", "42",
+            "--add-many-tags", "homestar, cheat, strongbad",
+        ]);
+        let BugCommand::Tag { add_many_tags, .. } = cmd else { panic!() };
+        let tags = parse_tags_from_vec(&add_many_tags.unwrap());
+        assert_eq!(tags, vec!["homestar", "cheat", "strongbad"]);
+    }
+
+    #[test]
+    fn cli_tag_remove_tag_single() {
+        let cmd = parse_tag_cmd(&["--bug-id", "99", "--remove-tag", "pear"]);
+        let BugCommand::Tag { remove_tag, remove_all_tags, .. } = cmd else { panic!() };
+        assert_eq!(remove_tag, Some("pear".to_string()));
+        assert!(!remove_all_tags);
+    }
+
+    #[test]
+    fn cli_tag_remove_many_tags() {
+        let cmd = parse_tag_cmd(&[
+            "--bug-id", "99",
+            "--remove-many-tags", "lettuce", "tomato",
+        ]);
+        let BugCommand::Tag { remove_many_tags, .. } = cmd else { panic!() };
+        let tags = parse_tags_from_vec(&remove_many_tags.unwrap());
+        assert_eq!(tags, vec!["lettuce", "tomato"]);
+    }
+
+    #[test]
+    fn cli_tag_remove_all_tags() {
+        let cmd = parse_tag_cmd(&["--bug-id", "7", "--remove-all-tags"]);
+        let BugCommand::Tag { remove_all_tags, remove_tag, remove_many_tags, .. } = cmd else { panic!() };
+        assert!(remove_all_tags);
+        assert!(remove_tag.is_none());
+        assert!(remove_many_tags.is_none());
+    }
+
+    #[test]
+    fn cli_tag_remove_all_and_add_many() {
+        let cmd = parse_tag_cmd(&[
+            "--bug-id", "1",
+            "--remove-all-tags",
+            "--add-many-tags", "cricket", "badminton",
+        ]);
+        let BugCommand::Tag { remove_all_tags, add_many_tags, add_tag, .. } = cmd else { panic!() };
+        assert!(remove_all_tags);
+        assert!(add_tag.is_none());
+        let tags = parse_tags_from_vec(&add_many_tags.unwrap());
+        assert_eq!(tags, vec!["cricket", "badminton"]);
+    }
+
+    #[test]
+    fn cli_tag_add_tag_and_remove_tag_together() {
+        let cmd = parse_tag_cmd(&[
+            "--bug-id", "1",
+            "--remove-tag", "old",
+            "--add-tag", "new",
+        ]);
+        let BugCommand::Tag { remove_tag, add_tag, .. } = cmd else { panic!() };
+        assert_eq!(remove_tag, Some("old".to_string()));
+        assert_eq!(add_tag, Some("new".to_string()));
+    }
+
+    #[test]
+    fn cli_tag_add_tag_and_add_many_tags_mutually_exclusive() {
+        let full = [
+            "lpcli", "bug", "tag",
+            "--bug-id", "1",
+            "--add-tag", "java",
+            "--add-many-tags", "python",
+        ];
+        assert!(
+            Cli::try_parse_from(full).is_err(),
+            "--add-tag and --add-many-tags must be mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn cli_tag_remove_tag_and_remove_many_tags_mutually_exclusive() {
+        let full = [
+            "lpcli", "bug", "tag",
+            "--bug-id", "1",
+            "--remove-tag", "apple",
+            "--remove-many-tags", "banana",
+        ];
+        assert!(
+            Cli::try_parse_from(full).is_err(),
+            "--remove-tag and --remove-many-tags must be mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn cli_tag_remove_tag_and_remove_all_tags_mutually_exclusive() {
+        let full = [
+            "lpcli", "bug", "tag",
+            "--bug-id", "1",
+            "--remove-tag", "apple",
+            "--remove-all-tags",
+        ];
+        assert!(
+            Cli::try_parse_from(full).is_err(),
+            "--remove-tag and --remove-all-tags must be mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn cli_tag_remove_many_tags_and_remove_all_tags_mutually_exclusive() {
+        let full = [
+            "lpcli", "bug", "tag",
+            "--bug-id", "1",
+            "--remove-many-tags", "apple",
+            "--remove-all-tags",
+        ];
+        assert!(
+            Cli::try_parse_from(full).is_err(),
+            "--remove-many-tags and --remove-all-tags must be mutually exclusive"
+        );
     }
 }
