@@ -21,7 +21,7 @@ path = "src/lib.rs"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client
-reqwest = { version = "0.13", features = ["json", "cookies"] }
+reqwest = { version = "0.13", features = ["json", "cookies", "form"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
