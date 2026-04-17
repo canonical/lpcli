@@ -20,7 +20,6 @@
 
 use std::path::PathBuf;
 
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{LpError, Result};
@@ -146,7 +145,7 @@ pub fn delete_credentials() -> Result<()> {
 
 /// Generate a random OAuth nonce (32 hex characters).
 pub fn generate_nonce() -> String {
-    let bytes: [u8; 16] = rand::thread_rng().r#gen();
+    let bytes: [u8; 16] = rand::random();
     hex::encode(bytes)
 }
 
