@@ -39,7 +39,7 @@ hex = "0.4"
 clap = { version = "4", features = ["derive"] }
 
 # Configuration / credential storage
-dirs = "5"
+dirs = "6"
 toml = "1.0"
 
 # URL handling
@@ -55,5 +55,5 @@ comfy-table = "7"
 [dev-dependencies]
 tokio-test = "0.4"
 mockito = "1"
-dirs = "5"
+dirs = "6"
 
