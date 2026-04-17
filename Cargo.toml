@@ -40,7 +40,7 @@ clap = { version = "4", features = ["derive"] }
 
 # Configuration / credential storage
 dirs = "5"
-toml = "0.8"
+toml = "1.0"
 
 # URL handling
 url = { version = "2", features = ["serde"] }
