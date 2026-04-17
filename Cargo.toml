@@ -49,7 +49,7 @@ url = { version = "2", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Pretty terminal output
-colored = "2"
+colored = "3"
 comfy-table = "7"
 
 [dev-dependencies]
