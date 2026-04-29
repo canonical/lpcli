@@ -2,6 +2,8 @@
 
 A command-line client for [Launchpad.net](https://launchpad.net), written in async Rust.
 
+**lpcli is beta software.  Please use it with caution and report any bugs you discover.**
+
 `lpcli` lets you interact with Launchpad from the terminal — query bugs, packages,
 projects, people, Git repositories, specifications, questions, webhooks, snap recipes,
 and more — without opening a browser. It also ships as a Rust library crate so other
@@ -462,6 +464,6 @@ src/
 
 Licensed under the [GNU General Public License v3.0 or later](LICENSE).
 
-## AI / LLM Disclosure 
+## AI / LLM Disclosure
 
 This project was generated, revised, and checked using large language model (LLM) tools.  Claude generated most of the code, Gemini checked the implementation against the Launchpad web API and documentation, and ChatGPT provided a code review.  The code has been partially human-reviewed and is currently being tested to ensure correct operation and refine the user experience and workflows.
