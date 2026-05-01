@@ -1,6 +1,6 @@
 {
     "name": "Ubuntu Rust Development Container",
-    "initializeCommand": "echo 'FROM scratch' | podman build -t scratch-alias -",
+    "initializeCommand": ".devcontainer/setup-env.sh",
     "dockerFile": "Containerfile",
     "customizations": {
         "vscode": {
@@ -13,9 +13,10 @@
         8000,
         8080
     ],
+    "containerUser": "${localEnv:USER}",
     "runArgs": [
         "--gpus", "all",
-        "--userns=keep-id",
         "--security-opt=label=disable"
+        "--userns=host"
     ]
 }
