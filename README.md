@@ -23,7 +23,7 @@ applications can build on the same type-safe API wrappers.
 
 ## Requirements
 
-- Rust 1.85+ (edition 2024)
+- Rust 1.88+ (edition 2024)
 - Ubuntu Linux (or any Linux distribution with OpenSSL available)
 
 ## Installation
