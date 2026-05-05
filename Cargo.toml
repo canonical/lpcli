@@ -7,6 +7,7 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/canonical/lpcli"
 keywords = ["launchpad", "ubuntu", "cli", "packaging"]
 categories = ["command-line-utilities"]
+rust-version = "1.88"
 
 [[bin]]
 name = "lpcli"
