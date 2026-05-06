@@ -1,10 +1,4 @@
-use lpcli::{
-    bugs,
-    client::LaunchpadClient,
-    error::LpError,
-    snaps,
-    webhooks,
-};
+use lpcli::{bugs, client::LaunchpadClient, error::LpError, snaps, webhooks};
 use mockito::Server;
 
 #[tokio::test]

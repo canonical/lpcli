@@ -22,13 +22,10 @@
 
 use std::collections::HashMap;
 
-use reqwest::{
-    StatusCode,
-    header::LOCATION,
-};
-use serde::de::DeserializeOwned;
 use crate::auth::{self, Credentials};
 use crate::error::{LpError, Result};
+use reqwest::{StatusCode, header::LOCATION};
+use serde::de::DeserializeOwned;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -102,7 +99,11 @@ impl LaunchpadClient {
 
     /// Resolve a relative path against the configured base URL.
     pub fn url(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url.trim_end_matches('/'), path.trim_start_matches('/'))
+        format!(
+            "{}/{}",
+            self.base_url.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -191,7 +192,7 @@ impl LaunchpadClient {
     /// (e.g. for updating a bug's `tags` field on the Launchpad API, which
     /// requires `{"tags": ["tag1", "tag2"]}` rather than a flat string map).
     ///
-    /// The same `If-Match` caveat as [`patch_url`] applies.
+    /// The same `If-Match` caveat as [`Self::patch_url()`] applies.
     pub async fn patch_url_with_value<T: DeserializeOwned>(
         &self,
         url: &str,
@@ -218,11 +219,7 @@ impl LaunchpadClient {
     /// Use this for operations whose success response carries no JSON body
     /// (e.g. Launchpad `newMessage`, which returns `201 Created` with a
     /// `Location` header but an empty body).
-    pub async fn post_ok(
-        &self,
-        path: &str,
-        params: &HashMap<&str, &str>,
-    ) -> Result<()> {
+    pub async fn post_ok(&self, path: &str, params: &HashMap<&str, &str>) -> Result<()> {
         let url = self.url(path);
         let mut req = self
             .http
@@ -277,10 +274,7 @@ impl LaunchpadClient {
 
     /// Perform an authenticated DELETE on an absolute URL, discarding the body.
     pub async fn delete_url_ok(&self, url: &str) -> Result<()> {
-        let mut req = self
-            .http
-            .delete(url)
-            .header("Accept", "application/json");
+        let mut req = self.http.delete(url).header("Accept", "application/json");
 
         if let Some(creds) = &self.credentials {
             let auth_header = auth::build_auth_header(creds)?;
@@ -424,25 +418,25 @@ impl LaunchpadClient {
             let resp = to_send.send().await?;
             let status = resp.status();
 
-            if let Some(next) = saved {
-                if status.as_u16() == 429 || status.is_server_error() {
-                    let sleep_ms = if status.as_u16() == 429 {
-                        // Honour the server's Retry-After hint when present.
-                        resp.headers()
-                            .get("Retry-After")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|s| s.parse::<u64>().ok())
-                            .map(|secs| secs.saturating_mul(1_000))
-                            .unwrap_or(delay_ms)
-                    } else {
-                        delay_ms
-                    };
-                    tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
-                    delay_ms = delay_ms.saturating_mul(2);
-                    retries_left -= 1;
-                    current = next;
-                    continue;
-                }
+            if let Some(next) = saved
+                && (status.as_u16() == 429 || status.is_server_error())
+            {
+                let sleep_ms = if status.as_u16() == 429 {
+                    // Honour the server's Retry-After hint when present.
+                    resp.headers()
+                        .get("Retry-After")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(|secs| secs.saturating_mul(1_000))
+                        .unwrap_or(delay_ms)
+                } else {
+                    delay_ms
+                };
+                tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+                delay_ms = delay_ms.saturating_mul(2);
+                retries_left -= 1;
+                current = next;
+                continue;
             }
 
             return Ok(resp);
@@ -462,7 +456,10 @@ impl LaunchpadClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "(could not read response body)".to_string());
-            return Err(LpError::Api { status: 401, message: body });
+            return Err(LpError::Api {
+                status: 401,
+                message: body,
+            });
         }
         if status == StatusCode::FORBIDDEN {
             let body = resp
@@ -488,7 +485,9 @@ impl LaunchpadClient {
                 .get("Retry-After")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok());
-            return Err(LpError::RateLimit { retry_after_secs: retry_after });
+            return Err(LpError::RateLimit {
+                retry_after_secs: retry_after,
+            });
         }
         if status == StatusCode::PRECONDITION_FAILED {
             return Err(LpError::Api {
@@ -502,7 +501,10 @@ impl LaunchpadClient {
         if !status.is_success() {
             let code = status.as_u16();
             let message = resp.text().await.unwrap_or_else(|_| status.to_string());
-            return Err(LpError::Api { status: code, message });
+            return Err(LpError::Api {
+                status: code,
+                message,
+            });
         }
 
         let bytes = resp.bytes().await?;
@@ -519,7 +521,10 @@ impl LaunchpadClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "(could not read response body)".to_string());
-            return Err(LpError::Api { status: 401, message: body });
+            return Err(LpError::Api {
+                status: 401,
+                message: body,
+            });
         }
         if status == StatusCode::FORBIDDEN {
             let body = resp
@@ -545,7 +550,9 @@ impl LaunchpadClient {
                 .get("Retry-After")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok());
-            return Err(LpError::RateLimit { retry_after_secs: retry_after });
+            return Err(LpError::RateLimit {
+                retry_after_secs: retry_after,
+            });
         }
         if status == StatusCode::PRECONDITION_FAILED {
             return Err(LpError::Api {
@@ -559,7 +566,10 @@ impl LaunchpadClient {
         if !status.is_success() {
             let code = status.as_u16();
             let message = resp.text().await.unwrap_or_else(|_| status.to_string());
-            return Err(LpError::Api { status: code, message });
+            return Err(LpError::Api {
+                status: code,
+                message,
+            });
         }
         Ok(())
     }
@@ -573,7 +583,10 @@ impl LaunchpadClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "(could not read response body)".to_string());
-            return Err(LpError::Api { status: 401, message: body });
+            return Err(LpError::Api {
+                status: 401,
+                message: body,
+            });
         }
         if status == StatusCode::FORBIDDEN {
             let body = resp
@@ -599,12 +612,17 @@ impl LaunchpadClient {
                 .get("Retry-After")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok());
-            return Err(LpError::RateLimit { retry_after_secs: retry_after });
+            return Err(LpError::RateLimit {
+                retry_after_secs: retry_after,
+            });
         }
         if !status.is_success() {
             let code = status.as_u16();
             let message = resp.text().await.unwrap_or_else(|_| status.to_string());
-            return Err(LpError::Api { status: code, message });
+            return Err(LpError::Api {
+                status: code,
+                message,
+            });
         }
 
         let location = resp
@@ -639,10 +657,8 @@ fn encode_pairs(params: &[(&str, &str)]) -> String {
     params
         .iter()
         .map(|(k, v)| {
-            let ek: String =
-                url::form_urlencoded::byte_serialize(k.as_bytes()).collect();
-            let ev: String =
-                url::form_urlencoded::byte_serialize(v.as_bytes()).collect();
+            let ek: String = url::form_urlencoded::byte_serialize(k.as_bytes()).collect();
+            let ev: String = url::form_urlencoded::byte_serialize(v.as_bytes()).collect();
             format!("{ek}={ev}")
         })
         .collect::<Vec<_>>()
@@ -669,12 +685,9 @@ impl<T: DeserializeOwned + std::fmt::Debug> Collection<T> {
     ///
     /// Use this for queries where the full result set is required (e.g. listing
     /// all milestones or team members). For user-facing searches that include a
-    /// `ws.size=N` page-size limit, use [`fetch_page`] instead to avoid
+    /// `ws.size=N` page-size limit, use [`Self::fetch_page()`] instead to avoid
     /// exhausting all pages when only the first is needed.
-    pub async fn fetch_all(
-        client: &LaunchpadClient,
-        first_url: &str,
-    ) -> Result<Vec<T>> {
+    pub async fn fetch_all(client: &LaunchpadClient, first_url: &str) -> Result<Vec<T>> {
         let mut results = Vec::new();
         let mut url = first_url.to_string();
         loop {
@@ -692,7 +705,7 @@ impl<T: DeserializeOwned + std::fmt::Debug> Collection<T> {
     ///
     /// Use this when the URL already contains a `ws.size=N` page-size limit
     /// (e.g. user-facing searches that should respect a `--limit` flag).
-    /// Unlike [`fetch_all`], this makes exactly one HTTP request and returns
+    /// Unlike [`Self::fetch_all()`], this makes exactly one HTTP request and returns
     /// only the entries on that page.
     pub async fn fetch_page(client: &LaunchpadClient, url: &str) -> Result<Vec<T>> {
         let page: Collection<T> = client.get_url(url).await?;
@@ -748,6 +761,9 @@ mod tests {
         use crate::auth::Credentials;
         let creds = Credentials::new("lpcli", "token", "secret");
         let client = LaunchpadClient::new(Some(creds.clone()));
-        assert_eq!(client.credentials.as_ref().unwrap().access_token.token, "token");
+        assert_eq!(
+            client.credentials.as_ref().unwrap().access_token.token,
+            "token"
+        );
     }
 }

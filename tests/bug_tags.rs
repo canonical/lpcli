@@ -156,7 +156,10 @@ async fn set_bug_tags_sends_json_body_with_tags_array() {
     // Match on the JSON body to verify the `tags` field is a proper JSON array.
     let patch_mock = server
         .mock("PATCH", "/bugs/55")
-        .match_header("content-type", mockito::Matcher::Regex("application/json".into()))
+        .match_header(
+            "content-type",
+            mockito::Matcher::Regex("application/json".into()),
+        )
         .match_body(mockito::Matcher::JsonString(
             r#"{"tags": ["cricket", "badminton"]}"#.into(),
         ))

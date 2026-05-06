@@ -59,7 +59,11 @@ pub struct Credentials {
 
 impl Credentials {
     /// Create a new [`Credentials`] value.
-    pub fn new(consumer_key: impl Into<String>, token: impl Into<String>, secret: impl Into<String>) -> Self {
+    pub fn new(
+        consumer_key: impl Into<String>,
+        token: impl Into<String>,
+        secret: impl Into<String>,
+    ) -> Self {
         Self {
             consumer_key: consumer_key.into(),
             access_token: AccessToken {
@@ -334,8 +338,10 @@ mod tests {
         // ~ is an RFC 3986 unreserved character and must NOT be encoded.
         // This is critical for OAuth signatures on URLs like /~username.
         assert_eq!(percent_encode("~ubuntu"), "~ubuntu");
-        assert_eq!(percent_encode("https://api.launchpad.net/devel/~ubuntu"),
-            "https%3A%2F%2Fapi.launchpad.net%2Fdevel%2F~ubuntu");
+        assert_eq!(
+            percent_encode("https://api.launchpad.net/devel/~ubuntu"),
+            "https%3A%2F%2Fapi.launchpad.net%2Fdevel%2F~ubuntu"
+        );
     }
 
     #[test]
@@ -354,10 +360,7 @@ mod tests {
     #[test]
     fn parse_oauth_response_valid() {
         let body = "oauth_token=abc123&oauth_token_secret=xyz789";
-        assert_eq!(
-            parse_oauth_response(body, "oauth_token").unwrap(),
-            "abc123"
-        );
+        assert_eq!(parse_oauth_response(body, "oauth_token").unwrap(), "abc123");
         assert_eq!(
             parse_oauth_response(body, "oauth_token_secret").unwrap(),
             "xyz789"

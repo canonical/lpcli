@@ -61,14 +61,14 @@ pub async fn issue_project_access_token(
     description: &str,
     scopes: &[&str],
 ) -> Result<String> {
-    let mut pairs: Vec<(&str, &str)> = vec![
-        ("ws.op", "issueAccessToken"),
-        ("description", description),
-    ];
+    let mut pairs: Vec<(&str, &str)> =
+        vec![("ws.op", "issueAccessToken"), ("description", description)];
     for scope in scopes {
         pairs.push(("scopes", scope));
     }
-    client.post_pairs(&format!("/{}", urlenc(project)), &pairs).await
+    client
+        .post_pairs(&format!("/{}", urlenc(project)), &pairs)
+        .await
 }
 
 /// Issue a new personal access token for a Git repository.
@@ -82,10 +82,8 @@ pub async fn issue_git_access_token(
     scopes: &[&str],
 ) -> Result<String> {
     let clean = repo_path.trim_start_matches('/');
-    let mut pairs: Vec<(&str, &str)> = vec![
-        ("ws.op", "issueAccessToken"),
-        ("description", description),
-    ];
+    let mut pairs: Vec<(&str, &str)> =
+        vec![("ws.op", "issueAccessToken"), ("description", description)];
     for scope in scopes {
         pairs.push(("scopes", scope));
     }
@@ -114,10 +112,7 @@ pub async fn list_git_access_tokens(
 /// Revoke a personal access token.
 ///
 /// `token_url` is the `self_link` of the token to revoke.
-pub async fn revoke_access_token(
-    client: &LaunchpadClient,
-    token_url: &str,
-) -> Result<()> {
+pub async fn revoke_access_token(client: &LaunchpadClient, token_url: &str) -> Result<()> {
     client
         .post_pairs_url_ok(token_url, &[("ws.op", "revoke")])
         .await
@@ -154,7 +149,9 @@ mod tests {
         let tok: AccessToken = serde_json::from_str(json).unwrap();
         assert_eq!(tok.description.as_deref(), Some("My push token"));
         assert_eq!(
-            tok.scopes.as_ref().map(|v| v.iter().map(String::as_str).collect::<Vec<_>>()),
+            tok.scopes
+                .as_ref()
+                .map(|v| v.iter().map(String::as_str).collect::<Vec<_>>()),
             Some(vec!["repository:push"])
         );
     }

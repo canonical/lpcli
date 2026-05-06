@@ -101,22 +101,16 @@ pub struct SnapBuildRequest {
 /// Fetch a snap recipe by owner and name.
 ///
 /// `owner` is the Launchpad name without `~`; `name` is the recipe name.
-pub async fn get_snap(
-    client: &LaunchpadClient,
-    owner: &str,
-    name: &str,
-) -> Result<Snap> {
-    client.get(&format!("/~{}/+snap/{}", urlenc(owner), urlenc(name))).await
+pub async fn get_snap(client: &LaunchpadClient, owner: &str, name: &str) -> Result<Snap> {
+    client
+        .get(&format!("/~{}/+snap/{}", urlenc(owner), urlenc(name)))
+        .await
 }
 
 /// List snap recipes owned by a Launchpad person or team.
-pub async fn find_snaps_by_owner(
-    client: &LaunchpadClient,
-    owner: &str,
-) -> Result<Vec<Snap>> {
+pub async fn find_snaps_by_owner(client: &LaunchpadClient, owner: &str) -> Result<Vec<Snap>> {
     let owner_url = client.url(&format!("/~{}", urlenc(owner)));
-    let enc: String =
-        url::form_urlencoded::byte_serialize(owner_url.as_bytes()).collect();
+    let enc: String = url::form_urlencoded::byte_serialize(owner_url.as_bytes()).collect();
     let url = client.url(&format!("/+snaps?ws.op=findByOwner&owner={enc}"));
     Collection::fetch_all(client, &url).await
 }
@@ -126,8 +120,7 @@ pub async fn find_snaps_by_store_name(
     client: &LaunchpadClient,
     store_name: &str,
 ) -> Result<Vec<Snap>> {
-    let enc: String =
-        url::form_urlencoded::byte_serialize(store_name.as_bytes()).collect();
+    let enc: String = url::form_urlencoded::byte_serialize(store_name.as_bytes()).collect();
     let url = client.url(&format!("/+snaps?ws.op=findByStoreName&store_name={enc}"));
     Collection::fetch_all(client, &url).await
 }
@@ -138,7 +131,11 @@ pub async fn get_snap_pending_builds(
     owner: &str,
     name: &str,
 ) -> Result<Vec<SnapBuild>> {
-    let url = client.url(&format!("/~{}/+snap/{}/pending_builds", urlenc(owner), urlenc(name)));
+    let url = client.url(&format!(
+        "/~{}/+snap/{}/pending_builds",
+        urlenc(owner),
+        urlenc(name)
+    ));
     Collection::fetch_all(client, &url).await
 }
 
@@ -161,7 +158,10 @@ pub async fn request_snap_builds(
     params.insert("archive", archive_url);
     params.insert("pocket", pocket);
     let location = client
-        .post_created_location(&format!("/~{}/+snap/{}", urlenc(owner), urlenc(name)), &params)
+        .post_created_location(
+            &format!("/~{}/+snap/{}", urlenc(owner), urlenc(name)),
+            &params,
+        )
         .await?;
     client.get_url(&location).await
 }

@@ -4,24 +4,18 @@
 
 use clap::{ArgGroup, Parser, Subcommand};
 use colored::Colorize;
-use comfy_table::{presets::UTF8_FULL_CONDENSED, Table};
+use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 
 use lpcli::{
-    access_tokens,
-    auth,
+    access_tokens, auth,
     bugs::{self, BugSearchParams},
     client::LaunchpadClient,
     cves::{self, CveSearchParams},
     git,
     packages::{self, SourceSearchParams},
-    people,
-    projects,
+    people, projects,
     questions::{self, QuestionSearchParams},
-    snaps,
-    specifications,
-    status,
-    translations,
-    webhooks,
+    snaps, specifications, status, translations, webhooks,
 };
 
 // ---------------------------------------------------------------------------
@@ -982,12 +976,14 @@ fn print_bug_tasks(tasks: &[bugs::BugTask]) {
     let mut by_target: std::collections::BTreeMap<String, Vec<ParsedTask>> =
         std::collections::BTreeMap::new();
     for t in tasks {
-        let (target_name, series) =
-            bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
+        let (target_name, series) = bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
         let key = if !target_name.is_empty() {
             target_name
         } else {
-            t.bug_target_display_name.as_deref().unwrap_or("—").to_string()
+            t.bug_target_display_name
+                .as_deref()
+                .unwrap_or("—")
+                .to_string()
         };
         by_target
             .entry(key)
@@ -1019,7 +1015,9 @@ fn print_bug_tasks(tasks: &[bugs::BugTask]) {
                 .assignee_link
                 .as_deref()
                 .and_then(|url| {
-                    url.rsplit('/').next().map(|seg| seg.trim_start_matches('~').to_string())
+                    url.rsplit('/')
+                        .next()
+                        .map(|seg| seg.trim_start_matches('~').to_string())
                 })
                 .unwrap_or_else(|| "—".to_string());
             table.add_row(vec![
@@ -1141,8 +1139,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 Some(pkg) => format!("{target}/+source/{pkg}"),
                 None => target.clone(),
             };
-            let bug =
-                bugs::create_bug(&client, &effective_target, &title, &description).await?;
+            let bug = bugs::create_bug(&client, &effective_target, &title, &description).await?;
             println!("{} Bug #{} created.", "✓".green().bold(), bug.id);
             if let Some(link) = &bug.web_link {
                 println!("URL: {}", link.underline());
@@ -1163,8 +1160,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             let target_filter = TargetFilter::from_args(target, many_targets, all_targets);
             let series_filter = SeriesFilter::from_args(series, many_series, all_series, no_series);
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let matched =
-                collect_matching_tasks(&tasks, bug_id, &target_filter, &series_filter)?;
+            let matched = collect_matching_tasks(&tasks, bug_id, &target_filter, &series_filter)?;
             for task in &matched {
                 let task_url = task.self_link.as_deref().ok_or_else(|| {
                     lpcli::error::LpError::Other("Bug task has no self_link".into())
@@ -1193,8 +1189,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             let target_filter = TargetFilter::from_args(target, many_targets, all_targets);
             let series_filter = SeriesFilter::from_args(series, many_series, all_series, no_series);
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let matched =
-                collect_matching_tasks(&tasks, bug_id, &target_filter, &series_filter)?;
+            let matched = collect_matching_tasks(&tasks, bug_id, &target_filter, &series_filter)?;
             for task in &matched {
                 let task_url = task.self_link.as_deref().ok_or_else(|| {
                     lpcli::error::LpError::Other("Bug task has no self_link".into())
@@ -1224,8 +1219,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             let series_filter = SeriesFilter::from_args(series, many_series, all_series, no_series);
             let assignee_url = client.url(&format!("/~{name}"));
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let matched =
-                collect_matching_tasks(&tasks, bug_id, &target_filter, &series_filter)?;
+            let matched = collect_matching_tasks(&tasks, bug_id, &target_filter, &series_filter)?;
             for task in &matched {
                 let task_url = task.self_link.as_deref().ok_or_else(|| {
                     lpcli::error::LpError::Other("Bug task has no self_link".into())
@@ -1357,23 +1351,23 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                     }
                 };
 
-                if let Some(imp) = &importance {
-                    if let Err(e) = bugs::set_bug_importance(&client, &task_url, imp).await {
-                        eprintln!(
-                            "{} Failed to set importance on task for '{}': {e}",
-                            "!".yellow().bold(),
-                            series_name,
-                        );
-                    }
+                if let Some(imp) = &importance
+                    && let Err(e) = bugs::set_bug_importance(&client, &task_url, imp).await
+                {
+                    eprintln!(
+                        "{} Failed to set importance on task for '{}': {e}",
+                        "!".yellow().bold(),
+                        series_name,
+                    );
                 }
-                if let Some(st) = &status {
-                    if let Err(e) = bugs::set_bug_status(&client, &task_url, st).await {
-                        eprintln!(
-                            "{} Failed to set status on task for '{}': {e}",
-                            "!".yellow().bold(),
-                            series_name,
-                        );
-                    }
+                if let Some(st) = &status
+                    && let Err(e) = bugs::set_bug_status(&client, &task_url, st).await
+                {
+                    eprintln!(
+                        "{} Failed to set status on task for '{}': {e}",
+                        "!".yellow().bold(),
+                        series_name,
+                    );
                 }
                 if let Some(assignee_name) = &assignee {
                     let assignee_api_url = client.url(&format!("/~{assignee_name}"));
@@ -1392,11 +1386,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                     .bug_target_display_name
                     .as_deref()
                     .unwrap_or(series_name.as_str());
-                println!(
-                    "{} Bug task added: {}",
-                    "✓".green().bold(),
-                    display_name,
-                );
+                println!("{} Bug task added: {}", "✓".green().bold(), display_name,);
                 created += 1;
             }
 
@@ -1469,11 +1459,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                     .unwrap_or("(unknown)");
                 match bugs::delete_bug_task(&client, task_url).await {
                     Ok(()) => {
-                        println!(
-                            "{} Deleted bug task: {}",
-                            "✓".green().bold(),
-                            display_name,
-                        );
+                        println!("{} Deleted bug task: {}", "✓".green().bold(), display_name,);
                         deleted += 1;
                     }
                     Err(e) => {
@@ -1588,11 +1574,7 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
                     .date_joined
                     .map(|d| d.format("%Y-%m-%d").to_string())
                     .unwrap_or_default();
-                table.add_row(vec![
-                    member_name,
-                    m.status.as_deref().unwrap_or("—"),
-                    &date,
-                ]);
+                table.add_row(vec![member_name, m.status.as_deref().unwrap_or("—"), &date]);
             }
             println!("{table}");
         }
@@ -1634,10 +1616,7 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
             let teams = people::get_person_owned_teams(&client, &name).await?;
             let mut table = build_table(vec!["Name", "Display Name"]);
             for t in &teams {
-                table.add_row(vec![
-                    format!("~{}", t.name),
-                    t.display_name.clone(),
-                ]);
+                table.add_row(vec![format!("~{}", t.name), t.display_name.clone()]);
             }
             println!("{table}");
         }
@@ -1710,14 +1689,7 @@ async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
 
         PackageCommand::Ppa { owner, ppa } => {
             let archive = packages::get_ppa(&client, &owner, &ppa).await?;
-            println!(
-                "{}",
-                archive
-                    .name
-                    .as_deref()
-                    .unwrap_or("PPA")
-                    .bold()
-            );
+            println!("{}", archive.name.as_deref().unwrap_or("PPA").bold());
             if let Some(desc) = &archive.description {
                 println!("{desc}");
             }
@@ -1778,7 +1750,11 @@ async fn handle_project(cmd: ProjectCommand) -> lpcli::error::Result<()> {
             let project = projects::get_project(&client, &name).await?;
             println!(
                 "{}",
-                project.display_name.as_deref().unwrap_or(&project.name).bold()
+                project
+                    .display_name
+                    .as_deref()
+                    .unwrap_or(&project.name)
+                    .bold()
             );
             if let Some(summary) = &project.summary {
                 println!("{summary}");
@@ -1880,11 +1856,7 @@ async fn handle_project(cmd: ProjectCommand) -> lpcli::error::Result<()> {
                     .map(|d| d.format("%Y-%m-%d").to_string())
                     .unwrap_or_else(|| "—".to_string());
                 let notes = truncate(r.release_notes.as_deref().unwrap_or(""), 40);
-                table.add_row(vec![
-                    r.version.as_deref().unwrap_or("—"),
-                    &date,
-                    &notes,
-                ]);
+                table.add_row(vec![r.version.as_deref().unwrap_or("—"), &date, &notes]);
             }
             println!("{table}");
         }
@@ -2011,7 +1983,10 @@ async fn handle_git(cmd: GitCommand) -> lpcli::error::Result<()> {
                     .map(|d| d.format("%Y-%m-%d").to_string())
                     .unwrap_or_default();
                 table.add_row(vec![
-                    r.unique_name.as_deref().or(r.name.as_deref()).unwrap_or("—"),
+                    r.unique_name
+                        .as_deref()
+                        .or(r.name.as_deref())
+                        .unwrap_or("—"),
                     r.repository_type.as_deref().unwrap_or("—"),
                     &modified,
                 ]);
@@ -2036,10 +2011,8 @@ async fn handle_git(cmd: GitCommand) -> lpcli::error::Result<()> {
         }
 
         GitCommand::Proposals { path, status } => {
-            let proposals =
-                git::list_merge_proposals(&client, &path, status.as_deref()).await?;
-            let mut table =
-                build_table(vec!["Status", "Source Branch", "Target Branch", "Date"]);
+            let proposals = git::list_merge_proposals(&client, &path, status.as_deref()).await?;
+            let mut table = build_table(vec!["Status", "Source Branch", "Target Branch", "Date"]);
             for p in &proposals {
                 let date = p
                     .date_created
@@ -2098,8 +2071,7 @@ async fn handle_spec(cmd: SpecCommand) -> lpcli::error::Result<()> {
             } else {
                 specifications::list_valid_project_specifications(&client, &target).await?
             };
-            let mut table =
-                build_table(vec!["Name", "Title", "Priority", "Lifecycle", "Impl"]);
+            let mut table = build_table(vec!["Name", "Title", "Priority", "Lifecycle", "Impl"]);
             for s in &specs {
                 table.add_row(vec![
                     s.name.as_str(),
@@ -2169,9 +2141,11 @@ async fn handle_question(cmd: QuestionCommand) -> lpcli::error::Result<()> {
             println!("{} question(s) found.", results.len());
         }
 
-        QuestionCommand::Messages { target, question_id } => {
-            let msgs =
-                questions::get_question_messages(&client, &target, question_id).await?;
+        QuestionCommand::Messages {
+            target,
+            question_id,
+        } => {
+            let msgs = questions::get_question_messages(&client, &target, question_id).await?;
             for m in &msgs {
                 let idx = m
                     .index
@@ -2186,10 +2160,7 @@ async fn handle_question(cmd: QuestionCommand) -> lpcli::error::Result<()> {
                     .date_created
                     .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_default();
-                println!(
-                    "{}",
-                    format!("Message #{idx} — {author} — {date}").bold()
-                );
+                println!("{}", format!("Message #{idx} — {author} — {date}").bold());
                 if let Some(action) = &m.action {
                     println!("[{action}]");
                 }
@@ -2273,8 +2244,7 @@ async fn handle_webhook(cmd: WebhookCommand) -> lpcli::error::Result<()> {
 
         WebhookCommand::Deliveries { webhook_url } => {
             let deliveries = webhooks::list_deliveries(&client, &webhook_url).await?;
-            let mut table =
-                build_table(vec!["Sent", "Successful", "Status Code", "Pending"]);
+            let mut table = build_table(vec!["Sent", "Successful", "Status Code", "Pending"]);
             for d in &deliveries {
                 let date = d
                     .date_sent
@@ -2305,8 +2275,7 @@ async fn handle_translation(cmd: TranslationCommand) -> lpcli::error::Result<()>
     match cmd {
         TranslationCommand::Queue { distro, series } => {
             let entries =
-                translations::get_distro_series_import_queue(&client, &distro, &series)
-                    .await?;
+                translations::get_distro_series_import_queue(&client, &distro, &series).await?;
             let mut table = build_table(vec!["Path", "Status", "Date"]);
             for e in &entries {
                 let date = e
@@ -2325,8 +2294,7 @@ async fn handle_translation(cmd: TranslationCommand) -> lpcli::error::Result<()>
 
         TranslationCommand::Templates { distro, series } => {
             let templates =
-                translations::get_distro_series_templates(&client, &distro, &series)
-                    .await?;
+                translations::get_distro_series_templates(&client, &distro, &series).await?;
             let mut table = build_table(vec!["Name", "Path", "Priority", "Current"]);
             for t in &templates {
                 table.add_row(vec![
@@ -2353,10 +2321,7 @@ async fn handle_snap(cmd: SnapCommand) -> lpcli::error::Result<()> {
     match cmd {
         SnapCommand::Show { owner, name } => {
             let snap = snaps::get_snap(&client, &owner, &name).await?;
-            println!(
-                "{}",
-                snap.name.as_deref().unwrap_or(&name).bold()
-            );
+            println!("{}", snap.name.as_deref().unwrap_or(&name).bold());
             if let Some(desc) = &snap.description {
                 println!("{desc}");
             }
@@ -2415,8 +2380,7 @@ async fn handle_snap(cmd: SnapCommand) -> lpcli::error::Result<()> {
         } => {
             let archive_url = client.url(&format!("/{distro}/+archive/primary"));
             let req =
-                snaps::request_snap_builds(&client, &owner, &name, &archive_url, &pocket)
-                    .await?;
+                snaps::request_snap_builds(&client, &owner, &name, &archive_url, &pocket).await?;
             println!("{} Build request submitted.", "✓".green().bold());
             if let Some(status) = &req.status {
                 println!("Status: {status}");
@@ -2443,14 +2407,13 @@ async fn handle_access_token(cmd: AccessTokenCommand) -> lpcli::error::Result<()
             scopes,
         } => {
             let scope_list: Vec<&str> = scopes.split(',').map(str::trim).collect();
-            let secret =
-                access_tokens::issue_project_access_token(
-                    &client,
-                    &project,
-                    &description,
-                    &scope_list,
-                )
-                .await?;
+            let secret = access_tokens::issue_project_access_token(
+                &client,
+                &project,
+                &description,
+                &scope_list,
+            )
+            .await?;
             println!("{} Access token issued.", "✓".green().bold());
             println!(
                 "{} Save this secret — it will not be shown again:",
@@ -2466,13 +2429,8 @@ async fn handle_access_token(cmd: AccessTokenCommand) -> lpcli::error::Result<()
         } => {
             let scope_list: Vec<&str> = scopes.split(',').map(str::trim).collect();
             let secret =
-                access_tokens::issue_git_access_token(
-                    &client,
-                    &repo,
-                    &description,
-                    &scope_list,
-                )
-                .await?;
+                access_tokens::issue_git_access_token(&client, &repo, &description, &scope_list)
+                    .await?;
             println!("{} Access token issued.", "✓".green().bold());
             println!(
                 "{} Save this secret — it will not be shown again:",
@@ -2482,16 +2440,10 @@ async fn handle_access_token(cmd: AccessTokenCommand) -> lpcli::error::Result<()
         }
 
         AccessTokenCommand::List { project } => {
-            let tokens =
-                access_tokens::list_project_access_tokens(&client, &project).await?;
-            let mut table =
-                build_table(vec!["Description", "Scopes", "Created", "Last Used"]);
+            let tokens = access_tokens::list_project_access_tokens(&client, &project).await?;
+            let mut table = build_table(vec!["Description", "Scopes", "Created", "Last Used"]);
             for t in &tokens {
-                let scopes = t
-                    .scopes
-                    .as_ref()
-                    .map(|v| v.join(", "))
-                    .unwrap_or_default();
+                let scopes = t.scopes.as_ref().map(|v| v.join(", ")).unwrap_or_default();
                 let created = t
                     .date_created
                     .map(|d| d.format("%Y-%m-%d").to_string())
@@ -2511,16 +2463,10 @@ async fn handle_access_token(cmd: AccessTokenCommand) -> lpcli::error::Result<()
         }
 
         AccessTokenCommand::ListGit { repo } => {
-            let tokens =
-                access_tokens::list_git_access_tokens(&client, &repo).await?;
-            let mut table =
-                build_table(vec!["Description", "Scopes", "Created", "Last Used"]);
+            let tokens = access_tokens::list_git_access_tokens(&client, &repo).await?;
+            let mut table = build_table(vec!["Description", "Scopes", "Created", "Last Used"]);
             for t in &tokens {
-                let scopes = t
-                    .scopes
-                    .as_ref()
-                    .map(|v| v.join(", "))
-                    .unwrap_or_default();
+                let scopes = t.scopes.as_ref().map(|v| v.join(", ")).unwrap_or_default();
                 let created = t
                     .date_created
                     .map(|d| d.format("%Y-%m-%d").to_string())
@@ -2563,11 +2509,7 @@ async fn handle_status() -> lpcli::error::Result<()> {
     println!("{}", "─".repeat(40));
     if auth.logged_in {
         match &auth.username {
-            Some(name) => println!(
-                "{} Logged in as {}",
-                "✓".green().bold(),
-                name.cyan().bold()
-            ),
+            Some(name) => println!("{} Logged in as {}", "✓".green().bold(), name.cyan().bold()),
             None => println!(
                 "{} Credentials found (could not verify with server)",
                 "~".yellow().bold()
@@ -2650,11 +2592,7 @@ enum TargetFilter {
 }
 
 impl TargetFilter {
-    fn from_args(
-        target: Option<String>,
-        many_targets: Option<String>,
-        all_targets: bool,
-    ) -> Self {
+    fn from_args(target: Option<String>, many_targets: Option<String>, all_targets: bool) -> Self {
         match (all_targets, many_targets, target) {
             (true, _, _) => TargetFilter::All,
             (false, Some(many), _) => TargetFilter::Many(parse_comma_separated(&many)),
@@ -2717,8 +2655,7 @@ fn collect_matching_tasks<'a>(
     let parsed: Vec<(&bugs::BugTask, String, Option<String>)> = tasks
         .iter()
         .map(|t| {
-            let (tgt, ser) =
-                bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
+            let (tgt, ser) = bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
             (t, tgt, ser)
         })
         .collect();
@@ -2805,9 +2742,7 @@ fn collect_matching_tasks<'a>(
         .filter(|(_, task_tgt, task_ser)| {
             let target_ok = match target_filter {
                 TargetFilter::One(t) => task_tgt.eq_ignore_ascii_case(t),
-                TargetFilter::Many(ts) => {
-                    ts.iter().any(|t| task_tgt.eq_ignore_ascii_case(t))
-                }
+                TargetFilter::Many(ts) => ts.iter().any(|t| task_tgt.eq_ignore_ascii_case(t)),
                 TargetFilter::All => true,
             };
             let series_ok = match series_filter {
@@ -2993,7 +2928,10 @@ mod tests {
 
     #[test]
     fn parse_comma_separated_ignores_empty_segments() {
-        assert_eq!(parse_comma_separated(",noble,,jammy,"), vec!["noble", "jammy"]);
+        assert_eq!(
+            parse_comma_separated(",noble,,jammy,"),
+            vec!["noble", "jammy"]
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3009,7 +2947,10 @@ mod tests {
     #[test]
     fn target_filter_from_many_targets() {
         let f = TargetFilter::from_args(None, Some("rust-alacritty, rust-eza".into()), false);
-        assert_eq!(f, TargetFilter::Many(vec!["rust-alacritty".into(), "rust-eza".into()]));
+        assert_eq!(
+            f,
+            TargetFilter::Many(vec!["rust-alacritty".into(), "rust-eza".into()])
+        );
     }
 
     #[test]
@@ -3147,7 +3088,11 @@ mod tests {
         let links = target_links(&result);
         assert!(links.iter().any(|l| l.contains("noble")));
         assert!(links.iter().any(|l| l.contains("jammy")));
-        assert!(links.iter().any(|l| l.contains("/ubuntu/+source/rust-alacritty")));
+        assert!(
+            links
+                .iter()
+                .any(|l| l.contains("/ubuntu/+source/rust-alacritty"))
+        );
         assert!(links.iter().any(|l| l.ends_with("/rust-alacritty")));
     }
 
@@ -3171,13 +3116,8 @@ mod tests {
         // Series-specific: noble/alacritty, jammy/alacritty, noble/eza, jammy/eza, focal/eza = 5
         // Series-less: ubuntu/+source/rust-alacritty, /rust-alacritty = 2
         // Total = 7
-        let result = collect_matching_tasks(
-            &tasks,
-            1,
-            &TargetFilter::All,
-            &SeriesFilter::All,
-        )
-        .unwrap();
+        let result =
+            collect_matching_tasks(&tasks, 1, &TargetFilter::All, &SeriesFilter::All).unwrap();
         assert_eq!(result.len(), 7);
     }
 
@@ -3214,7 +3154,10 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("nonexistent-pkg"), "msg: {msg}");
         assert!(msg.contains("42"), "msg: {msg}");
-        assert!(msg.contains("rust-alacritty") || msg.contains("rust-eza"), "msg: {msg}");
+        assert!(
+            msg.contains("rust-alacritty") || msg.contains("rust-eza"),
+            "msg: {msg}"
+        );
     }
 
     #[test]
@@ -3245,7 +3188,10 @@ mod tests {
         )
         .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("ghost-a") && msg.contains("ghost-b"), "msg: {msg}");
+        assert!(
+            msg.contains("ghost-a") && msg.contains("ghost-b"),
+            "msg: {msg}"
+        );
     }
 
     #[test]
@@ -3319,13 +3265,8 @@ mod tests {
     fn collect_all_targets_no_series() {
         let tasks = sample_tasks();
         // Only series-less tasks in sample_tasks: /ubuntu/+source/rust-alacritty, /rust-alacritty = 2
-        let result = collect_matching_tasks(
-            &tasks,
-            1,
-            &TargetFilter::All,
-            &SeriesFilter::NoSeries,
-        )
-        .unwrap();
+        let result =
+            collect_matching_tasks(&tasks, 1, &TargetFilter::All, &SeriesFilter::NoSeries).unwrap();
         assert_eq!(result.len(), 2);
     }
 
@@ -3337,17 +3278,16 @@ mod tests {
             make_task("/rust-alacritty"),
             make_task("/ubuntu/noble/+source/rust-alacritty"),
         ];
-        let result = collect_matching_tasks(
-            &tasks,
-            1,
-            &TargetFilter::All,
-            &SeriesFilter::All,
-        )
-        .unwrap();
+        let result =
+            collect_matching_tasks(&tasks, 1, &TargetFilter::All, &SeriesFilter::All).unwrap();
         assert_eq!(result.len(), 3);
         let links = target_links(&result);
         assert!(links.iter().any(|l| l.contains("noble")));
-        assert!(links.iter().any(|l| l.contains("/ubuntu/+source/rust-alacritty")));
+        assert!(
+            links
+                .iter()
+                .any(|l| l.contains("/ubuntu/+source/rust-alacritty"))
+        );
         assert!(links.iter().any(|l| l.ends_with("/rust-alacritty")));
     }
 
@@ -3459,12 +3399,7 @@ mod tests {
     #[test]
     fn apply_tag_removals_many_tags_comma_separated_string() {
         let current = vec!["lettuce".into(), "tomato".into(), "cucumber".into()];
-        let result = apply_tag_removals(
-            current,
-            None,
-            Some(vec!["lettuce, tomato".into()]),
-            false,
-        );
+        let result = apply_tag_removals(current, None, Some(vec!["lettuce, tomato".into()]), false);
         assert_eq!(result, vec!["cucumber"]);
     }
 
@@ -3575,11 +3510,8 @@ mod tests {
         // --remove-all-tags --add-many-tags "cricket, badminton"
         let current = vec!["baseball".into(), "football".into(), "basketball".into()];
         let after_remove = apply_tag_removals(current, None, None, true);
-        let final_tags = apply_tag_additions(
-            after_remove,
-            None,
-            Some(vec!["cricket, badminton".into()]),
-        );
+        let final_tags =
+            apply_tag_additions(after_remove, None, Some(vec!["cricket, badminton".into()]));
         assert_eq!(final_tags, vec!["cricket", "badminton"]);
     }
 
@@ -3625,7 +3557,15 @@ mod tests {
     #[test]
     fn cli_tag_add_tag_single() {
         let cmd = parse_tag_cmd(&["--bug-id", "42", "--add-tag", "java"]);
-        let BugCommand::Tag { bug_id, add_tag, add_many_tags, remove_tag, remove_many_tags, remove_all_tags } = cmd else {
+        let BugCommand::Tag {
+            bug_id,
+            add_tag,
+            add_many_tags,
+            remove_tag,
+            remove_many_tags,
+            remove_all_tags,
+        } = cmd
+        else {
             panic!("Expected Tag variant");
         };
         assert_eq!(bug_id, 42);
@@ -3639,10 +3579,16 @@ mod tests {
     #[test]
     fn cli_tag_add_many_tags_space_separated() {
         let cmd = parse_tag_cmd(&[
-            "--bug-id", "42",
-            "--add-many-tags", "homestar", "cheat", "strongbad",
+            "--bug-id",
+            "42",
+            "--add-many-tags",
+            "homestar",
+            "cheat",
+            "strongbad",
         ]);
-        let BugCommand::Tag { add_many_tags, .. } = cmd else { panic!() };
+        let BugCommand::Tag { add_many_tags, .. } = cmd else {
+            panic!()
+        };
         let tags = parse_tags_from_vec(&add_many_tags.unwrap());
         assert_eq!(tags, vec!["homestar", "cheat", "strongbad"]);
     }
@@ -3650,10 +3596,14 @@ mod tests {
     #[test]
     fn cli_tag_add_many_tags_comma_separated() {
         let cmd = parse_tag_cmd(&[
-            "--bug-id", "42",
-            "--add-many-tags", "homestar, cheat, strongbad",
+            "--bug-id",
+            "42",
+            "--add-many-tags",
+            "homestar, cheat, strongbad",
         ]);
-        let BugCommand::Tag { add_many_tags, .. } = cmd else { panic!() };
+        let BugCommand::Tag { add_many_tags, .. } = cmd else {
+            panic!()
+        };
         let tags = parse_tags_from_vec(&add_many_tags.unwrap());
         assert_eq!(tags, vec!["homestar", "cheat", "strongbad"]);
     }
@@ -3661,18 +3611,27 @@ mod tests {
     #[test]
     fn cli_tag_remove_tag_single() {
         let cmd = parse_tag_cmd(&["--bug-id", "99", "--remove-tag", "pear"]);
-        let BugCommand::Tag { remove_tag, remove_all_tags, .. } = cmd else { panic!() };
+        let BugCommand::Tag {
+            remove_tag,
+            remove_all_tags,
+            ..
+        } = cmd
+        else {
+            panic!()
+        };
         assert_eq!(remove_tag, Some("pear".to_string()));
         assert!(!remove_all_tags);
     }
 
     #[test]
     fn cli_tag_remove_many_tags() {
-        let cmd = parse_tag_cmd(&[
-            "--bug-id", "99",
-            "--remove-many-tags", "lettuce", "tomato",
-        ]);
-        let BugCommand::Tag { remove_many_tags, .. } = cmd else { panic!() };
+        let cmd = parse_tag_cmd(&["--bug-id", "99", "--remove-many-tags", "lettuce", "tomato"]);
+        let BugCommand::Tag {
+            remove_many_tags, ..
+        } = cmd
+        else {
+            panic!()
+        };
         let tags = parse_tags_from_vec(&remove_many_tags.unwrap());
         assert_eq!(tags, vec!["lettuce", "tomato"]);
     }
@@ -3680,7 +3639,15 @@ mod tests {
     #[test]
     fn cli_tag_remove_all_tags() {
         let cmd = parse_tag_cmd(&["--bug-id", "7", "--remove-all-tags"]);
-        let BugCommand::Tag { remove_all_tags, remove_tag, remove_many_tags, .. } = cmd else { panic!() };
+        let BugCommand::Tag {
+            remove_all_tags,
+            remove_tag,
+            remove_many_tags,
+            ..
+        } = cmd
+        else {
+            panic!()
+        };
         assert!(remove_all_tags);
         assert!(remove_tag.is_none());
         assert!(remove_many_tags.is_none());
@@ -3689,11 +3656,22 @@ mod tests {
     #[test]
     fn cli_tag_remove_all_and_add_many() {
         let cmd = parse_tag_cmd(&[
-            "--bug-id", "1",
+            "--bug-id",
+            "1",
             "--remove-all-tags",
-            "--add-many-tags", "cricket", "badminton",
+            "--add-many-tags",
+            "cricket",
+            "badminton",
         ]);
-        let BugCommand::Tag { remove_all_tags, add_many_tags, add_tag, .. } = cmd else { panic!() };
+        let BugCommand::Tag {
+            remove_all_tags,
+            add_many_tags,
+            add_tag,
+            ..
+        } = cmd
+        else {
+            panic!()
+        };
         assert!(remove_all_tags);
         assert!(add_tag.is_none());
         let tags = parse_tags_from_vec(&add_many_tags.unwrap());
@@ -3702,12 +3680,15 @@ mod tests {
 
     #[test]
     fn cli_tag_add_tag_and_remove_tag_together() {
-        let cmd = parse_tag_cmd(&[
-            "--bug-id", "1",
-            "--remove-tag", "old",
-            "--add-tag", "new",
-        ]);
-        let BugCommand::Tag { remove_tag, add_tag, .. } = cmd else { panic!() };
+        let cmd = parse_tag_cmd(&["--bug-id", "1", "--remove-tag", "old", "--add-tag", "new"]);
+        let BugCommand::Tag {
+            remove_tag,
+            add_tag,
+            ..
+        } = cmd
+        else {
+            panic!()
+        };
         assert_eq!(remove_tag, Some("old".to_string()));
         assert_eq!(add_tag, Some("new".to_string()));
     }
@@ -3715,10 +3696,15 @@ mod tests {
     #[test]
     fn cli_tag_add_tag_and_add_many_tags_mutually_exclusive() {
         let full = [
-            "lpcli", "bug", "tag",
-            "--bug-id", "1",
-            "--add-tag", "java",
-            "--add-many-tags", "python",
+            "lpcli",
+            "bug",
+            "tag",
+            "--bug-id",
+            "1",
+            "--add-tag",
+            "java",
+            "--add-many-tags",
+            "python",
         ];
         assert!(
             Cli::try_parse_from(full).is_err(),
@@ -3729,10 +3715,15 @@ mod tests {
     #[test]
     fn cli_tag_remove_tag_and_remove_many_tags_mutually_exclusive() {
         let full = [
-            "lpcli", "bug", "tag",
-            "--bug-id", "1",
-            "--remove-tag", "apple",
-            "--remove-many-tags", "banana",
+            "lpcli",
+            "bug",
+            "tag",
+            "--bug-id",
+            "1",
+            "--remove-tag",
+            "apple",
+            "--remove-many-tags",
+            "banana",
         ];
         assert!(
             Cli::try_parse_from(full).is_err(),
@@ -3743,9 +3734,13 @@ mod tests {
     #[test]
     fn cli_tag_remove_tag_and_remove_all_tags_mutually_exclusive() {
         let full = [
-            "lpcli", "bug", "tag",
-            "--bug-id", "1",
-            "--remove-tag", "apple",
+            "lpcli",
+            "bug",
+            "tag",
+            "--bug-id",
+            "1",
+            "--remove-tag",
+            "apple",
             "--remove-all-tags",
         ];
         assert!(
@@ -3757,9 +3752,13 @@ mod tests {
     #[test]
     fn cli_tag_remove_many_tags_and_remove_all_tags_mutually_exclusive() {
         let full = [
-            "lpcli", "bug", "tag",
-            "--bug-id", "1",
-            "--remove-many-tags", "apple",
+            "lpcli",
+            "bug",
+            "tag",
+            "--bug-id",
+            "1",
+            "--remove-many-tags",
+            "apple",
             "--remove-all-tags",
         ];
         assert!(

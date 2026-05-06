@@ -103,7 +103,9 @@ async fn rate_limit_retry_after_header_is_captured() {
         .expect_err("exhausted 429s must be an error");
 
     match err {
-        LpError::RateLimit { retry_after_secs: Some(secs) } => {
+        LpError::RateLimit {
+            retry_after_secs: Some(secs),
+        } => {
             assert_eq!(secs, 42, "Retry-After header value must be surfaced");
         }
         other => panic!("expected RateLimit with retry_after_secs=Some(42), got: {other}"),
@@ -305,7 +307,10 @@ async fn bad_request_400_is_not_retried() {
         .expect_err("400 must be an error");
 
     match err {
-        LpError::Api { status, ref message } => {
+        LpError::Api {
+            status,
+            ref message,
+        } => {
             assert_eq!(status, 400);
             assert!(message.contains("field") || message.contains("400") || !message.is_empty());
         }
@@ -352,10 +357,7 @@ async fn success_200_is_not_retried() {
         .with_max_retries(3)
         .with_retry_delay_ms(1);
 
-    let bug: lpcli::bugs::Bug = client
-        .get("/bugs/10")
-        .await
-        .expect("200 OK must succeed");
+    let bug: lpcli::bugs::Bug = client.get("/bugs/10").await.expect("200 OK must succeed");
 
     assert_eq!(bug.id, 10);
 
