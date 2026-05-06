@@ -99,10 +99,7 @@ pub async fn get_person(client: &LaunchpadClient, name: &str) -> Result<Person> 
 }
 
 /// Search for people by display name or Launchpad name.
-pub async fn search_people(
-    client: &LaunchpadClient,
-    query: &str,
-) -> Result<Vec<Person>> {
+pub async fn search_people(client: &LaunchpadClient, query: &str) -> Result<Vec<Person>> {
     let encoded = url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>();
     let url = client.url(&format!("/people?ws.op=find&text={encoded}"));
     Collection::fetch_all(client, &url).await
@@ -223,6 +220,9 @@ mod tests {
         }"#;
         let membership: TeamMembership = serde_json::from_str(json).unwrap();
         assert_eq!(membership.status.as_deref(), Some("Approved"));
-        assert_eq!(membership.member_link.as_deref(), Some("https://api.launchpad.net/devel/~jdoe"));
+        assert_eq!(
+            membership.member_link.as_deref(),
+            Some("https://api.launchpad.net/devel/~jdoe")
+        );
     }
 }

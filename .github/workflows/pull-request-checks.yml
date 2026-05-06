@@ -1,0 +1,130 @@
+name: Pull Request Checks
+
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Verify code is formatted according to rustfmt standards (rust.instructions.md §Code Style)
+  fmt:
+    name: Formatting (rustfmt)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain with rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check code formatting
+        run: cargo fmt -- --check
+
+  # Run Clippy to catch common mistakes and enforce best practices (rust.instructions.md §Code Style)
+  clippy:
+    name: Clippy Lints
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain with Clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-clippy-
+
+      # Treat all warnings as errors per rust.instructions.md: "Don't ignore warnings—treat them as errors during CI"
+      - name: Run Clippy (deny all warnings)
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        env:
+          RUSTFLAGS: "-D warnings"
+
+  # Run all unit and integration tests (rust.instructions.md §Testing and Documentation)
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-
+
+      - name: Run unit and integration tests
+        run: cargo test --locked --all-features
+        env:
+          RUSTFLAGS: "-D warnings"
+
+  # Verify all public APIs are documented (rust.instructions.md §Testing and Documentation)
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-docs-
+
+      - name: Build documentation (deny warnings)
+        run: cargo doc --locked --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  # Verify the crate builds against the declared minimum supported Rust version (rust.instructions.md §Project Organization)
+  msrv:
+    name: Minimum Supported Rust Version (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.88 (MSRV from Cargo.toml)
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-msrv-
+
+      - name: Check build on MSRV
+        run: cargo check --locked --all-features

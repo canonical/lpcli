@@ -189,16 +189,13 @@ pub struct BugSearchParams<'a> {
 ///
 /// # Errors
 ///
-/// Returns [`LpError::NotFound`] if the bug does not exist.
+/// Returns [`crate::error::LpError::NotFound`] if the bug does not exist.
 pub async fn get_bug(client: &LaunchpadClient, bug_id: u64) -> Result<Bug> {
     client.get(&format!("/bugs/{bug_id}")).await
 }
 
 /// Fetch all bug tasks associated with a bug.
-pub async fn get_bug_tasks(
-    client: &LaunchpadClient,
-    bug_id: u64,
-) -> Result<Vec<BugTask>> {
+pub async fn get_bug_tasks(client: &LaunchpadClient, bug_id: u64) -> Result<Vec<BugTask>> {
     let url = client.url(&format!("/bugs/{bug_id}/bug_tasks"));
     Collection::fetch_all(client, &url).await
 }
@@ -222,7 +219,11 @@ pub async fn search_bugs(
     // distribution source package (`/{distro}/+source/{pkg}`); otherwise we
     // search the project / distribution directly.
     let base = if let Some(pkg) = params.package_name {
-        format!("/{}/+source/{}?ws.op=searchTasks", urlenc(target), urlenc(pkg))
+        format!(
+            "/{}/+source/{}?ws.op=searchTasks",
+            urlenc(target),
+            urlenc(pkg)
+        )
     } else {
         format!("/{}?ws.op=searchTasks", urlenc(target))
     };
@@ -354,11 +355,7 @@ pub async fn set_bug_assignee(
 /// The Launchpad `newMessage` operation returns `201 Created` with an empty
 /// body (the new message URL is in the `Location` header), so this function
 /// returns `()` rather than trying to deserialise a response object.
-pub async fn add_bug_comment(
-    client: &LaunchpadClient,
-    bug_id: u64,
-    comment: &str,
-) -> Result<()> {
+pub async fn add_bug_comment(client: &LaunchpadClient, bug_id: u64, comment: &str) -> Result<()> {
     use std::collections::HashMap;
     let mut params = HashMap::new();
     params.insert("ws.op", "newMessage");
@@ -367,10 +364,7 @@ pub async fn add_bug_comment(
 }
 
 /// Fetch comments for a bug.
-pub async fn get_bug_comments(
-    client: &LaunchpadClient,
-    bug_id: u64,
-) -> Result<Vec<BugComment>> {
+pub async fn get_bug_comments(client: &LaunchpadClient, bug_id: u64) -> Result<Vec<BugComment>> {
     let url = client.url(&format!("/bugs/{bug_id}/messages"));
     Collection::fetch_all(client, &url).await
 }
@@ -382,11 +376,7 @@ pub async fn get_bug_comments(
 /// current tags, modify the list, then call this function.
 ///
 /// Returns the updated [`Bug`] on success.
-pub async fn set_bug_tags(
-    client: &LaunchpadClient,
-    bug_id: u64,
-    tags: &[String],
-) -> Result<Bug> {
+pub async fn set_bug_tags(client: &LaunchpadClient, bug_id: u64, tags: &[String]) -> Result<Bug> {
     let url = client.url(&format!("/bugs/{bug_id}"));
     let body = serde_json::json!({ "tags": tags });
     client.patch_url_with_value(&url, &body).await
@@ -573,17 +563,15 @@ mod tests {
 
     #[test]
     fn parse_target_link_project() {
-        let (name, series) =
-            parse_target_link("https://api.launchpad.net/devel/rust-alacritty");
+        let (name, series) = parse_target_link("https://api.launchpad.net/devel/rust-alacritty");
         assert_eq!(name, "rust-alacritty");
         assert_eq!(series, None);
     }
 
     #[test]
     fn parse_target_link_ubuntu_source_no_series() {
-        let (name, series) = parse_target_link(
-            "https://api.launchpad.net/devel/ubuntu/+source/rust-alacritty",
-        );
+        let (name, series) =
+            parse_target_link("https://api.launchpad.net/devel/ubuntu/+source/rust-alacritty");
         assert_eq!(name, "rust-alacritty");
         assert_eq!(series, None);
     }

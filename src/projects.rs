@@ -104,10 +104,7 @@ pub async fn get_project(client: &LaunchpadClient, name: &str) -> Result<Project
 }
 
 /// Search Launchpad projects by keyword.
-pub async fn search_projects(
-    client: &LaunchpadClient,
-    query: &str,
-) -> Result<Vec<Project>> {
+pub async fn search_projects(client: &LaunchpadClient, query: &str) -> Result<Vec<Project>> {
     let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
     let url = client.url(&format!("/projects?ws.op=search&text={encoded}"));
     Collection::fetch_all(client, &url).await
@@ -117,10 +114,7 @@ pub async fn search_projects(
 ///
 /// Uses the `all_milestones` collection link exposed by both `project` and
 /// `distribution` resources in the Launchpad API.
-pub async fn list_milestones(
-    client: &LaunchpadClient,
-    project: &str,
-) -> Result<Vec<Milestone>> {
+pub async fn list_milestones(client: &LaunchpadClient, project: &str) -> Result<Vec<Milestone>> {
     let url = client.url(&format!("/{}/all_milestones", urlenc(project)));
     Collection::fetch_all(client, &url).await
 }
@@ -201,7 +195,9 @@ pub async fn get_project_series(
     project: &str,
     series_name: &str,
 ) -> Result<ProjectSeries> {
-    client.get(&format!("/{}/{}", urlenc(project), urlenc(series_name))).await
+    client
+        .get(&format!("/{}/{}", urlenc(project), urlenc(series_name)))
+        .await
 }
 
 /// List all series for a project.
@@ -219,7 +215,11 @@ pub async fn list_series_releases(
     project: &str,
     series_name: &str,
 ) -> Result<Vec<Release>> {
-    let url = client.url(&format!("/{}/{}/releases", urlenc(project), urlenc(series_name)));
+    let url = client.url(&format!(
+        "/{}/{}/releases",
+        urlenc(project),
+        urlenc(series_name)
+    ));
     Collection::fetch_all(client, &url).await
 }
 
@@ -290,6 +290,9 @@ mod tests {
         }"#;
         let release: Release = serde_json::from_str(json).unwrap();
         assert_eq!(release.version.as_deref(), Some("2.0.0"));
-        assert_eq!(release.release_notes.as_deref(), Some("First stable release."));
+        assert_eq!(
+            release.release_notes.as_deref(),
+            Some("First stable release.")
+        );
     }
 }

@@ -123,10 +123,7 @@ pub async fn delete_webhook(client: &LaunchpadClient, webhook_url: &str) -> Resu
 /// Send a test ping to a webhook.
 ///
 /// Returns the resulting [`WebhookDelivery`] record.
-pub async fn ping_webhook(
-    client: &LaunchpadClient,
-    webhook_url: &str,
-) -> Result<WebhookDelivery> {
+pub async fn ping_webhook(client: &LaunchpadClient, webhook_url: &str) -> Result<WebhookDelivery> {
     let location = client
         .post_pairs_url_created_location(webhook_url, &[("ws.op", "ping")])
         .await?;
@@ -167,7 +164,9 @@ mod tests {
         assert_eq!(wh.delivery_url.as_deref(), Some("https://example.com/hook"));
         assert_eq!(wh.active, Some(true));
         assert_eq!(
-            wh.event_types.as_ref().map(|v| v.iter().map(String::as_str).collect::<Vec<_>>()),
+            wh.event_types
+                .as_ref()
+                .map(|v| v.iter().map(String::as_str).collect::<Vec<_>>()),
             Some(vec!["git:push:0.1"])
         );
     }

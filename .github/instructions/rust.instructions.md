@@ -132,4 +132,9 @@ Before publishing or reviewing Rust code, ensure:
 - [ ] **Performance**: Efficient use of iterators, minimal allocations
 - [ ] **API Design**: Functions are predictable, flexible, and type-safe
 - [ ] **Future Proofing**: Private fields in structs, sealed traits where appropriate
-- [ ] **Tooling**: Code passes `cargo fmt`, `cargo clippy`, and `cargo test`
+
+### Mandatory Tooling Checks
+- [ ] **Tests**: Must pass: `cargo test`
+- [ ] **Clippy**: Must pass: `cargo clippy --locked --all-targets --all-features -- -D warnings`
+- [ ] **Rustfmt**: Must pass: `cargo fmt -- --check`
+- [ ] **Rustdoc**: Must pass: `cargo doc --locked --no-deps --all-features`

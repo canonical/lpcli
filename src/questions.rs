@@ -81,12 +81,10 @@ pub struct QuestionSearchParams<'a> {
 // ---------------------------------------------------------------------------
 
 /// Fetch a question by its global numeric ID.
-pub async fn get_question_by_id(
-    client: &LaunchpadClient,
-    question_id: u64,
-) -> Result<Question> {
-    let url =
-        client.url(&format!("/questions?ws.op=getByID&question_id={question_id}"));
+pub async fn get_question_by_id(client: &LaunchpadClient, question_id: u64) -> Result<Question> {
+    let url = client.url(&format!(
+        "/questions?ws.op=getByID&question_id={question_id}"
+    ));
     client.get_url(&url).await
 }
 
@@ -98,7 +96,9 @@ pub async fn get_question(
     target: &str,
     question_id: u64,
 ) -> Result<Question> {
-    client.get(&format!("/{}/+question/{question_id}", urlenc(target))).await
+    client
+        .get(&format!("/{}/+question/{question_id}", urlenc(target)))
+        .await
 }
 
 /// Search questions on a project or distribution.
@@ -126,7 +126,10 @@ pub async fn get_question_messages(
     target: &str,
     question_id: u64,
 ) -> Result<Vec<QuestionMessage>> {
-    let url = client.url(&format!("/{}/+question/{question_id}/messages", urlenc(target)));
+    let url = client.url(&format!(
+        "/{}/+question/{question_id}/messages",
+        urlenc(target)
+    ));
     Collection::fetch_all(client, &url).await
 }
 

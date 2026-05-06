@@ -112,10 +112,7 @@ pub struct MergeProposal {
 ///
 /// `path` is the repository slug, with or without a leading `/`,
 /// e.g. `"~person/project/+git/name"` or `"/~person/+git/name"`.
-pub async fn get_git_repository(
-    client: &LaunchpadClient,
-    path: &str,
-) -> Result<GitRepository> {
+pub async fn get_git_repository(client: &LaunchpadClient, path: &str) -> Result<GitRepository> {
     let clean = path.trim_start_matches('/');
     client.get(&format!("/{clean}")).await
 }
@@ -127,8 +124,7 @@ pub async fn get_git_repository_by_unique_name(
     client: &LaunchpadClient,
     unique_name: &str,
 ) -> Result<GitRepository> {
-    let enc: String =
-        url::form_urlencoded::byte_serialize(unique_name.as_bytes()).collect();
+    let enc: String = url::form_urlencoded::byte_serialize(unique_name.as_bytes()).collect();
     let url = client.url(&format!("/+git?ws.op=getByPath&path={enc}"));
     client.get_url(&url).await
 }
@@ -142,8 +138,7 @@ pub async fn get_default_git_repository(
     target: &str,
 ) -> Result<GitRepository> {
     let target_url = client.url(&format!("/{target}"));
-    let enc: String =
-        url::form_urlencoded::byte_serialize(target_url.as_bytes()).collect();
+    let enc: String = url::form_urlencoded::byte_serialize(target_url.as_bytes()).collect();
     let url = client.url(&format!("/+git?ws.op=getDefaultRepository&target={enc}"));
     client.get_url(&url).await
 }
@@ -153,8 +148,7 @@ pub async fn list_person_git_repositories(
     client: &LaunchpadClient,
     person_name: &str,
 ) -> Result<Vec<GitRepository>> {
-    let enc: String =
-        url::form_urlencoded::byte_serialize(person_name.as_bytes()).collect();
+    let enc: String = url::form_urlencoded::byte_serialize(person_name.as_bytes()).collect();
     let url = client.url(&format!("/~{enc}/+git"));
     Collection::fetch_all(client, &url).await
 }
@@ -162,10 +156,7 @@ pub async fn list_person_git_repositories(
 /// List references (branches and tags) in a Git repository.
 ///
 /// `repo_path` is the repository slug, e.g. `"~person/project/+git/name"`.
-pub async fn list_git_refs(
-    client: &LaunchpadClient,
-    repo_path: &str,
-) -> Result<Vec<GitRef>> {
+pub async fn list_git_refs(client: &LaunchpadClient, repo_path: &str) -> Result<Vec<GitRef>> {
     let clean = repo_path.trim_start_matches('/');
     let url = client.url(&format!("/{clean}/refs"));
     Collection::fetch_all(client, &url).await

@@ -68,7 +68,9 @@ pub async fn get_specification(
     target: &str,
     name: &str,
 ) -> Result<Specification> {
-    client.get(&format!("/{}/+spec/{}", urlenc(target), urlenc(name))).await
+    client
+        .get(&format!("/{}/+spec/{}", urlenc(target), urlenc(name)))
+        .await
 }
 
 /// List all specifications for a project, including obsolete ones.

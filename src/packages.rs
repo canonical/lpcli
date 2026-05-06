@@ -135,7 +135,9 @@ pub async fn get_distro_series(
     distro: &str,
     series: &str,
 ) -> Result<DistroSeries> {
-    client.get(&format!("/{}/{}", enc(distro), enc(series))).await
+    client
+        .get(&format!("/{}/{}", enc(distro), enc(series)))
+        .await
 }
 
 /// List all known distro series for a distribution.
@@ -197,13 +199,13 @@ pub async fn search_published_sources(
 /// let ppa = get_ppa(&client, "canonical-kernel-team", "ppa").await.unwrap();
 /// # });
 /// ```
-pub async fn get_ppa(
-    client: &LaunchpadClient,
-    owner: &str,
-    ppa_name: &str,
-) -> Result<Archive> {
+pub async fn get_ppa(client: &LaunchpadClient, owner: &str, ppa_name: &str) -> Result<Archive> {
     client
-        .get(&format!("/~{}/+archive/ubuntu/{}", enc(owner), enc(ppa_name)))
+        .get(&format!(
+            "/~{}/+archive/ubuntu/{}",
+            enc(owner),
+            enc(ppa_name)
+        ))
         .await
 }
 
@@ -214,7 +216,11 @@ pub async fn list_ppa_sources(
     ppa_name: &str,
     params: &SourceSearchParams<'_>,
 ) -> Result<Vec<SourcePackagePublishingHistory>> {
-    let archive_url = client.url(&format!("/~{}/+archive/ubuntu/{}", enc(owner), enc(ppa_name)));
+    let archive_url = client.url(&format!(
+        "/~{}/+archive/ubuntu/{}",
+        enc(owner),
+        enc(ppa_name)
+    ));
     let mut query = format!("{archive_url}?ws.op=getPublishedSources");
     if let Some(name) = params.source_name {
         query.push_str(&format!("&source_name={}", enc(name)));
@@ -310,8 +316,7 @@ mod tests {
             "archive_link": null,
             "distro_series_link": null
         }"#;
-        let pub_history: SourcePackagePublishingHistory =
-            serde_json::from_str(json).unwrap();
+        let pub_history: SourcePackagePublishingHistory = serde_json::from_str(json).unwrap();
         assert_eq!(pub_history.source_package_name.as_deref(), Some("linux"));
         assert_eq!(pub_history.pocket.as_deref(), Some("Release"));
     }
