@@ -625,8 +625,11 @@ enum CveCommand {
     /// Search CVEs.
     Search {
         /// Restrict to CVEs affecting this distribution.
+        #[arg(short, long, default_value = "ubuntu")]
+        distro: String,
+        /// Keyword search against CVE sequence numbers, titles, and descriptions.
         #[arg(short, long)]
-        distro: Option<String>,
+        keyword: Option<String>,
         /// Maximum results to return.
         #[arg(short, long, default_value = "25")]
         limit: u32,
@@ -1869,7 +1872,7 @@ async fn handle_project(cmd: ProjectCommand) -> lpcli::error::Result<()> {
 // ---------------------------------------------------------------------------
 
 async fn handle_cve(cmd: CveCommand) -> lpcli::error::Result<()> {
-    let client = LaunchpadClient::new(None);
+    let client = authenticated_client()?;
 
     match cmd {
         CveCommand::Show { sequence } => {
@@ -1889,10 +1892,15 @@ async fn handle_cve(cmd: CveCommand) -> lpcli::error::Result<()> {
             }
         }
 
-        CveCommand::Search { distro, limit } => {
+        CveCommand::Search {
+            distro,
+            keyword,
+            limit,
+        } => {
             let params = CveSearchParams {
-                in_distribution: distro.as_deref(),
+                in_distribution: Some(distro.as_str()),
                 limit: Some(limit),
+                search_text: keyword.as_deref(),
                 ..Default::default()
             };
             let results = cves::search_cves(&client, &params).await?;

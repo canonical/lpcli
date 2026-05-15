@@ -50,6 +50,9 @@ pub struct CveSearchParams<'a> {
     pub modified_since: Option<&'a str>,
     /// Maximum number of results to return.
     pub limit: Option<u32>,
+    /// Keyword filter applied client-side against the CVE sequence number,
+    /// title, and description (case-insensitive substring match).
+    pub search_text: Option<&'a str>,
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +69,12 @@ pub async fn get_cve(client: &LaunchpadClient, sequence: &str) -> Result<Cve> {
 }
 
 /// Search for CVEs with optional distribution and date filters.
+///
+/// The [`CveSearchParams::search_text`] field performs a client-side
+/// case-insensitive substring match against each CVE's sequence number,
+/// title, and description. The Launchpad CVE `advancedSearch` API does not
+/// expose a server-side full-text search parameter, so filtering happens
+/// after results are fetched.
 pub async fn search_cves(
     client: &LaunchpadClient,
     params: &CveSearchParams<'_>,
@@ -88,7 +97,28 @@ pub async fn search_cves(
     }
 
     let url = client.url(&query);
-    Collection::fetch_all(client, &url).await
+    let mut results: Vec<Cve> = Collection::fetch_all(client, &url).await?;
+
+    if let Some(keyword) = params.search_text {
+        let needle = keyword.to_lowercase();
+        results.retain(|cve| {
+            cve.sequence.to_lowercase().contains(&needle)
+                || cve
+                    .title
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(&needle)
+                || cve
+                    .description
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(&needle)
+        });
+    }
+
+    Ok(results)
 }
 
 /// List all CVEs linked to a specific Launchpad bug.
