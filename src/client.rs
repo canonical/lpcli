@@ -169,10 +169,10 @@ impl LaunchpadClient {
             })?;
 
         if resp.status().is_success() {
-            return Ok(resp.text().await.map_err(|e| LpError::Api {
+            return resp.text().await.map_err(|e| LpError::Api {
                 status: 0,
                 message: format!("failed to read response: {e}"),
-            })?);
+            });
         }
 
         let status = resp.status().as_u16();
