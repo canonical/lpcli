@@ -136,6 +136,8 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 | List refs (branches/tags) | `lpcli git refs --path "~jdoe/launchpad/+git/myrepo"` |
 | List merge proposals | `lpcli git proposals --path "~jdoe/launchpad/+git/myrepo"` |
 | Filter merge proposals | `lpcli git proposals --path "~jdoe/launchpad/+git/myrepo" --status "Needs review"` |
+| List MP comments | `lpcli git comments --path "~jdoe/launchpad/+git/myrepo" --id 12345` |
+| List MP diffs | `lpcli git diffs --path "~jdoe/launchpad/+git/myrepo" --id 12345` |
 
 ### Specifications (Blueprints)
 

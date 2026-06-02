@@ -253,6 +253,12 @@ lpcli git refs --path "~jdoe/launchpad/+git/myrepo"
 # List merge proposals for a repository
 lpcli git proposals --path "~jdoe/launchpad/+git/myrepo"
 lpcli git proposals --path "~jdoe/launchpad/+git/myrepo" --status "Needs review"
+
+# List code review comments on a merge proposal
+lpcli git comments --path "~jdoe/launchpad/+git/myrepo" --id 12345
+
+# List code review diffs on a merge propsal
+lpcli git diffs --path "~jdoe/launchpad/+git/myrepo" --id 12345
 ```
 
 ---
