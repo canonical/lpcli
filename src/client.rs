@@ -128,6 +128,64 @@ impl LaunchpadClient {
         self.handle_response(resp).await
     }
 
+    /// Fetch a file resource URL (e.g. `diff_text_link`) and return the body
+    /// as plain text.
+    ///
+    /// The Launchpad API `diff_text` endpoint rejects both anonymous and
+    /// OAuth-authenticated requests.  Instead, the equivalent content is
+    /// available via the web interface at `code.launchpad.net` which issues a
+    /// 303 redirect to the librarian with an embedded download token.
+    ///
+    /// This method converts an API file-resource URL of the form:
+    ///   `https://api.launchpad.net/devel/.../+preview-diff/ID/diff_text`
+    /// to the corresponding web URL:
+    ///   `https://code.launchpad.net/.../+preview-diff/ID/+files/preview.diff`
+    /// and fetches that (following redirects).
+    pub async fn get_text_url(&self, url: &str) -> Result<String> {
+        // Convert API URL to web URL.
+        let web_url = url
+            .replace(
+                "https://api.launchpad.net/devel/",
+                "https://code.launchpad.net/",
+            )
+            .replace("/diff_text", "/+files/preview.diff");
+
+        let client = reqwest::Client::builder()
+            .user_agent(concat!("lpcli/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| LpError::Api {
+                status: 0,
+                message: format!("failed to build HTTP client: {e}"),
+            })?;
+
+        let resp = client
+            .get(&web_url)
+            .send()
+            .await
+            .map_err(|e| LpError::Api {
+                status: 0,
+                message: format!("request to {web_url} failed: {e}"),
+            })?;
+
+        if resp.status().is_success() {
+            return Ok(resp.text().await.map_err(|e| LpError::Api {
+                status: 0,
+                message: format!("failed to read response: {e}"),
+            })?);
+        }
+
+        let status = resp.status().as_u16();
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "(could not read response body)".to_string());
+        Err(LpError::Api {
+            status,
+            message: body,
+        })
+    }
+
     /// Perform an authenticated POST request with a JSON body.
     pub async fn post<T: DeserializeOwned>(
         &self,
