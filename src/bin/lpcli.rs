@@ -681,6 +681,27 @@ enum GitCommand {
         #[arg(short, long)]
         status: Option<String>,
     },
+    /// List code review comments on a merge proposal.
+    Comments {
+        /// Repository path (e.g. "~user/project/+git/repo").
+        #[arg(short, long)]
+        path: String,
+        /// Merge proposal ID (numeric, from the proposals listing).
+        #[arg(short = 'i', long)]
+        id: u64,
+        /// Preview diff ID to use for inline comments (defaults to latest).
+        #[arg(short, long)]
+        diff: Option<u64>,
+    },
+    /// List all preview diffs for a merge proposal.
+    Diffs {
+        /// Repository path (e.g. "~user/project/+git/repo").
+        #[arg(short, long)]
+        path: String,
+        /// Merge proposal ID (numeric, from the proposals listing).
+        #[arg(short = 'i', long)]
+        id: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -2020,13 +2041,26 @@ async fn handle_git(cmd: GitCommand) -> lpcli::error::Result<()> {
 
         GitCommand::Proposals { path, status } => {
             let proposals = git::list_merge_proposals(&client, &path, status.as_deref()).await?;
-            let mut table = build_table(vec!["Status", "Source Branch", "Target Branch", "Date"]);
+            let mut table = build_table(vec![
+                "ID",
+                "Status",
+                "Source Branch",
+                "Target Branch",
+                "Date",
+            ]);
             for p in &proposals {
+                let mp_id = p
+                    .self_link
+                    .as_deref()
+                    .and_then(git::extract_mp_id)
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "—".to_string());
                 let date = p
                     .date_created
                     .map(|d| d.format("%Y-%m-%d").to_string())
                     .unwrap_or_default();
                 table.add_row(vec![
+                    &mp_id,
                     p.queue_status.as_deref().unwrap_or("—"),
                     p.source_git_path.as_deref().unwrap_or("—"),
                     p.target_git_path.as_deref().unwrap_or("—"),
@@ -2034,6 +2068,107 @@ async fn handle_git(cmd: GitCommand) -> lpcli::error::Result<()> {
                 ]);
             }
             println!("{table}");
+        }
+
+        GitCommand::Comments { path, id, diff } => {
+            let comments = git::get_merge_proposal_comments(&client, &path, id).await?;
+            if comments.is_empty() {
+                println!("No review comments.");
+            } else {
+                println!("{}", "Review Comments".bold());
+                println!("{}", "─".repeat(60));
+                for (i, c) in comments.iter().enumerate() {
+                    let idx = c.id.unwrap_or(i as u64);
+                    let author = c
+                        .author_link
+                        .as_deref()
+                        .and_then(|u| u.rsplit('/').next())
+                        .unwrap_or("unknown");
+                    let date = c
+                        .date_created
+                        .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_default();
+                    let vote_str = c
+                        .vote
+                        .as_deref()
+                        .map(|v| format!(" [{v}]"))
+                        .unwrap_or_default();
+                    println!(
+                        "{}",
+                        format!("Comment #{idx} — {author} — {date}{vote_str}").bold()
+                    );
+                    println!("{}", c.content.as_deref().unwrap_or(""));
+                    println!("{}", "─".repeat(60));
+                }
+            }
+
+            // Inline (diff) comments.
+            let (inline, diff_map) = git::get_inline_comments(&client, &path, id, diff).await?;
+            if !inline.is_empty() {
+                println!();
+                println!("{}", "Inline Comments".bold());
+                println!("{}", "─".repeat(60));
+                for ic in &inline {
+                    let author = ic.author_display();
+                    let diff_line_num: Option<u64> =
+                        ic.line_number.as_deref().and_then(|n| n.parse().ok());
+
+                    // Look up file/line context from the diff map.
+                    let context = diff_line_num
+                        .and_then(|n| diff_map.iter().find(|(ln, _)| *ln == n).map(|(_, ctx)| ctx));
+
+                    let location = if let Some(ctx) = context {
+                        let line_info = ctx.new_line.map(|n| format!(":{n}")).unwrap_or_default();
+                        format!("{}{line_info}", ctx.file)
+                    } else {
+                        ic.line_number
+                            .as_deref()
+                            .map(|n| format!("diff L{n}"))
+                            .unwrap_or_else(|| "?".to_string())
+                    };
+
+                    let date = ic.date.as_deref().unwrap_or("");
+                    println!("{}", format!("{location} — {author} — {date}").bold());
+                    if let Some(ctx) = context {
+                        println!("  {}", ctx.content.dimmed());
+                    }
+                    println!("{}", ic.text.as_deref().unwrap_or(""));
+                    println!("{}", "─".repeat(60));
+                }
+            }
+        }
+        GitCommand::Diffs { path, id } => {
+            let diffs = git::get_preview_diffs(&client, &path, id).await?;
+            if diffs.is_empty() {
+                println!("No preview diffs found.");
+            } else {
+                println!("{}", "Preview Diffs".bold());
+                println!("{}", "─".repeat(60));
+                for d in &diffs {
+                    let diff_id =
+                        d.id.map(|i| i.to_string())
+                            .unwrap_or_else(|| "?".to_string());
+                    let date = d
+                        .date_created
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_default();
+                    let lines = d
+                        .diff_lines_count
+                        .map(|n| format!(" ({n} lines)"))
+                        .unwrap_or_default();
+                    let rev = d
+                        .source_revision_id
+                        .as_deref()
+                        .map(|r| {
+                            let short = if r.len() > 12 { &r[..12] } else { r };
+                            format!(" [{short}]")
+                        })
+                        .unwrap_or_default();
+                    println!("  #{diff_id}  {date}{lines}{rev}");
+                }
+                println!("{}", "─".repeat(60));
+                println!("Use --diff <ID> with the comments command to select a specific diff.");
+            }
         }
     }
     Ok(())
