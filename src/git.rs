@@ -433,20 +433,11 @@ pub async fn get_inline_comments(
         Ok(pd) => match pd.diff_text_link {
             Some(ref text_url) => match client.get_text_url(text_url).await {
                 Ok(text) => parse_diff_line_map(&text),
-                Err(e) => {
-                    eprintln!("[debug] failed to fetch diff text from {text_url}: {e}");
-                    Vec::new()
-                }
+                Err(_) => Vec::new(),
             },
-            None => {
-                eprintln!("[debug] preview diff has no diff_text_link");
-                Vec::new()
-            }
+            None => Vec::new(),
         },
-        Err(e) => {
-            eprintln!("[debug] failed to fetch preview diff from {diff_link}: {e}");
-            Vec::new()
-        }
+        Err(_) => Vec::new(),
     };
 
     Ok((comments, diff_map))
