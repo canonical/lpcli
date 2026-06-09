@@ -413,12 +413,12 @@ pub async fn get_inline_comments(
 
     // Determine which diff to use.
     let diff_link = if let Some(requested_id) = diff_id {
-        // Build the URL for the specific diff.
+        // Build the URL using the client's configured base URL so that
+        // test/staging overrides via `with_base_url` are respected.
         let clean = repo_path.trim_start_matches('/');
-        format!(
-            "{}/{clean}/+merge/{mp_id}/+preview-diff/{requested_id}",
-            crate::client::API_BASE
-        )
+        client.url(&format!(
+            "/{clean}/+merge/{mp_id}/+preview-diff/{requested_id}"
+        ))
     } else {
         // Default: use the latest diff (preview_diff_link points to the current one).
         match mp.preview_diff_link {
