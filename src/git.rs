@@ -222,6 +222,14 @@ pub fn parse_diff_line_map(diff_text: &str) -> Vec<(u64, DiffLineContext)> {
     for (i, line) in diff_text.lines().enumerate() {
         let diff_line = (i + 1) as u64; // 1-based
 
+        if line.starts_with("diff --git ") {
+            // New file boundary — reset context so inter-file header lines
+            // (index, ---, etc.) are not attributed to the previous file.
+            current_file = None;
+            new_lineno = 0;
+            continue;
+        }
+        
         if line.starts_with("+++ b/") || line.starts_with("+++ ") {
             // New file header, extract path.
             let path = line
