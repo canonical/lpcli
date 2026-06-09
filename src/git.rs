@@ -229,7 +229,7 @@ pub fn parse_diff_line_map(diff_text: &str) -> Vec<(u64, DiffLineContext)> {
             new_lineno = 0;
             continue;
         }
-        
+
         if line.starts_with("+++ b/") || line.starts_with("+++ ") {
             // New file header, extract path.
             let path = line
