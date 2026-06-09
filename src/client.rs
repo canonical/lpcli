@@ -143,6 +143,9 @@ impl LaunchpadClient {
     /// and fetches that (following redirects).
     pub async fn get_text_url(&self, url: &str) -> Result<String> {
         // Convert API URL to web URL.
+        if !url.starts_with("https://api.launchpad.net/devel/") || !url.ends_with("/diff_text") {
+            return Err(LpError::Other(format!("unexpected diff_text URL: {url}")));
+        }
         let web_url = url
             .replace(
                 "https://api.launchpad.net/devel/",
@@ -150,23 +153,7 @@ impl LaunchpadClient {
             )
             .replace("/diff_text", "/+files/preview.diff");
 
-        let client = reqwest::Client::builder()
-            .user_agent(concat!("lpcli/", env!("CARGO_PKG_VERSION")))
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| LpError::Api {
-                status: 0,
-                message: format!("failed to build HTTP client: {e}"),
-            })?;
-
-        let resp = client
-            .get(&web_url)
-            .send()
-            .await
-            .map_err(|e| LpError::Api {
-                status: 0,
-                message: format!("request to {web_url} failed: {e}"),
-            })?;
+        let resp = self.send_with_retry(self.http.get(&web_url)).await?;
 
         if resp.status().is_success() {
             return resp.text().await.map_err(|e| LpError::Api {
