@@ -41,6 +41,7 @@ pub mod packages;
 pub mod people;
 pub mod projects;
 pub mod questions;
+pub mod queue;
 pub mod snaps;
 pub mod specifications;
 pub mod status;

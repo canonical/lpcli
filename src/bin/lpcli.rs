@@ -15,6 +15,7 @@ use lpcli::{
     packages::{self, SourceSearchParams},
     people, projects,
     questions::{self, QuestionSearchParams},
+    queue::{self, QueueSearchParams},
     snaps, specifications, status, translations, webhooks,
 };
 
@@ -89,6 +90,35 @@ enum Command {
     /// Query and manage Launchpad Snap recipes.
     #[command(subcommand)]
     Snap(SnapCommand),
+
+    /// List packages in build/upload queues for a distro series.
+    Queue {
+        /// Filter by pocket: Release, Security, Updates, Proposed, or Backports.
+        #[arg(short, long)]
+        pocket: Option<String>,
+        /// Filter by upload status: New, Unapproved, Accepted, Done, or Rejected.
+        #[arg(short, long)]
+        status: Option<String>,
+        /// Keyword used to match the uploaded package name.
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Package version string used to match the uploaded package version.
+        #[arg(short, long)]
+        version: Option<String>,
+        /// Require exact match for --name or --version (default: false).
+        #[arg(short, long, default_value = "false")]
+        exact_match: bool,
+        /// Archive to query (full LP archive reference, e.g. "ubuntu/+archive/primary").
+        /// Defaults to the primary archive for the current Ubuntu development release.
+        #[arg(short, long)]
+        archive: Option<String>,
+        /// Distribution name (default: "ubuntu").
+        #[arg(short, long, default_value = "ubuntu")]
+        distro: String,
+        /// Series codename (e.g. "oracular"). Defaults to the current development series.
+        #[arg(long)]
+        series: Option<String>,
+    },
 
     /// Manage personal access tokens for projects and Git repositories.
     #[command(subcommand)]
@@ -982,6 +1012,28 @@ async fn run() -> lpcli::error::Result<()> {
         Command::Translation(cmd) => handle_translation(cmd).await?,
         Command::Snap(cmd) => handle_snap(cmd).await?,
         Command::AccessToken(cmd) => handle_access_token(cmd).await?,
+        Command::Queue {
+            pocket,
+            status,
+            name,
+            version,
+            exact_match,
+            archive,
+            distro,
+            series,
+        } => {
+            handle_queue(
+                pocket,
+                status,
+                name,
+                version,
+                exact_match,
+                archive,
+                distro,
+                series,
+            )
+            .await?
+        }
     }
 
     Ok(())
@@ -2685,6 +2737,118 @@ async fn handle_status() -> lpcli::error::Result<()> {
             println!("  Error: {err}");
         }
     }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Queue handler
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_queue(
+    pocket: Option<String>,
+    status: Option<String>,
+    name: Option<String>,
+    version: Option<String>,
+    exact_match: bool,
+    archive: Option<String>,
+    distro: String,
+    series: Option<String>,
+) -> lpcli::error::Result<()> {
+    let client = LaunchpadClient::new(None);
+
+    // Determine the series to query. If not provided, resolve the current
+    // Ubuntu development series.
+    let series_name = match series {
+        Some(s) => s,
+        None => queue::get_devel_series_name(&client, &distro).await?,
+    };
+
+    // If an archive name is given (e.g. "primary" or "ubuntu/+archive/primary"),
+    // resolve it to a full API URL. If it looks like a relative name, build the
+    // URL for the primary archive of the distribution.
+    let archive_url = archive.map(|a| {
+        if a.starts_with("http://") || a.starts_with("https://") {
+            a
+        } else if a.contains("/+archive/") {
+            client.url(&format!("/{}", a))
+        } else {
+            // Assume it's just the archive name under the distro.
+            client.url(&format!("/{}/+archive/{}", &distro, a))
+        }
+    });
+
+    let params = QueueSearchParams {
+        pocket: pocket.as_deref(),
+        status: status.as_deref(),
+        name: name.as_deref(),
+        version: version.as_deref(),
+        exact_match,
+        archive: archive_url.as_deref(),
+    };
+
+    let uploads = queue::get_package_uploads(&client, &distro, &series_name, &params).await?;
+
+    if uploads.is_empty() {
+        println!(
+            "{} No packages found in the queue for {} ({}).",
+            "ℹ".cyan().bold(),
+            series_name.bold(),
+            distro
+        );
+        return Ok(());
+    }
+
+    // Print a summary header.
+    println!(
+        "{} {} package(s) in queue for {} ({}):\n",
+        "●".green().bold(),
+        uploads.len(),
+        series_name.bold(),
+        distro,
+    );
+
+    let mut table = build_table(vec![
+        "Package",
+        "Version",
+        "Component",
+        "Pocket",
+        "Status",
+        "Archs",
+        "Created",
+    ]);
+    for upload in &uploads {
+        let pkg_name = upload
+            .package_name
+            .as_deref()
+            .or(upload.display_name.as_deref())
+            .unwrap_or("—");
+        let pkg_version = upload
+            .package_version
+            .as_deref()
+            .or(upload.display_version.as_deref())
+            .unwrap_or("—");
+        let component = upload.component_name.as_deref().unwrap_or("—");
+        let pocket_str = upload.pocket.as_deref().unwrap_or("—");
+        let status_str = upload.status.as_deref().unwrap_or("—");
+        let arches = upload.display_arches.as_deref().unwrap_or("—");
+        let created = upload
+            .date_created
+            .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "—".to_string());
+
+        table.add_row(vec![
+            pkg_name.to_string(),
+            pkg_version.to_string(),
+            component.to_string(),
+            pocket_str.to_string(),
+            status_str.to_string(),
+            arches.to_string(),
+            created,
+        ]);
+    }
+    println!("{table}");
 
     Ok(())
 }

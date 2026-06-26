@@ -8,7 +8,7 @@ RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y \
         ca-certificates \
         build-essential pkgconf libssl-dev \
-        rust-1.93-all cargo rustc \ 
+        rust-1.93-all cargo rustc rust-clippy rustfmt rust-miri \ 
         vim git \
         hyperfine ripgrep cargo-auditable \
         bash fish \
