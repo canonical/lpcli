@@ -76,6 +76,8 @@ pub struct QueueSearchParams<'a> {
     pub exact_match: bool,
     /// Archive link to filter by (full API URL of the archive).
     pub archive: Option<&'a str>,
+    /// Maximum number of results to return.
+    pub limit: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +130,9 @@ pub async fn get_package_uploads(
     }
     if let Some(archive) = params.archive {
         query.push_str(&format!("&archive={}", enc(archive)));
+    }
+    if let Some(limit) = params.limit {
+        query.push_str(&format!("&ws.size={limit}"));
     }
 
     Collection::fetch_all(client, &query).await

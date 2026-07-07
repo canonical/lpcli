@@ -91,34 +91,9 @@ enum Command {
     #[command(subcommand)]
     Snap(SnapCommand),
 
-    /// List packages in build/upload queues for a distro series.
-    Queue {
-        /// Filter by pocket: Release, Security, Updates, Proposed, or Backports.
-        #[arg(short, long)]
-        pocket: Option<String>,
-        /// Filter by upload status: New, Unapproved, Accepted, Done, or Rejected.
-        #[arg(short, long)]
-        status: Option<String>,
-        /// Keyword used to match the uploaded package name.
-        #[arg(short, long)]
-        name: Option<String>,
-        /// Package version string used to match the uploaded package version.
-        #[arg(short, long)]
-        version: Option<String>,
-        /// Require exact match for --name or --version (default: false).
-        #[arg(short, long, default_value = "false")]
-        exact_match: bool,
-        /// Archive to query (full LP archive reference, e.g. "ubuntu/+archive/primary").
-        /// Defaults to the primary archive for the current Ubuntu development release.
-        #[arg(short, long)]
-        archive: Option<String>,
-        /// Distribution name (default: "ubuntu").
-        #[arg(short, long, default_value = "ubuntu")]
-        distro: String,
-        /// Series codename (e.g. "oracular"). Defaults to the current development series.
-        #[arg(long)]
-        series: Option<String>,
-    },
+    /// Query and manage Launchpad package upload queues.
+    #[command(subcommand)]
+    Queue(QueueCommand),
 
     /// Manage personal access tokens for projects and Git repositories.
     #[command(subcommand)]
@@ -919,6 +894,45 @@ enum SnapCommand {
 }
 
 // ---------------------------------------------------------------------------
+// Queue sub-commands
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Subcommand)]
+enum QueueCommand {
+    /// Search packages in build/upload queues for a distro series.
+    Search {
+        /// Filter by pocket: Release, Security, Updates, Proposed, or Backports.
+        #[arg(short, long)]
+        pocket: Option<String>,
+        /// Filter by upload status: New, Unapproved, Accepted, Done, or Rejected.
+        #[arg(short, long, required = true)]
+        status: Option<String>,
+        /// Keyword used to match the uploaded package name.
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Package version string used to match the uploaded package version.
+        #[arg(short, long)]
+        version: Option<String>,
+        /// Require exact match for --name or --version (default: false).
+        #[arg(short, long, default_value = "false")]
+        exact_match: bool,
+        /// Archive to query (full LP archive reference, e.g. "ubuntu/+archive/primary").
+        /// Defaults to the primary archive for the current Ubuntu development release.
+        #[arg(short, long)]
+        archive: Option<String>,
+        /// Distribution name (default: "ubuntu").
+        #[arg(short, long, default_value = "ubuntu")]
+        distro: String,
+        /// Series codename (e.g. "oracular"). Defaults to the current development series.
+        #[arg(long)]
+        series: Option<String>,
+        /// Maximum number of results to return (default: 30).
+        #[arg(short, long, default_value = "30")]
+        limit: u32,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // AccessToken sub-commands
 // ---------------------------------------------------------------------------
 
@@ -1011,29 +1025,8 @@ async fn run() -> lpcli::error::Result<()> {
         Command::Webhook(cmd) => handle_webhook(cmd).await?,
         Command::Translation(cmd) => handle_translation(cmd).await?,
         Command::Snap(cmd) => handle_snap(cmd).await?,
+        Command::Queue(cmd) => handle_queue(cmd).await?,
         Command::AccessToken(cmd) => handle_access_token(cmd).await?,
-        Command::Queue {
-            pocket,
-            status,
-            name,
-            version,
-            exact_match,
-            archive,
-            distro,
-            series,
-        } => {
-            handle_queue(
-                pocket,
-                status,
-                name,
-                version,
-                exact_match,
-                archive,
-                distro,
-                series,
-            )
-            .await?
-        }
     }
 
     Ok(())
@@ -2745,8 +2738,37 @@ async fn handle_status() -> lpcli::error::Result<()> {
 // Queue handler
 // ---------------------------------------------------------------------------
 
+async fn handle_queue(cmd: QueueCommand) -> lpcli::error::Result<()> {
+    match cmd {
+        QueueCommand::Search {
+            pocket,
+            status,
+            name,
+            version,
+            exact_match,
+            archive,
+            distro,
+            series,
+            limit,
+        } => {
+            handle_queue_search(
+                pocket,
+                status,
+                name,
+                version,
+                exact_match,
+                archive,
+                distro,
+                series,
+                limit,
+            )
+            .await
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn handle_queue(
+async fn handle_queue_search(
     pocket: Option<String>,
     status: Option<String>,
     name: Option<String>,
@@ -2755,6 +2777,7 @@ async fn handle_queue(
     archive: Option<String>,
     distro: String,
     series: Option<String>,
+    limit: u32,
 ) -> lpcli::error::Result<()> {
     let client = LaunchpadClient::new(None);
 
@@ -2786,6 +2809,7 @@ async fn handle_queue(
         version: version.as_deref(),
         exact_match,
         archive: archive_url.as_deref(),
+        limit: Some(limit),
     };
 
     let uploads = queue::get_package_uploads(&client, &distro, &series_name, &params).await?;
