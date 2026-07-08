@@ -59,6 +59,8 @@ pub struct PackageUpload {
     pub archive_link: Option<String>,
     /// Changes file URL.
     pub changes_file_url: Option<String>,
+    /// Collection link for upload log entries (status change history).
+    pub logs_collection_link: Option<String>,
 }
 
 /// Parameters for querying package uploads.
@@ -243,6 +245,73 @@ pub async fn get_binary_properties(
 ) -> Result<Vec<BinaryProperties>> {
     let url = format!("{upload_self_link}?ws.op=getBinaryProperties");
     client.get_url(&url).await
+}
+
+// ---------------------------------------------------------------------------
+// Queue actions
+// ---------------------------------------------------------------------------
+
+/// Accept a package upload from the queue.
+///
+/// Calls the `acceptFromQueue` custom POST method on a `package_upload`
+/// entry.  The authenticated user must have queue-admin permissions for
+/// the target archive and component.
+///
+/// `upload_self_link` is the API self-link of the `PackageUpload` entry.
+pub async fn accept_from_queue(client: &LaunchpadClient, upload_self_link: &str) -> Result<()> {
+    let params = [("ws.op", "acceptFromQueue")];
+    client.post_pairs_url_ok(upload_self_link, &params).await
+}
+
+/// Reject a package upload from the queue.
+///
+/// Calls the `rejectFromQueue` custom POST method on a `package_upload`
+/// entry with an optional rejection comment.  The authenticated user must
+/// have queue-admin permissions for the target archive and component.
+///
+/// `upload_self_link` is the API self-link of the `PackageUpload` entry.
+pub async fn reject_from_queue(
+    client: &LaunchpadClient,
+    upload_self_link: &str,
+    comment: Option<&str>,
+) -> Result<()> {
+    let mut params = vec![("ws.op", "rejectFromQueue")];
+    if let Some(c) = comment {
+        params.push(("comment", c));
+    }
+    client.post_pairs_url_ok(upload_self_link, &params).await
+}
+
+// ---------------------------------------------------------------------------
+// Upload logs
+// ---------------------------------------------------------------------------
+
+/// A log entry recording a status change for a package upload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageUploadLog {
+    /// The reviewer (person who performed the action).
+    pub reviewer_link: Option<String>,
+    /// Previous queue status.
+    pub old_status: Option<String>,
+    /// New queue status after the action.
+    pub new_status: Option<String>,
+    /// Comment left by the reviewer (e.g. rejection reason).
+    pub comment: Option<String>,
+    /// When this action happened.
+    pub date_created: Option<DateTime<Utc>>,
+}
+
+/// Fetch upload log entries for a package upload.
+///
+/// Returns the log entries associated with the upload, which record
+/// status transitions (accept, reject, etc.) along with reviewer comments.
+///
+/// `logs_collection_url` is the `logs_collection_link` from a `PackageUpload`.
+pub async fn get_upload_logs(
+    client: &LaunchpadClient,
+    logs_collection_url: &str,
+) -> Result<Vec<PackageUploadLog>> {
+    Collection::fetch_all(client, logs_collection_url).await
 }
 
 // ---------------------------------------------------------------------------

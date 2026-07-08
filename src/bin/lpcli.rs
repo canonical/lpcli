@@ -983,7 +983,7 @@ enum QueueCommand {
         /// Package version (optional; shows the first match if not given).
         #[arg(short, long)]
         version: Option<String>,
-        /// Filter by upload status (e.g. "New", "Unapproved", "Accepted", "Done").
+        /// Filter by upload status (e.g. "New", "Unapproved", "Accepted", "Done", "Rejected").
         #[arg(short, long)]
         status: String,
         /// Filter by architecture (e.g. "amd64", "arm64", "source").
@@ -991,6 +991,51 @@ enum QueueCommand {
         arch: String,
         /// Distribution name (default: "ubuntu").
         #[arg(short, long, default_value = "ubuntu")]
+        distro: String,
+        /// Series codename (e.g. "oracular"). Defaults to the current development series.
+        #[arg(long)]
+        series: Option<String>,
+    },
+    /// Accept a package in the upload queue (requires queue-admin permissions).
+    Accept {
+        /// Source package name (required).
+        #[arg(short, long)]
+        name: String,
+        /// Package version (optional; accepts the first match if not given).
+        #[arg(short, long)]
+        version: Option<String>,
+        /// Filter by upload status (e.g. "New", "Unapproved").
+        #[arg(short, long, default_value = "New")]
+        status: String,
+        /// Filter by architecture (e.g. "amd64", "arm64", "source").
+        #[arg(short, long)]
+        arch: String,
+        /// Distribution name (default: "ubuntu").
+        #[arg(short, long, default_value = "ubuntu")]
+        distro: String,
+        /// Series codename (e.g. "oracular"). Defaults to the current development series.
+        #[arg(long)]
+        series: Option<String>,
+    },
+    /// Reject a package in the upload queue (requires queue-admin permissions).
+    Reject {
+        /// Source package name (required).
+        #[arg(short, long)]
+        name: String,
+        /// Package version (optional; rejects the first match if not given).
+        #[arg(short, long)]
+        version: Option<String>,
+        /// Filter by upload status (e.g. "New", "Unapproved").
+        #[arg(short, long, default_value = "New")]
+        status: String,
+        /// Filter by architecture (e.g. "amd64", "arm64", "source").
+        #[arg(short, long)]
+        arch: String,
+        /// Rejection comment explaining why the package is being rejected.
+        #[arg(short, long)]
+        comment: Option<String>,
+        /// Distribution name (default: "ubuntu").
+        #[arg(short = 'D', long, default_value = "ubuntu")]
         distro: String,
         /// Series codename (e.g. "oracular"). Defaults to the current development series.
         #[arg(long)]
@@ -2859,6 +2904,23 @@ async fn handle_queue(cmd: QueueCommand) -> lpcli::error::Result<()> {
             distro,
             series,
         } => handle_queue_info(name, version, status, arch, distro, series).await,
+        QueueCommand::Accept {
+            name,
+            version,
+            status,
+            arch,
+            distro,
+            series,
+        } => handle_queue_accept(name, version, status, arch, distro, series).await,
+        QueueCommand::Reject {
+            name,
+            version,
+            status,
+            arch,
+            comment,
+            distro,
+            series,
+        } => handle_queue_reject(name, version, status, arch, comment, distro, series).await,
     }
 }
 
@@ -3106,6 +3168,205 @@ async fn handle_queue_download(
 }
 
 // ---------------------------------------------------------------------------
+// Queue accept handler
+// ---------------------------------------------------------------------------
+
+async fn handle_queue_accept(
+    name: String,
+    version: Option<String>,
+    status: String,
+    arch: String,
+    distro: String,
+    series: Option<String>,
+) -> lpcli::error::Result<()> {
+    let client = authenticated_client()?;
+
+    // Resolve the series (default: current development series).
+    let series_name = match series {
+        Some(s) => s,
+        None => queue::get_devel_series_name(&client, &distro).await?,
+    };
+
+    // Search for the package in the queue.
+    let params = QueueSearchParams {
+        status: Some(&status),
+        name: Some(&name),
+        version: version.as_deref(),
+        exact_match: true,
+        limit: Some(30),
+        ..Default::default()
+    };
+
+    let uploads = queue::get_package_uploads(&client, &distro, &series_name, &params).await?;
+
+    // Find the first upload whose display_arches field contains the
+    // requested architecture.
+    let upload = uploads.iter().find(|u| {
+        u.display_arches
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .any(|a| a.trim().eq_ignore_ascii_case(&arch))
+    });
+
+    let upload = upload.ok_or_else(|| {
+        lpcli::error::LpError::NotFound(format!(
+            "No package '{}'{} [arch={}] found in queue with status '{}' for {}/{}.",
+            name,
+            version
+                .as_ref()
+                .map(|v| format!(" ({v})"))
+                .unwrap_or_default(),
+            arch,
+            status,
+            distro,
+            series_name,
+        ))
+    })?;
+
+    let self_link = upload.self_link.as_deref().ok_or_else(|| {
+        lpcli::error::LpError::Other("Package upload has no self_link.".to_string())
+    })?;
+
+    // Call acceptFromQueue.
+    queue::accept_from_queue(&client, self_link)
+        .await
+        .map_err(|e| {
+            // Provide a more helpful message for permission errors.
+            if let lpcli::error::LpError::Api {
+                status,
+                ref message,
+            } = e
+                && (status == 401 || status == 403)
+            {
+                return lpcli::error::LpError::Api {
+                    status,
+                    message: format!(
+                        "Permission denied: you do not have queue-admin privileges to accept \
+                     packages for {}/{}. {message}",
+                        distro, series_name,
+                    ),
+                };
+            }
+            e
+        })?;
+
+    println!(
+        "{} Accepted {} ({}) [{}] in {}/{}.",
+        "✓".green().bold(),
+        upload.package_name.as_deref().unwrap_or("?").bold(),
+        upload.package_version.as_deref().unwrap_or("?"),
+        upload.display_arches.as_deref().unwrap_or("?"),
+        distro,
+        series_name,
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Queue reject handler
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_queue_reject(
+    name: String,
+    version: Option<String>,
+    status: String,
+    arch: String,
+    comment: Option<String>,
+    distro: String,
+    series: Option<String>,
+) -> lpcli::error::Result<()> {
+    let client = authenticated_client()?;
+
+    // Resolve the series (default: current development series).
+    let series_name = match series {
+        Some(s) => s,
+        None => queue::get_devel_series_name(&client, &distro).await?,
+    };
+
+    // Search for the package in the queue.
+    let params = QueueSearchParams {
+        status: Some(&status),
+        name: Some(&name),
+        version: version.as_deref(),
+        exact_match: true,
+        limit: Some(30),
+        ..Default::default()
+    };
+
+    let uploads = queue::get_package_uploads(&client, &distro, &series_name, &params).await?;
+
+    // Find the first upload whose display_arches field contains the
+    // requested architecture.
+    let upload = uploads.iter().find(|u| {
+        u.display_arches
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .any(|a| a.trim().eq_ignore_ascii_case(&arch))
+    });
+
+    let upload = upload.ok_or_else(|| {
+        lpcli::error::LpError::NotFound(format!(
+            "No package '{}'{} [arch={}] found in queue with status '{}' for {}/{}.",
+            name,
+            version
+                .as_ref()
+                .map(|v| format!(" ({v})"))
+                .unwrap_or_default(),
+            arch,
+            status,
+            distro,
+            series_name,
+        ))
+    })?;
+
+    let self_link = upload.self_link.as_deref().ok_or_else(|| {
+        lpcli::error::LpError::Other("Package upload has no self_link.".to_string())
+    })?;
+
+    // Call rejectFromQueue.
+    queue::reject_from_queue(&client, self_link, comment.as_deref())
+        .await
+        .map_err(|e| {
+            // Provide a more helpful message for permission errors.
+            if let lpcli::error::LpError::Api {
+                status,
+                ref message,
+            } = e
+                && (status == 401 || status == 403)
+            {
+                return lpcli::error::LpError::Api {
+                    status,
+                    message: format!(
+                        "Permission denied: you do not have queue-admin privileges to reject \
+                         packages for {}/{}. {message}",
+                        distro, series_name,
+                    ),
+                };
+            }
+            e
+        })?;
+
+    println!(
+        "{} Rejected {} ({}) [{}] in {}/{}.",
+        "✗".red().bold(),
+        upload.package_name.as_deref().unwrap_or("?").bold(),
+        upload.package_version.as_deref().unwrap_or("?"),
+        upload.display_arches.as_deref().unwrap_or("?"),
+        distro,
+        series_name,
+    );
+    if let Some(ref c) = comment {
+        println!("  Comment: {c}");
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Queue info handler
 // ---------------------------------------------------------------------------
 
@@ -3183,6 +3444,27 @@ async fn handle_queue_info(
     }
     if let Some(date) = &upload.date_created {
         println!("  Created:   {}", date.format("%Y-%m-%d %H:%M UTC"));
+    }
+
+    // If the package is rejected, show the rejection reason from the logs.
+    if upload.status.as_deref() == Some("Rejected")
+        && let Some(logs_url) = &upload.logs_collection_link
+        && let Ok(logs) = queue::get_upload_logs(&client, logs_url).await
+    {
+        // Find the log entry where new_status is "Rejected".
+        let rejection = logs
+            .iter()
+            .find(|log| log.new_status.as_deref() == Some("Rejected"));
+        if let Some(log) = rejection {
+            if let Some(comment) = &log.comment
+                && !comment.is_empty()
+            {
+                println!("  {} {}", "Reason:".red().bold(), comment);
+            }
+            if let Some(date) = &log.date_created {
+                println!("  Rejected:  {}", date.format("%Y-%m-%d %H:%M UTC"));
+            }
+        }
     }
 
     // Fetch binary properties (the .deb/.ddeb package details).
