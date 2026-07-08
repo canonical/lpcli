@@ -11,7 +11,7 @@ use lpcli::{
     bugs::{self, BugSearchParams},
     client::LaunchpadClient,
     cves::{self, CveSearchParams},
-    git,
+    download, git,
     packages::{self, SourceSearchParams},
     people, projects,
     questions::{self, QuestionSearchParams},
@@ -523,6 +523,9 @@ enum PackageCommand {
         /// Distribution name (default: "ubuntu").
         #[arg(short, long, default_value = "ubuntu")]
         distro: String,
+        /// Maximum number of results to return (default: 30).
+        #[arg(short, long, default_value = "30")]
+        limit: u32,
     },
     /// Show info about a PPA.
     Ppa {
@@ -550,6 +553,24 @@ enum PackageCommand {
         /// Distribution name (default: "ubuntu").
         #[arg(short, long, default_value = "ubuntu")]
         distro: String,
+    },
+    /// Download source files for a published source package.
+    Download {
+        /// Source package name (required).
+        #[arg(short, long)]
+        name: String,
+        /// Package version (optional; downloads the latest published version if omitted).
+        #[arg(short, long)]
+        version: Option<String>,
+        /// Series codename (e.g. "jammy", "noble").
+        #[arg(short, long)]
+        series: String,
+        /// Distribution name (default: "ubuntu").
+        #[arg(short, long, default_value = "ubuntu")]
+        distro: String,
+        /// Output directory for downloaded files (default: current directory).
+        #[arg(short, long, default_value = ".")]
+        output: String,
     },
 }
 
@@ -929,6 +950,30 @@ enum QueueCommand {
         /// Maximum number of results to return (default: 30).
         #[arg(short, long, default_value = "30")]
         limit: u32,
+    },
+    /// Download files from a package in the upload queue.
+    Download {
+        /// Source package name (required).
+        #[arg(short, long)]
+        name: String,
+        /// Package version (optional; downloads the first match if not given).
+        #[arg(short, long)]
+        version: Option<String>,
+        /// Filter by upload status (e.g. "New", "Unapproved", "Accepted", "Done").
+        #[arg(short, long)]
+        status: String,
+        /// Filter by architecture (e.g. "amd64", "arm64", "source").
+        #[arg(short, long)]
+        arch: String,
+        /// Distribution name (default: "ubuntu").
+        #[arg(short, long, default_value = "ubuntu")]
+        distro: String,
+        /// Series codename (e.g. "oracular"). Defaults to the current development series.
+        #[arg(long)]
+        series: Option<String>,
+        /// Output directory for downloaded files (default: current directory).
+        #[arg(short, long, default_value = ".")]
+        output: String,
     },
 }
 
@@ -1735,12 +1780,14 @@ async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
             version,
             pocket,
             distro,
+            limit,
         } => {
             let params = SourceSearchParams {
                 source_name: name.as_deref(),
                 version: version.as_deref(),
                 pocket: pocket.as_deref(),
                 status: Some("Published"),
+                limit: Some(limit),
             };
             let pubs =
                 packages::search_published_sources(&client, &distro, &series, &params).await?;
@@ -1802,6 +1849,16 @@ async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
             if let Some(link) = &d.web_link {
                 println!("URL:      {}", link.underline());
             }
+        }
+
+        PackageCommand::Download {
+            name,
+            version,
+            series,
+            distro,
+            output,
+        } => {
+            return handle_package_download(name, version, series, distro, output).await;
         }
     }
     Ok(())
@@ -2764,6 +2821,15 @@ async fn handle_queue(cmd: QueueCommand) -> lpcli::error::Result<()> {
             )
             .await
         }
+        QueueCommand::Download {
+            name,
+            version,
+            status,
+            arch,
+            distro,
+            series,
+            output,
+        } => handle_queue_download(name, version, status, arch, distro, series, output).await,
     }
 }
 
@@ -2875,6 +2941,265 @@ async fn handle_queue_search(
     println!("{table}");
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_queue_download(
+    name: String,
+    version: Option<String>,
+    status: String,
+    arch: String,
+    distro: String,
+    series: Option<String>,
+    output: String,
+) -> lpcli::error::Result<()> {
+    let client = LaunchpadClient::new(None);
+
+    // Resolve the series (default: current development series).
+    let series_name = match series {
+        Some(s) => s,
+        None => queue::get_devel_series_name(&client, &distro).await?,
+    };
+
+    // Search for the package in the queue.  Fetch multiple results so we can
+    // filter by architecture client-side.
+    let params = QueueSearchParams {
+        status: Some(&status),
+        name: Some(&name),
+        version: version.as_deref(),
+        exact_match: true,
+        limit: Some(30),
+        ..Default::default()
+    };
+
+    let uploads = queue::get_package_uploads(&client, &distro, &series_name, &params).await?;
+
+    // Find the first upload whose display_arches field contains the
+    // requested architecture.
+    let upload = uploads.iter().find(|u| {
+        u.display_arches
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .any(|a| a.trim().eq_ignore_ascii_case(&arch))
+    });
+
+    let upload = upload.ok_or_else(|| {
+        lpcli::error::LpError::NotFound(format!(
+            "No package '{}'{} [arch={}] found in queue with status '{}' for {}/{}.",
+            name,
+            version
+                .as_ref()
+                .map(|v| format!(" ({v})"))
+                .unwrap_or_default(),
+            arch,
+            status,
+            distro,
+            series_name,
+        ))
+    })?;
+
+    let self_link = upload.self_link.as_deref().ok_or_else(|| {
+        lpcli::error::LpError::Other("Package upload has no self_link.".to_string())
+    })?;
+
+    // Collect file URLs based on what the upload contains (source, binary, or both).
+    let mut urls = Vec::new();
+    if upload.contains_source.unwrap_or(false) {
+        let source_urls = queue::get_source_file_urls(&client, self_link).await?;
+        urls.extend(source_urls);
+    }
+    if upload.contains_build.unwrap_or(false) {
+        let binary_urls = queue::get_binary_file_urls(&client, self_link).await?;
+        urls.extend(binary_urls);
+    }
+    // If neither flag was set (e.g. a copy), try both endpoints.
+    if urls.is_empty() {
+        let source_urls = queue::get_source_file_urls(&client, self_link).await?;
+        urls.extend(source_urls);
+        if urls.is_empty() {
+            let binary_urls = queue::get_binary_file_urls(&client, self_link).await?;
+            urls.extend(binary_urls);
+        }
+    }
+
+    if urls.is_empty() {
+        println!(
+            "{} No files found for '{}' [arch={}] in the queue.",
+            "ℹ".cyan().bold(),
+            name.bold(),
+            arch,
+        );
+        return Ok(());
+    }
+
+    let output_dir = std::path::Path::new(&output);
+    println!(
+        "{} Downloading {} file(s) for {} ({}) …",
+        "↓".green().bold(),
+        urls.len(),
+        name.bold(),
+        upload.package_version.as_deref().unwrap_or("?"),
+    );
+
+    let results = download::download_files(&client, &urls, output_dir).await?;
+
+    let mut success_count = 0u32;
+    let mut fail_count = 0u32;
+    for outcome in &results {
+        match outcome {
+            download::DownloadOutcome::Success(f) => {
+                println!(
+                    "  {} {} ({})",
+                    "✓".green(),
+                    f.path.display(),
+                    format_size(f.size),
+                );
+                success_count += 1;
+            }
+            download::DownloadOutcome::Failed { filename, error } => {
+                println!("  {} {} — {}", "✗".red().bold(), filename.bold(), error,);
+                fail_count += 1;
+            }
+        }
+    }
+
+    if fail_count > 0 {
+        println!(
+            "\n{} {} file(s) downloaded, {} failed.",
+            "●".yellow().bold(),
+            success_count,
+            fail_count,
+        );
+    } else {
+        println!(
+            "\n{} Downloaded {} file(s) to '{}'.",
+            "●".green().bold(),
+            success_count,
+            output_dir.display(),
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Package download handler
+// ---------------------------------------------------------------------------
+
+async fn handle_package_download(
+    name: String,
+    version: Option<String>,
+    series: String,
+    distro: String,
+    output: String,
+) -> lpcli::error::Result<()> {
+    let client = LaunchpadClient::new(None);
+
+    // Search for the published source package.
+    let params = SourceSearchParams {
+        source_name: Some(&name),
+        version: version.as_deref(),
+        status: Some("Published"),
+        ..Default::default()
+    };
+
+    let pubs = packages::search_published_sources(&client, &distro, &series, &params).await?;
+
+    let publication = pubs.first().ok_or_else(|| {
+        lpcli::error::LpError::NotFound(format!(
+            "No published source package '{}'{} found in {}/{}.",
+            name,
+            version
+                .as_ref()
+                .map(|v| format!(" ({v})"))
+                .unwrap_or_default(),
+            distro,
+            series,
+        ))
+    })?;
+
+    let self_link = publication.self_link.as_deref().ok_or_else(|| {
+        lpcli::error::LpError::Other("Source package publication has no self_link.".to_string())
+    })?;
+
+    // Get source file URLs from the publication record.
+    let urls = packages::get_source_file_urls(&client, self_link).await?;
+
+    if urls.is_empty() {
+        println!(
+            "{} No source files found for '{}' in {}/{}.",
+            "ℹ".cyan().bold(),
+            name.bold(),
+            distro,
+            series,
+        );
+        return Ok(());
+    }
+
+    let output_dir = std::path::Path::new(&output);
+    println!(
+        "{} Downloading {} file(s) for {} ({}) …",
+        "↓".green().bold(),
+        urls.len(),
+        name.bold(),
+        publication.source_package_version.as_deref().unwrap_or("?"),
+    );
+
+    let results = download::download_files(&client, &urls, output_dir).await?;
+
+    let mut success_count = 0u32;
+    let mut fail_count = 0u32;
+    for outcome in &results {
+        match outcome {
+            download::DownloadOutcome::Success(f) => {
+                println!(
+                    "  {} {} ({})",
+                    "✓".green(),
+                    f.path.display(),
+                    format_size(f.size),
+                );
+                success_count += 1;
+            }
+            download::DownloadOutcome::Failed { filename, error } => {
+                println!("  {} {} — {}", "✗".red().bold(), filename.bold(), error,);
+                fail_count += 1;
+            }
+        }
+    }
+
+    if fail_count > 0 {
+        println!(
+            "\n{} {} file(s) downloaded, {} failed.",
+            "●".yellow().bold(),
+            success_count,
+            fail_count,
+        );
+    } else {
+        println!(
+            "\n{} Downloaded {} file(s) to '{}'.",
+            "●".green().bold(),
+            success_count,
+            output_dir.display(),
+        );
+    }
+    Ok(())
+}
+
+/// Format a byte size in a human-friendly way.
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1_024;
+    const MB: u64 = 1_024 * KB;
+    const GB: u64 = 1_024 * MB;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 // ---------------------------------------------------------------------------

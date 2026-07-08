@@ -121,6 +121,8 @@ pub struct SourceSearchParams<'a> {
     pub pocket: Option<&'a str>,
     /// Status filter (e.g. "Published").
     pub status: Option<&'a str>,
+    /// Maximum number of results to return.
+    pub limit: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +233,25 @@ pub async fn list_ppa_sources(
     if let Some(status) = params.status {
         query.push_str(&format!("&status={}", enc(status)));
     }
+    if let Some(limit) = params.limit {
+        query.push_str(&format!("&ws.size={limit}"));
+    }
     Collection::fetch_all(client, &query).await
+}
+
+/// Get the source file URLs for a source package publishing history entry.
+///
+/// Calls the `sourceFileUrls` custom GET method on a
+/// `source_package_publishing_history` entry to retrieve download URLs for
+/// the source files (`.dsc`, `.orig.tar.*`, `.debian.tar.*`, etc.).
+///
+/// `pub_self_link` is the API self-link of the `SourcePackagePublishingHistory`.
+pub async fn get_source_file_urls(
+    client: &LaunchpadClient,
+    pub_self_link: &str,
+) -> Result<Vec<String>> {
+    let url = format!("{pub_self_link}?ws.op=sourceFileUrls");
+    client.get_url_string_list(&url).await
 }
 
 // ---------------------------------------------------------------------------

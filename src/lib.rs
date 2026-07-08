@@ -35,6 +35,7 @@ pub mod auth;
 pub mod bugs;
 pub mod client;
 pub mod cves;
+pub mod download;
 pub mod error;
 pub mod git;
 pub mod packages;

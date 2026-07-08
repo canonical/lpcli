@@ -22,7 +22,10 @@ path = "src/lib.rs"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client
-reqwest = { version = "0.13", features = ["json", "cookies", "form"] }
+reqwest = { version = "0.13", features = ["json", "cookies", "form", "stream"] }
+
+# Async stream utilities
+futures-util = "0.3"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -45,6 +48,7 @@ toml = "1.0"
 
 # URL handling
 url = { version = "2", features = ["serde"] }
+percent-encoding = "2"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }

@@ -682,6 +682,120 @@ impl LaunchpadClient {
 
         Ok(location.to_string())
     }
+
+    // -----------------------------------------------------------------------
+    // File download
+    // -----------------------------------------------------------------------
+
+    /// Download a file from `url` and write it to `dest`, returning the number
+    /// of bytes written.
+    ///
+    /// The request is authenticated when credentials are present on the client.
+    /// Launchpad librarian URLs (which are typically public) will be followed
+    /// through redirects automatically by the underlying HTTP client.
+    ///
+    /// This method streams the response body to disk in chunks rather than
+    /// buffering the entire file in memory, which avoids timeout errors on
+    /// large files.
+    pub async fn download_to_file(&self, url: &str, dest: &std::path::Path) -> Result<u64> {
+        use tokio::io::AsyncWriteExt;
+
+        // Build a separate client without the default 30s timeout so that
+        // large file downloads are not interrupted.  We keep a connect
+        // timeout to fail fast on unreachable hosts.
+        let download_client = reqwest::Client::builder()
+            .user_agent(concat!("lpcli/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(300))
+            .build()
+            .map_err(|e| LpError::Other(format!("Failed to build download client: {e}")))?;
+
+        let mut req = download_client.get(url);
+
+        if let Some(creds) = &self.credentials {
+            let auth_header = auth::build_auth_header(creds)?;
+            req = req.header("Authorization", auth_header);
+        }
+
+        let resp = req.send().await.map_err(|e| {
+            if e.is_timeout() {
+                LpError::Timeout(format!("Connection timed out downloading {url}: {e}"))
+            } else if e.is_connect() {
+                LpError::Connect(format!("Connection failed downloading {url}: {e}"))
+            } else {
+                LpError::Http(e)
+            }
+        })?;
+
+        let status = resp.status();
+
+        if !status.is_success() {
+            let code = status.as_u16();
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "(could not read body)".to_string());
+            return Err(LpError::Api {
+                status: code,
+                message: format!("Failed to download {url}: HTTP {code} — {body}"),
+            });
+        }
+
+        // Stream response body to a file in chunks.
+        let mut file = tokio::fs::File::create(dest).await.map_err(|e| {
+            LpError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to create file '{}': {e}", dest.display()),
+            ))
+        })?;
+
+        let mut total_bytes: u64 = 0;
+        let mut stream = resp.bytes_stream();
+        use futures_util::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| {
+                LpError::Other(format!(
+                    "Network error while downloading '{}': {e}",
+                    dest.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| url.to_string()),
+                ))
+            })?;
+            file.write_all(&chunk).await.map_err(|e| {
+                LpError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("Failed to write to '{}': {e}", dest.display()),
+                ))
+            })?;
+            total_bytes += chunk.len() as u64;
+        }
+
+        file.flush().await.map_err(|e| {
+            LpError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to flush file '{}': {e}", dest.display()),
+            ))
+        })?;
+
+        Ok(total_bytes)
+    }
+
+    /// Perform an authenticated GET against an absolute URL and return the
+    /// JSON response body as a `Vec<String>`.
+    ///
+    /// Use this for Launchpad custom GET methods that return a JSON list of
+    /// strings (e.g. `sourceFileUrls`, `binaryFileUrls`).
+    pub async fn get_url_string_list(&self, url: &str) -> Result<Vec<String>> {
+        let mut req = self.http.get(url).header("Accept", "application/json");
+
+        if let Some(creds) = &self.credentials {
+            let auth_header = auth::build_auth_header(creds)?;
+            req = req.header("Authorization", auth_header);
+        }
+
+        let resp = self.send_with_retry(req).await?;
+        self.handle_response(resp).await
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -166,6 +166,33 @@ pub async fn get_devel_series_name(client: &LaunchpadClient, distro: &str) -> Re
     })
 }
 
+/// Get the source file URLs for a package upload.
+///
+/// Calls the `sourceFileUrls` custom GET method on a `package_upload` entry
+/// to retrieve download URLs for the source files associated with the upload.
+///
+/// `upload_self_link` is the API self-link of the `PackageUpload` entry.
+pub async fn get_source_file_urls(
+    client: &LaunchpadClient,
+    upload_self_link: &str,
+) -> Result<Vec<String>> {
+    let url = format!("{upload_self_link}?ws.op=sourceFileUrls");
+    client.get_url_string_list(&url).await
+}
+
+/// Get the binary file URLs for a package upload.
+///
+/// Calls the `binaryFileUrls` custom GET method on a `package_upload` entry.
+///
+/// `upload_self_link` is the API self-link of the `PackageUpload` entry.
+pub async fn get_binary_file_urls(
+    client: &LaunchpadClient,
+    upload_self_link: &str,
+) -> Result<Vec<String>> {
+    let url = format!("{upload_self_link}?ws.op=binaryFileUrls");
+    client.get_url_string_list(&url).await
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
