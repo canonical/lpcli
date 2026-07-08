@@ -9,7 +9,7 @@ RUN apt-get update \
         ca-certificates \
         build-essential pkgconf libssl-dev \
         rust-1.93-all cargo rustc rust-clippy rustfmt rust-miri \ 
-        vim git \
+        vim git curl \
         hyperfine ripgrep cargo-auditable \
         bash fish \
     && apt-get clean -y \

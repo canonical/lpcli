@@ -4,9 +4,12 @@
 //! `queue` and `packages` modules to download source files from Launchpad.
 //!
 //! Downloaded files are written to a user-specified output directory
-//! (defaulting to the current working directory).
+//! (defaulting to the current working directory).  Each file download
+//! displays a progress bar showing the filename and transfer progress.
 
 use std::path::{Path, PathBuf};
+
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::client::LaunchpadClient;
 use crate::error::{LpError, Result};
@@ -42,15 +45,18 @@ pub enum DownloadOutcome {
     },
 }
 
-/// Download a list of files from the given URLs into `output_dir`.
+/// Download a list of files from the given URLs into `output_dir` in parallel.
 ///
-/// Each URL is fetched (with OAuth authentication when credentials are
-/// present on the client) and saved under `output_dir` using the filename
-/// from the URL's last path segment.
+/// Each URL is fetched concurrently (with OAuth authentication when
+/// credentials are present on the client) and saved under `output_dir`
+/// using the filename from the URL's last path segment.
+///
+/// A progress bar is displayed for each file showing the filename, download
+/// progress, transfer speed, and ETA.  All progress bars update
+/// simultaneously as the parallel downloads proceed.
 ///
 /// Unlike an all-or-nothing approach, this function attempts every download
-/// and reports per-file success or failure via [`DownloadOutcome`].  This
-/// allows the CLI to show progress for each file individually.
+/// and reports per-file success or failure via [`DownloadOutcome`].
 ///
 /// # Errors
 ///
@@ -72,39 +78,125 @@ pub async fn download_files(
         ))
     })?;
 
-    let mut results = Vec::with_capacity(urls.len());
+    let multi = MultiProgress::new();
+    let total_files = urls.len();
 
-    for url in urls {
+    // Prepare tasks: extract filenames upfront so we can report errors
+    // immediately for malformed URLs without spawning a task.
+    let mut tasks = Vec::with_capacity(total_files);
+    let mut immediate_failures = Vec::new();
+
+    for (idx, url) in urls.iter().enumerate() {
         let filename = match extract_filename(url) {
             Ok(f) => f,
             Err(e) => {
-                results.push(DownloadOutcome::Failed {
-                    filename: url.clone(),
-                    error: e.to_string(),
-                });
+                immediate_failures.push((
+                    idx,
+                    DownloadOutcome::Failed {
+                        filename: url.clone(),
+                        error: e.to_string(),
+                    },
+                ));
                 continue;
             }
         };
+
+        // Create a progress bar for this file.
+        let pb = multi.add(ProgressBar::new(0));
+        pb.set_style(progress_style_bytes());
+        pb.set_prefix(format!("[{}/{}]", idx + 1, total_files));
+        pb.set_message(filename.clone());
+
         let dest = output_dir.join(&filename);
-        match client.download_to_file(url, &dest).await {
-            Ok(size) => {
-                results.push(DownloadOutcome::Success(DownloadedFile {
-                    path: dest,
-                    size,
-                }));
+        let client_clone = client.clone();
+        let url_clone = url.clone();
+
+        let handle = tokio::spawn(async move {
+            let result = client_clone
+                .download_to_file_with_progress(&url_clone, &dest, |downloaded, total| {
+                    if let Some(total_size) = total
+                        && pb.length() != Some(total_size)
+                    {
+                        pb.set_length(total_size);
+                    }
+                    pb.set_position(downloaded);
+                })
+                .await;
+
+            match result {
+                Ok(size) => {
+                    pb.set_length(size);
+                    pb.set_position(size);
+                    pb.finish_with_message(format!("{filename} ✓"));
+                    (
+                        idx,
+                        DownloadOutcome::Success(DownloadedFile { path: dest, size }),
+                    )
+                }
+                Err(e) => {
+                    pb.abandon_with_message(format!("{filename} ✗"));
+                    // Clean up partial file if it was created.
+                    let _ = std::fs::remove_file(&dest);
+                    (
+                        idx,
+                        DownloadOutcome::Failed {
+                            filename,
+                            error: e.to_string(),
+                        },
+                    )
+                }
             }
+        });
+
+        tasks.push(handle);
+    }
+
+    // Await all download tasks concurrently.
+    let task_results = futures_util::future::join_all(tasks).await;
+
+    // Collect results in original URL order.
+    let mut indexed_results: Vec<(usize, DownloadOutcome)> = Vec::with_capacity(total_files);
+
+    for join_result in task_results {
+        match join_result {
+            Ok(outcome) => indexed_results.push(outcome),
             Err(e) => {
-                // Clean up partial file if it was created.
-                let _ = std::fs::remove_file(&dest);
-                results.push(DownloadOutcome::Failed {
-                    filename,
-                    error: e.to_string(),
-                });
+                // A JoinError means the task panicked — should not happen,
+                // but handle gracefully.
+                indexed_results.push((
+                    usize::MAX,
+                    DownloadOutcome::Failed {
+                        filename: "<unknown>".to_string(),
+                        error: format!("Download task failed: {e}"),
+                    },
+                ));
             }
         }
     }
 
+    // Merge immediate failures with task results, then sort by index.
+    indexed_results.extend(immediate_failures);
+    indexed_results.sort_by_key(|(idx, _)| *idx);
+
+    let results = indexed_results
+        .into_iter()
+        .map(|(_, outcome)| outcome)
+        .collect();
     Ok(results)
+}
+
+// ---------------------------------------------------------------------------
+// Progress bar styling
+// ---------------------------------------------------------------------------
+
+/// Build a progress bar style for byte-based file downloads.
+///
+/// Shows: `[current/total] filename [=====>  ] bytes/total (speed, eta)`
+fn progress_style_bytes() -> ProgressStyle {
+    ProgressStyle::default_bar()
+        .template("{prefix} {msg}\n     [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
+        .expect("progress bar template is valid")
+        .progress_chars("━╸─")
 }
 
 // ---------------------------------------------------------------------------

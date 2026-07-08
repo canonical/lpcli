@@ -975,6 +975,27 @@ enum QueueCommand {
         #[arg(short, long, default_value = ".")]
         output: String,
     },
+    /// Display binary package (.deb/.ddeb) details for a package in the queue.
+    Info {
+        /// Source package name (required).
+        #[arg(short, long)]
+        name: String,
+        /// Package version (optional; shows the first match if not given).
+        #[arg(short, long)]
+        version: Option<String>,
+        /// Filter by upload status (e.g. "New", "Unapproved", "Accepted", "Done").
+        #[arg(short, long)]
+        status: String,
+        /// Filter by architecture (e.g. "amd64", "arm64", "source").
+        #[arg(short, long)]
+        arch: String,
+        /// Distribution name (default: "ubuntu").
+        #[arg(short, long, default_value = "ubuntu")]
+        distro: String,
+        /// Series codename (e.g. "oracular"). Defaults to the current development series.
+        #[arg(long)]
+        series: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -2830,6 +2851,14 @@ async fn handle_queue(cmd: QueueCommand) -> lpcli::error::Result<()> {
             series,
             output,
         } => handle_queue_download(name, version, status, arch, distro, series, output).await,
+        QueueCommand::Info {
+            name,
+            version,
+            status,
+            arch,
+            distro,
+            series,
+        } => handle_queue_info(name, version, status, arch, distro, series).await,
     }
 }
 
@@ -3048,17 +3077,11 @@ async fn handle_queue_download(
     let mut fail_count = 0u32;
     for outcome in &results {
         match outcome {
-            download::DownloadOutcome::Success(f) => {
-                println!(
-                    "  {} {} ({})",
-                    "✓".green(),
-                    f.path.display(),
-                    format_size(f.size),
-                );
+            download::DownloadOutcome::Success(_) => {
                 success_count += 1;
             }
             download::DownloadOutcome::Failed { filename, error } => {
-                println!("  {} {} — {}", "✗".red().bold(), filename.bold(), error,);
+                eprintln!("  {} {} — {}", "✗".red().bold(), filename.bold(), error);
                 fail_count += 1;
             }
         }
@@ -3079,6 +3102,172 @@ async fn handle_queue_download(
             output_dir.display(),
         );
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Queue info handler
+// ---------------------------------------------------------------------------
+
+async fn handle_queue_info(
+    name: String,
+    version: Option<String>,
+    status: String,
+    arch: String,
+    distro: String,
+    series: Option<String>,
+) -> lpcli::error::Result<()> {
+    let client = LaunchpadClient::new(None);
+
+    // Resolve the series (default: current development series).
+    let series_name = match series {
+        Some(s) => s,
+        None => queue::get_devel_series_name(&client, &distro).await?,
+    };
+
+    // Search for the package in the queue.
+    let params = QueueSearchParams {
+        status: Some(&status),
+        name: Some(&name),
+        version: version.as_deref(),
+        exact_match: true,
+        limit: Some(30),
+        ..Default::default()
+    };
+
+    let uploads = queue::get_package_uploads(&client, &distro, &series_name, &params).await?;
+
+    // Find the first upload whose display_arches field contains the
+    // requested architecture.
+    let upload = uploads.iter().find(|u| {
+        u.display_arches
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .any(|a| a.trim().eq_ignore_ascii_case(&arch))
+    });
+
+    let upload = upload.ok_or_else(|| {
+        lpcli::error::LpError::NotFound(format!(
+            "No package '{}'{} [arch={}] found in queue with status '{}' for {}/{}.",
+            name,
+            version
+                .as_ref()
+                .map(|v| format!(" ({v})"))
+                .unwrap_or_default(),
+            arch,
+            status,
+            distro,
+            series_name,
+        ))
+    })?;
+
+    let self_link = upload.self_link.as_deref().ok_or_else(|| {
+        lpcli::error::LpError::Other("Package upload has no self_link.".to_string())
+    })?;
+
+    // Display header info about the upload.
+    println!(
+        "{} {} ({}) — {} [{}]",
+        "●".cyan().bold(),
+        upload.package_name.as_deref().unwrap_or("?").bold(),
+        upload.package_version.as_deref().unwrap_or("?"),
+        upload.status.as_deref().unwrap_or("?"),
+        upload.display_arches.as_deref().unwrap_or("?"),
+    );
+    if let Some(component) = &upload.component_name {
+        println!("  Component: {component}");
+    }
+    if let Some(pocket) = &upload.pocket {
+        println!("  Pocket:    {pocket}");
+    }
+    if let Some(date) = &upload.date_created {
+        println!("  Created:   {}", date.format("%Y-%m-%d %H:%M UTC"));
+    }
+
+    // Fetch binary properties (the .deb/.ddeb package details).
+    let binaries = queue::get_binary_properties(&client, self_link).await?;
+
+    if binaries.is_empty() {
+        println!(
+            "\n{} No binary packages (.deb/.ddeb) found for this upload.",
+            "ℹ".cyan().bold(),
+        );
+        return Ok(());
+    }
+
+    // Separate .deb and .ddeb packages.
+    let debs: Vec<_> = binaries.iter().filter(|b| !b.is_debug_package()).collect();
+    let ddebs: Vec<_> = binaries.iter().filter(|b| b.is_debug_package()).collect();
+
+    // Display .deb packages in a table.
+    if !debs.is_empty() {
+        println!(
+            "\n{} Binary packages ({} .deb):",
+            "▸".green().bold(),
+            debs.len(),
+        );
+        let mut table = Table::new();
+        table.load_preset(UTF8_FULL_CONDENSED);
+        table.set_header(vec![
+            "Package",
+            "Version",
+            "Architecture",
+            "Component",
+            "Section",
+            "Priority",
+        ]);
+        for b in &debs {
+            table.add_row(vec![
+                b.name.as_deref().unwrap_or("?"),
+                b.version.as_deref().unwrap_or("?"),
+                b.architecture.as_deref().unwrap_or("?"),
+                b.component.as_deref().unwrap_or("?"),
+                b.section.as_deref().unwrap_or("?"),
+                b.priority.as_deref().unwrap_or("?"),
+            ]);
+        }
+        println!("{table}");
+    }
+
+    // Display .ddeb packages in a table.
+    if !ddebs.is_empty() {
+        println!(
+            "\n{} Debug symbol packages ({} .ddeb):",
+            "▸".yellow().bold(),
+            ddebs.len(),
+        );
+        let mut table = Table::new();
+        table.load_preset(UTF8_FULL_CONDENSED);
+        table.set_header(vec![
+            "Package",
+            "Version",
+            "Architecture",
+            "Component",
+            "Section",
+            "Priority",
+        ]);
+        for b in &ddebs {
+            table.add_row(vec![
+                b.name.as_deref().unwrap_or("?"),
+                b.version.as_deref().unwrap_or("?"),
+                b.architecture.as_deref().unwrap_or("?"),
+                b.component.as_deref().unwrap_or("?"),
+                b.section.as_deref().unwrap_or("?"),
+                b.priority.as_deref().unwrap_or("?"),
+            ]);
+        }
+        println!("{table}");
+    }
+
+    println!(
+        "\n{} Total: {} binary package(s) ({} .deb, {} .ddeb)",
+        "●".green().bold(),
+        binaries.len(),
+        debs.len(),
+        ddebs.len(),
+    );
+
     Ok(())
 }
 
@@ -3151,17 +3340,11 @@ async fn handle_package_download(
     let mut fail_count = 0u32;
     for outcome in &results {
         match outcome {
-            download::DownloadOutcome::Success(f) => {
-                println!(
-                    "  {} {} ({})",
-                    "✓".green(),
-                    f.path.display(),
-                    format_size(f.size),
-                );
+            download::DownloadOutcome::Success(_) => {
                 success_count += 1;
             }
             download::DownloadOutcome::Failed { filename, error } => {
-                println!("  {} {} — {}", "✗".red().bold(), filename.bold(), error,);
+                eprintln!("  {} {} — {}", "✗".red().bold(), filename.bold(), error);
                 fail_count += 1;
             }
         }
@@ -3186,6 +3369,7 @@ async fn handle_package_download(
 }
 
 /// Format a byte size in a human-friendly way.
+#[allow(dead_code)]
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1_024;
     const MB: u64 = 1_024 * KB;

@@ -193,6 +193,58 @@ pub async fn get_binary_file_urls(
     client.get_url_string_list(&url).await
 }
 
+/// Properties of a single binary package in a queue upload.
+///
+/// Returned by the `getBinaryProperties` custom GET method on a
+/// `package_upload` entry.  Each dictionary in the response describes one
+/// `.deb` or `.ddeb` file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinaryProperties {
+    /// Binary package name (e.g. `"libfoo1"`).
+    pub name: Option<String>,
+    /// Binary package version.
+    pub version: Option<String>,
+    /// Architecture (e.g. `"amd64"`, `"all"`).
+    pub architecture: Option<String>,
+    /// Component (e.g. `"main"`, `"universe"`).
+    pub component: Option<String>,
+    /// Section (e.g. `"libs"`, `"devel"`).
+    pub section: Option<String>,
+    /// Priority (e.g. `"optional"`, `"extra"`).
+    pub priority: Option<String>,
+    /// Whether this is a new package not previously seen in the archive.
+    pub is_new: Option<bool>,
+}
+
+impl BinaryProperties {
+    /// Returns `true` if this binary is a debug-symbol package (`.ddeb`).
+    ///
+    /// Launchpad's `getBinaryProperties` does not return an explicit
+    /// `is_debug` field, so we detect debug packages by the conventional
+    /// `-dbgsym` or `-dbg` name suffix.
+    pub fn is_debug_package(&self) -> bool {
+        self.name
+            .as_deref()
+            .map(|n| n.ends_with("-dbgsym") || n.ends_with("-dbg"))
+            .unwrap_or(false)
+    }
+}
+
+/// Get the binary properties for a package upload.
+///
+/// Calls the `getBinaryProperties` custom GET method on a `package_upload`
+/// entry to retrieve metadata (name, version, architecture, component, etc.)
+/// for the `.deb` and `.ddeb` files associated with the upload.
+///
+/// `upload_self_link` is the API self-link of the `PackageUpload` entry.
+pub async fn get_binary_properties(
+    client: &LaunchpadClient,
+    upload_self_link: &str,
+) -> Result<Vec<BinaryProperties>> {
+    let url = format!("{upload_self_link}?ws.op=getBinaryProperties");
+    client.get_url(&url).await
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
