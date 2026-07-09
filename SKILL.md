@@ -8,7 +8,8 @@
 `lpcli` is a command-line client and Rust library for the
 [Launchpad.net](https://launchpad.net) web API. It covers bugs, packages,
 projects, people/teams, CVEs, Git repositories, specifications (blueprints),
-questions, webhooks, translations, snap recipes, and personal access tokens.
+questions, webhooks, translations, snap recipes, package upload queues, and
+personal access tokens.
 
 Repository: <https://github.com/canonical/lpcli>
 
@@ -68,19 +69,32 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 | Search bugs on a project | `lpcli bug search --target launchpad --status "New" --limit 10` |
 | Search bugs for a package | `lpcli bug search --target ubuntu --package firefox --status "Confirmed"` |
 | Search bugs by keyword | `lpcli bug search --target ubuntu --keyword "kernel panic" --limit 20` |
+| Search bugs by tag | `lpcli bug search --target ubuntu --tag "regression-update" --limit 10` |
+| Search bugs by importance | `lpcli bug search --target ubuntu --importance "Critical" --limit 10` |
 | Add a comment | `lpcli bug comment --bug-id 123456 --message "Reproduced on noble."` |
 | List comments | `lpcli bug comments --bug-id 123456` |
 | File a new bug | `lpcli bug create --target ubuntu --package curl --title "title" --description "desc"` |
-| Set bug task status | `lpcli bug set-status --bug-id 123456 --target ubuntu --package curl --series noble --status "In Progress"` |
-| Set status on multiple series | `lpcli bug set-status --bug-id 123456 --target ubuntu --package curl --many-series "noble, jammy" --status "Fix Released"` |
-| Set status on all series | `lpcli bug set-status --bug-id 123456 --target ubuntu --package curl --all-series --status "Fix Released"` |
-| Set importance | `lpcli bug set-importance --bug-id 123456 --target ubuntu --package curl --series noble --importance "High"` |
-| Assign a bug task | `lpcli bug set-assignee --bug-id 123456 --target ubuntu --package curl --series noble --name jdoe` |
+| Set bug task status | `lpcli bug set-status --bug-id 123456 --target curl --series noble --status "In Progress"` |
+| Set status on multiple series | `lpcli bug set-status --bug-id 123456 --target curl --many-series "noble, jammy" --status "Fix Released"` |
+| Set status on all series | `lpcli bug set-status --bug-id 123456 --target curl --all-series --status "Fix Released"` |
+| Set status on multiple targets | `lpcli bug set-status --bug-id 123456 --many-targets "rust-alacritty, rust-eza" --all-series --status "Fix Released"` |
+| Set status on all targets | `lpcli bug set-status --bug-id 123456 --all-targets --all-series --status "Fix Released"` |
+| Set status on series-less tasks | `lpcli bug set-status --bug-id 123456 --target curl --no-series --status "Fix Released"` |
+| Set importance | `lpcli bug set-importance --bug-id 123456 --target curl --series noble --importance "High"` |
+| Set importance on all targets | `lpcli bug set-importance --bug-id 123456 --all-targets --all-series --importance "Critical"` |
+| Assign a bug task | `lpcli bug set-assignee --bug-id 123456 --target curl --series noble --name jdoe` |
+| Assign on all targets | `lpcli bug set-assignee --bug-id 123456 --all-targets --all-series --name jdoe` |
 | Subscribe a person | `lpcli bug subscribe --bug-id 123456 --name jdoe` |
 | Unsubscribe a person | `lpcli bug unsubscribe --bug-id 123456 --name jdoe` |
 | List subscribers | `lpcli bug subscriptions --bug-id 123456` |
 | Add a bug task | `lpcli bug add-task --bug-id 123456 --target ubuntu --package curl --series noble --status "New" --importance "Undecided"` |
 | Delete a bug task | `lpcli bug delete-task --bug-id 123456 --target ubuntu --package curl --series noble` |
+| Add a tag | `lpcli bug tag --bug-id 123456 --add-tag regression` |
+| Add multiple tags | `lpcli bug tag --bug-id 123456 --add-many-tags "regression, oem, sru"` |
+| Remove a tag | `lpcli bug tag --bug-id 123456 --remove-tag regression` |
+| Remove multiple tags | `lpcli bug tag --bug-id 123456 --remove-many-tags "regression, oem"` |
+| Remove all tags | `lpcli bug tag --bug-id 123456 --remove-all-tags` |
+| Replace all tags | `lpcli bug tag --bug-id 123456 --remove-all-tags --add-many-tags "new-tag-1, new-tag-2"` |
 
 ### People & Teams
 
@@ -104,6 +118,8 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 | Show distribution info | `lpcli package distro` |
 | Show a PPA | `lpcli package ppa --owner jdoe --ppa my-ppa` |
 | List PPA sources | `lpcli package ppa-sources --owner jdoe --ppa my-ppa --name curl` |
+| Download source files | `lpcli package download --name curl --series noble` |
+| Download specific version | `lpcli package download --name curl --series noble --version 8.5.0-2ubuntu10` |
 
 ### Projects
 
@@ -124,6 +140,7 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 |--------|---------|
 | Show a CVE | `lpcli cve show --sequence 2024-1234` |
 | Search CVEs | `lpcli cve search --distro ubuntu --limit 10` |
+| Search CVEs by keyword | `lpcli cve search --keyword "buffer overflow" --limit 20` |
 | List CVEs for a bug | `lpcli cve bug-cves --bug-id 123456` |
 
 ### Git Repositories
@@ -182,11 +199,28 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 | List builds | `lpcli snap builds --owner jdoe --name my-snap` |
 | Request builds | `lpcli snap request-builds --owner jdoe --name my-snap` |
 
+### Package Upload Queues
+
+| Action | Command |
+|--------|---------|
+| Search queue items | `lpcli queue search --status "New"` |
+| Search by name | `lpcli queue search --status "New" --name curl` |
+| Search with pocket/series | `lpcli queue search --status "Unapproved" --series noble --pocket Security` |
+| Exact match search | `lpcli queue search --status "New" --name curl --version 8.5.0-2ubuntu10 --exact-match` |
+| Download queue files | `lpcli queue download --name curl --status "New" --arch source` |
+| Show binary details | `lpcli queue info --name curl --status "New" --arch amd64` |
+| Accept a package | `lpcli queue accept --name curl --status "New" --arch source` |
+| Reject a package | `lpcli queue reject --name curl --status "New" --arch source --comment "Reason"` |
+
 ### Access Tokens
 
-```bash
-lpcli access-token --help
-```
+| Action | Command |
+|--------|---------|
+| Issue token for project | `lpcli access-token issue --project launchpad --description "CI" --scopes "repository:push"` |
+| Issue token for Git repo | `lpcli access-token issue-git --repo "~jdoe/launchpad/+git/myrepo" --description "Deploy" --scopes "repository:push"` |
+| List project tokens | `lpcli access-token list --project launchpad` |
+| List Git repo tokens | `lpcli access-token list-git --repo "~jdoe/launchpad/+git/myrepo"` |
+| Revoke a token | `lpcli access-token revoke --token-url "<URL>"` |
 
 ---
 
@@ -229,7 +263,7 @@ async fn main() -> lpcli::error::Result<()> {
         ..Default::default()
     };
     let results = packages::search_published_sources(&lp, "ubuntu", "noble", &params).await?;
-    for pkg in &results.entries {
+    for pkg in &results {
         println!("{} {}",
             pkg.source_package_name.as_deref().unwrap_or("?"),
             pkg.source_package_version.as_deref().unwrap_or("?"));
@@ -255,8 +289,8 @@ All library functions return `lpcli::error::Result<T>` (alias for
 
 | Module | Purpose |
 |--------|---------|
-| `lpcli::bugs` | Bug tracking (show, search, create, comment, tasks, status) |
-| `lpcli::packages` | Source packages, distro series, PPAs |
+| `lpcli::bugs` | Bug tracking (show, search, create, comment, tasks, status, tags) |
+| `lpcli::packages` | Source packages, distro series, PPAs, downloads |
 | `lpcli::projects` | Projects, milestones, series |
 | `lpcli::people` | People and teams |
 | `lpcli::cves` | CVE lookup |
@@ -266,9 +300,12 @@ All library functions return `lpcli::error::Result<T>` (alias for
 | `lpcli::webhooks` | Webhook management |
 | `lpcli::translations` | Translation queues and templates |
 | `lpcli::snaps` | Snap recipes and builds |
+| `lpcli::queue` | Package upload queue management |
+| `lpcli::download` | File download utilities |
 | `lpcli::access_tokens` | Personal access tokens |
 | `lpcli::auth` | OAuth login/logout and credential management |
 | `lpcli::client` | `LaunchpadClient` — low-level HTTP client |
+| `lpcli::status` | Server status and connectivity checks |
 | `lpcli::error` | `LpError` error type |
 
 ---
@@ -280,9 +317,9 @@ All library functions return `lpcli::error::Result<T>` (alias for
 ```bash
 lpcli bug show --bug-id 123456
 lpcli bug tasks --bug-id 123456
-lpcli bug set-status --bug-id 123456 --target ubuntu --package curl \
+lpcli bug set-status --bug-id 123456 --target curl \
     --series noble --status "Triaged"
-lpcli bug set-importance --bug-id 123456 --target ubuntu --package curl \
+lpcli bug set-importance --bug-id 123456 --target curl \
     --series noble --importance "High"
 lpcli bug comment --bug-id 123456 --message "Triaged as High for Noble."
 ```
@@ -305,6 +342,22 @@ lpcli cve bug-cves --bug-id 123456
 
 ```bash
 lpcli git proposals --path "~jdoe/launchpad/+git/myrepo" --status "Needs review"
+```
+
+### Review the upload queue
+
+```bash
+lpcli queue search --status "New" --name curl
+lpcli queue info --name curl --status "New" --arch source
+lpcli queue download --name curl --status "New" --arch source
+lpcli queue accept --name curl --status "New" --arch source
+```
+
+### Download source packages
+
+```bash
+lpcli package download --name curl --series noble
+lpcli package download --name curl --series noble --version 8.5.0-2ubuntu10 --output ~/src
 ```
 
 ### Check a person's activity

@@ -121,6 +121,8 @@ pub struct SourceSearchParams<'a> {
     pub pocket: Option<&'a str>,
     /// Status filter (e.g. "Published").
     pub status: Option<&'a str>,
+    /// Whether to require an exact match for the source name and version.
+    pub exact_match: bool,
     /// Maximum number of results to return.
     pub limit: Option<u32>,
 }
@@ -186,6 +188,9 @@ pub async fn search_published_sources(
     if let Some(status) = params.status {
         query.push_str(&format!("&status={}", enc(status)));
     }
+    if params.exact_match {
+        query.push_str("&exact_match=true");
+    }
     Collection::fetch_all(client, &query).await
 }
 
@@ -232,6 +237,9 @@ pub async fn list_ppa_sources(
     }
     if let Some(status) = params.status {
         query.push_str(&format!("&status={}", enc(status)));
+    }
+    if params.exact_match {
+        query.push_str("&exact_match=true");
     }
     if let Some(limit) = params.limit {
         query.push_str(&format!("&ws.size={limit}"));

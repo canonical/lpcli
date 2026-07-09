@@ -1854,6 +1854,7 @@ async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
                 pocket: pocket.as_deref(),
                 status: Some("Published"),
                 limit: Some(limit),
+                ..Default::default()
             };
             let pubs =
                 packages::search_published_sources(&client, &distro, &series, &params).await?;
@@ -3199,17 +3200,38 @@ async fn handle_queue_accept(
 
     let uploads = queue::get_package_uploads(&client, &distro, &series_name, &params).await?;
 
-    // Find the first upload whose display_arches field contains the
-    // requested architecture.
-    let upload = uploads.iter().find(|u| {
-        u.display_arches
-            .as_deref()
-            .unwrap_or("")
-            .split(',')
-            .any(|a| a.trim().eq_ignore_ascii_case(&arch))
-    });
+    // Find uploads whose display_arches field contains the requested architecture.
+    let matching: Vec<_> = uploads
+        .iter()
+        .filter(|u| {
+            u.display_arches
+                .as_deref()
+                .unwrap_or("")
+                .split(',')
+                .any(|a| a.trim().eq_ignore_ascii_case(&arch))
+        })
+        .collect();
 
-    let upload = upload.ok_or_else(|| {
+    // Only a single package may be accepted at a time. If multiple results
+    // match, require the user to disambiguate with --version.
+    if matching.len() > 1 && version.is_none() {
+        let versions: Vec<String> = matching
+            .iter()
+            .filter_map(|u| u.package_version.clone())
+            .collect();
+        return Err(lpcli::error::LpError::Other(format!(
+            "Multiple uploads match '{}' [arch={}] with status '{}' in {}/{}: {}. \
+             Use --version to select exactly one.",
+            name,
+            arch,
+            status,
+            distro,
+            series_name,
+            versions.join(", "),
+        )));
+    }
+
+    let upload = matching.first().ok_or_else(|| {
         lpcli::error::LpError::NotFound(format!(
             "No package '{}'{} [arch={}] found in queue with status '{}' for {}/{}.",
             name,
@@ -3298,17 +3320,38 @@ async fn handle_queue_reject(
 
     let uploads = queue::get_package_uploads(&client, &distro, &series_name, &params).await?;
 
-    // Find the first upload whose display_arches field contains the
-    // requested architecture.
-    let upload = uploads.iter().find(|u| {
-        u.display_arches
-            .as_deref()
-            .unwrap_or("")
-            .split(',')
-            .any(|a| a.trim().eq_ignore_ascii_case(&arch))
-    });
+    // Find uploads whose display_arches field contains the requested architecture.
+    let matching: Vec<_> = uploads
+        .iter()
+        .filter(|u| {
+            u.display_arches
+                .as_deref()
+                .unwrap_or("")
+                .split(',')
+                .any(|a| a.trim().eq_ignore_ascii_case(&arch))
+        })
+        .collect();
 
-    let upload = upload.ok_or_else(|| {
+    // Only a single package may be rejected at a time. If multiple results
+    // match, require the user to disambiguate with --version.
+    if matching.len() > 1 && version.is_none() {
+        let versions: Vec<String> = matching
+            .iter()
+            .filter_map(|u| u.package_version.clone())
+            .collect();
+        return Err(lpcli::error::LpError::Other(format!(
+            "Multiple uploads match '{}' [arch={}] with status '{}' in {}/{}: {}. \
+             Use --version to select exactly one.",
+            name,
+            arch,
+            status,
+            distro,
+            series_name,
+            versions.join(", "),
+        )));
+    }
+
+    let upload = matching.first().ok_or_else(|| {
         lpcli::error::LpError::NotFound(format!(
             "No package '{}'{} [arch={}] found in queue with status '{}' for {}/{}.",
             name,
@@ -3566,11 +3609,13 @@ async fn handle_package_download(
 ) -> lpcli::error::Result<()> {
     let client = LaunchpadClient::new(None);
 
-    // Search for the published source package.
+    // Search for the published source package (exact match to avoid
+    // substring hits like "libtest-valgrind-perl" when searching for "valgrind").
     let params = SourceSearchParams {
         source_name: Some(&name),
         version: version.as_deref(),
         status: Some("Published"),
+        exact_match: true,
         ..Default::default()
     };
 

@@ -12,7 +12,8 @@ applications can build on the same type-safe API wrappers.
 ## Features
 
 - **Full Launchpad API coverage** — bugs, packages, projects, people, CVEs, Git,
-  specs (blueprints), questions, webhooks, translations, snap recipes, and access tokens.
+  specs (blueprints), questions, webhooks, translations, snap recipes, package
+  upload queues, and access tokens.
 - **OAuth 1.0a authentication** — securely log in once; credentials are stored in
   `~/.config/lpcli/credentials.toml`.
 - **Rich terminal output** — coloured text and formatted tables via
@@ -96,6 +97,12 @@ lpcli bug search --target ubuntu --package firefox --status "Confirmed"
 # Search bugs by keyword
 lpcli bug search --target ubuntu --keyword "kernel panic" --limit 20
 
+# Search bugs by tag
+lpcli bug search --target ubuntu --tag "regression-update" --limit 10
+
+# Search bugs by importance
+lpcli bug search --target ubuntu --importance "Critical" --limit 10
+
 # Add a comment to a bug
 lpcli bug comment --bug-id 123456 --message "Reproduced on noble."
 
@@ -106,25 +113,42 @@ lpcli bug comments --bug-id 123456
 lpcli bug create --target ubuntu --package curl --title "curl crashes on redirect" \
     --description "Steps to reproduce: ..."
 
-# Change the status of bug tasks
-lpcli bug set-status --bug-id 123456 --target ubuntu --package curl \
+# Change the status of a bug task (--target is the name shown by 'lpcli bug tasks')
+lpcli bug set-status --bug-id 123456 --target curl \
     --series noble --status "In Progress"
 
 # Change status across multiple series at once
-lpcli bug set-status --bug-id 123456 --target ubuntu --package curl \
+lpcli bug set-status --bug-id 123456 --target curl \
     --many-series "noble, jammy" --status "Fix Released"
 
 # Change status on every series the bug currently has a task for
-lpcli bug set-status --bug-id 123456 --target ubuntu --package curl \
+lpcli bug set-status --bug-id 123456 --target curl \
     --all-series --status "Fix Released"
 
+# Change status across multiple targets
+lpcli bug set-status --bug-id 123456 --many-targets "rust-alacritty, rust-eza" \
+    --all-series --status "Fix Released"
+
+# Change status on all targets the bug currently has tasks for
+lpcli bug set-status --bug-id 123456 --all-targets --all-series --status "Fix Released"
+
+# Change status only on series-less (distribution-level or upstream) tasks
+lpcli bug set-status --bug-id 123456 --target curl \
+    --no-series --status "Fix Released"
+
 # Change the importance of a bug task
-lpcli bug set-importance --bug-id 123456 --target ubuntu --package curl \
+lpcli bug set-importance --bug-id 123456 --target curl \
     --series noble --importance "High"
 
+# Change importance across multiple targets / series
+lpcli bug set-importance --bug-id 123456 --all-targets --all-series --importance "Critical"
+
 # Assign a bug task to a user
-lpcli bug set-assignee --bug-id 123456 --target ubuntu --package curl \
+lpcli bug set-assignee --bug-id 123456 --target curl \
     --series noble --name jdoe
+
+# Assign across multiple targets / series
+lpcli bug set-assignee --bug-id 123456 --all-targets --all-series --name jdoe
 
 # Subscribe / unsubscribe a person
 lpcli bug subscribe   --bug-id 123456 --name jdoe
@@ -139,6 +163,24 @@ lpcli bug add-task --bug-id 123456 --target ubuntu --package curl \
 
 # Delete a bug task
 lpcli bug delete-task --bug-id 123456 --target ubuntu --package curl --series noble
+
+# Add a tag to a bug
+lpcli bug tag --bug-id 123456 --add-tag regression
+
+# Add multiple tags
+lpcli bug tag --bug-id 123456 --add-many-tags "regression, oem, sru"
+
+# Remove a tag from a bug
+lpcli bug tag --bug-id 123456 --remove-tag regression
+
+# Remove multiple tags
+lpcli bug tag --bug-id 123456 --remove-many-tags "regression, oem"
+
+# Remove all tags from a bug
+lpcli bug tag --bug-id 123456 --remove-all-tags
+
+# Replace all tags (clear + add in one invocation)
+lpcli bug tag --bug-id 123456 --remove-all-tags --add-many-tags "new-tag-1, new-tag-2"
 ```
 
 ---
@@ -188,6 +230,11 @@ lpcli package ppa --owner jdoe --ppa my-ppa
 
 # List source packages in a PPA
 lpcli package ppa-sources --owner jdoe --ppa my-ppa --name curl
+
+# Download source files for a published source package
+lpcli package download --name curl --series noble
+lpcli package download --name curl --series noble --version 8.5.0-2ubuntu10
+lpcli package download --name curl --series noble --output ~/Downloads
 ```
 
 ---
@@ -228,6 +275,9 @@ lpcli cve show --sequence 2024-1234
 
 # Search CVEs (optionally filtered by distribution)
 lpcli cve search --distro ubuntu --limit 10
+
+# Search CVEs by keyword
+lpcli cve search --keyword "buffer overflow" --limit 20
 
 # List CVEs linked to a bug
 lpcli cve bug-cves --bug-id 123456
@@ -355,11 +405,55 @@ lpcli snap request-builds --owner jdoe --name my-snap
 
 ---
 
+### Package Upload Queues
+
+```bash
+# Search packages in the upload queue for a distro series
+lpcli queue search --status "New"
+lpcli queue search --status "New" --name curl
+lpcli queue search --status "Unapproved" --series noble --pocket Security
+
+# Search with exact match on name/version
+lpcli queue search --status "New" --name curl --version 8.5.0-2ubuntu10 --exact-match
+
+# Download files from a package in the upload queue
+lpcli queue download --name curl --status "New" --arch source
+lpcli queue download --name curl --status "New" --arch amd64 --output ~/Downloads
+
+# Display binary package details for a queue item
+lpcli queue info --name curl --status "New" --arch amd64
+lpcli queue info --name curl --version 8.5.0-2ubuntu10 --status "New" --arch source
+
+# Accept a package from the queue (requires queue-admin permissions)
+lpcli queue accept --name curl --status "New" --arch source
+lpcli queue accept --name curl --status "New" --arch source --series noble
+
+# Reject a package from the queue (requires queue-admin permissions)
+lpcli queue reject --name curl --status "New" --arch source
+lpcli queue reject --name curl --status "New" --arch source --comment "Needs a bug fix."
+```
+
+---
+
 ### Personal Access Tokens
 
 ```bash
-# Manage access tokens for projects and Git repositories via the access-token subcommands
-lpcli access-token --help
+# Issue a personal access token for a project
+lpcli access-token issue --project launchpad --description "CI token" \
+    --scopes "repository:push,repository:build_status"
+
+# Issue a personal access token for a Git repository
+lpcli access-token issue-git --repo "~jdoe/launchpad/+git/myrepo" \
+    --description "Deploy key" --scopes "repository:push"
+
+# List access tokens for a project
+lpcli access-token list --project launchpad
+
+# List access tokens for a Git repository
+lpcli access-token list-git --repo "~jdoe/launchpad/+git/myrepo"
+
+# Revoke an access token
+lpcli access-token revoke --token-url "https://api.launchpad.net/devel/..."
 ```
 
 ---
@@ -405,7 +499,7 @@ async fn main() -> lpcli::error::Result<()> {
         ..Default::default()
     };
     let results = packages::search_published_sources(&lp, "ubuntu", "noble", &params).await?;
-    for pkg in &results.entries {
+    for pkg in &results {
         println!("{} {}", pkg.source_package_name.as_deref().unwrap_or("?"),
                           pkg.source_package_version.as_deref().unwrap_or("?"));
     }
@@ -446,7 +540,10 @@ src/
   webhooks.rs       — Webhook management
   translations.rs   — Translation queues and templates
   snaps.rs          — Snap recipes and builds
+  queue.rs          — Package upload queue management
+  download.rs       — File download utilities
   access_tokens.rs  — Personal access tokens
+  status.rs         — Server status and connectivity checks
   error.rs          — LpError type
 
   bin/
