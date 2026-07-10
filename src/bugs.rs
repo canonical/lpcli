@@ -161,6 +161,26 @@ pub struct BugComment {
     pub index: Option<u64>,
 }
 
+/// A file attachment on a bug.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BugAttachment {
+    /// API self-link.
+    pub self_link: Option<String>,
+    /// Short descriptive title of the attachment.
+    pub title: Option<String>,
+    /// Attachment type (e.g. "Patch" or "Unspecified").
+    #[serde(rename = "type")]
+    pub attachment_type: Option<String>,
+    /// API link to the bug this attachment belongs to.
+    pub bug_link: Option<String>,
+    /// API link to the file data (librarian-hosted content).
+    pub data_link: Option<String>,
+    /// API link to the message associated with this attachment.
+    pub message_link: Option<String>,
+    /// Web-accessible URL for the attachment.
+    pub web_link: Option<String>,
+}
+
 /// Parameters for searching bugs.
 #[derive(Debug, Clone, Default)]
 pub struct BugSearchParams<'a> {
@@ -366,6 +386,97 @@ pub async fn add_bug_comment(client: &LaunchpadClient, bug_id: u64, comment: &st
 /// Fetch comments for a bug.
 pub async fn get_bug_comments(client: &LaunchpadClient, bug_id: u64) -> Result<Vec<BugComment>> {
     let url = client.url(&format!("/bugs/{bug_id}/messages"));
+    Collection::fetch_all(client, &url).await
+}
+
+/// Parameters for adding a bug attachment.
+#[derive(Debug, Clone, Default)]
+pub struct AddAttachmentParams<'a> {
+    /// Comment text associated with the attachment.
+    pub comment: &'a str,
+    /// Path to a local file to upload (mutually exclusive with `url`).
+    pub file_path: Option<&'a std::path::Path>,
+    /// An external URL for the attachment (mutually exclusive with `file_path`).
+    pub url: Option<&'a str>,
+    /// The filename to use for the upload. Derived from `file_path` when not
+    /// explicitly given.
+    pub filename: Option<&'a str>,
+    /// A short description of the attachment.
+    pub description: Option<&'a str>,
+    /// Whether the attachment is a patch (`true`) or unspecified (`false`).
+    pub is_patch: bool,
+}
+
+/// Add a file attachment to a bug.
+///
+/// Either `params.file_path` or `params.url` must be provided.
+/// Returns the API URL (`Location` header) of the newly created attachment.
+pub async fn add_bug_attachment(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    params: &AddAttachmentParams<'_>,
+) -> Result<String> {
+    use reqwest::multipart::{Form, Part};
+
+    let mut form = Form::new()
+        .text("ws.op", "addAttachment")
+        .text("comment", params.comment.to_string());
+
+    if params.is_patch {
+        form = form.text("is_patch", "true");
+    }
+
+    if let Some(desc) = params.description {
+        form = form.text("description", desc.to_string());
+    }
+
+    if let Some(url) = params.url {
+        form = form.text("url", url.to_string());
+    }
+
+    if let Some(path) = params.file_path {
+        let filename = params
+            .filename
+            .map(|s| s.to_string())
+            .or_else(|| path.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "attachment".to_string());
+
+        let data = tokio::fs::read(path).await.map_err(|e| {
+            crate::error::LpError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to read attachment file '{}': {e}", path.display()),
+            ))
+        })?;
+
+        let content_type = mime_guess::from_path(path)
+            .first_or_octet_stream()
+            .to_string();
+
+        let part = Part::bytes(data)
+            .file_name(filename.clone())
+            .mime_str(&content_type)
+            .unwrap_or_else(|_| Part::bytes(vec![]).file_name(filename));
+        form = form.part("data", part);
+
+        // Launchpad also wants a "filename" text field.
+        if let Some(fname) = params.filename {
+            form = form.text("filename", fname.to_string());
+        } else if let Some(name) = path.file_name() {
+            form = form.text("filename", name.to_string_lossy().into_owned());
+        }
+    }
+
+    client
+        .post_multipart_created_location(&format!("/bugs/{bug_id}"), form)
+        .await
+}
+
+/// Fetch all attachments for a bug.
+pub async fn get_bug_attachments(
+    client: &LaunchpadClient,
+    bug_id: u64,
+) -> Result<Vec<BugAttachment>> {
+    let url = client.url(&format!("/bugs/{bug_id}/attachments"));
     Collection::fetch_all(client, &url).await
 }
 

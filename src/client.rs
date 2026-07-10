@@ -892,6 +892,68 @@ impl LaunchpadClient {
         let resp = self.send_with_retry(req).await?;
         self.handle_response(resp).await
     }
+
+    /// Perform an authenticated multipart POST and return the `Location`
+    /// header from a `201 Created` response.
+    ///
+    /// Used for Launchpad operations that accept file uploads (e.g.
+    /// `addAttachment`).
+    pub async fn post_multipart_created_location(
+        &self,
+        path: &str,
+        form: reqwest::multipart::Form,
+    ) -> Result<String> {
+        let url = self.url(path);
+        let mut req = self
+            .http
+            .post(&url)
+            .header("Accept", "application/json")
+            .multipart(form);
+
+        if let Some(creds) = &self.credentials {
+            let auth_header = auth::build_auth_header(creds)?;
+            req = req.header("Authorization", auth_header);
+        }
+
+        let resp = self.send_with_retry(req).await?;
+        self.handle_created_location(resp).await
+    }
+
+    /// Resolve a redirect URL without following it.
+    ///
+    /// Sends an authenticated GET with redirect policy set to `none` and
+    /// returns the `Location` header value from a 3xx response.  Returns
+    /// `None` if the response is not a redirect or lacks a `Location` header.
+    pub async fn resolve_redirect(&self, url: &str) -> Result<Option<String>> {
+        let no_redirect_client = reqwest::Client::builder()
+            .user_agent(concat!("lpcli/", env!("CARGO_PKG_VERSION")))
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| LpError::Other(format!("Failed to build HTTP client: {e}")))?;
+
+        let mut req = no_redirect_client
+            .get(url)
+            .header("Accept", "application/json");
+
+        if let Some(creds) = &self.credentials {
+            let auth_header = auth::build_auth_header(creds)?;
+            req = req.header("Authorization", auth_header);
+        }
+
+        let resp = req.send().await?;
+
+        if resp.status().is_redirection() {
+            let location = resp
+                .headers()
+                .get(LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            Ok(location)
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

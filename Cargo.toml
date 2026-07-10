@@ -22,7 +22,7 @@ path = "src/lib.rs"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client
-reqwest = { version = "0.13", features = ["json", "cookies", "form", "stream"] }
+reqwest = { version = "0.13", features = ["json", "cookies", "form", "stream", "multipart"] }
 
 # Async stream utilities
 futures-util = "0.3"
@@ -52,6 +52,9 @@ percent-encoding = "2"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+
+# MIME type detection for file uploads
+mime_guess = "2"
 
 # Pretty terminal output
 colored = "3"

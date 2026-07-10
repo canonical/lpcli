@@ -143,14 +143,26 @@ enum BugCommand {
         #[arg(short, long, default_value = "25")]
         limit: u32,
     },
-    /// Add a comment to a bug.
-    Comment {
+    /// Add a comment to a bug, optionally with a file attachment.
+    AddComment {
         /// The Launchpad bug number.
         #[arg(short, long)]
         bug_id: u64,
         /// Comment text.
         #[arg(short, long)]
         message: String,
+        /// Path to a local file to attach to the comment.
+        #[arg(short = 'f', long)]
+        attachment_file: Option<String>,
+        /// An external URL for the attachment.
+        #[arg(short = 'u', long)]
+        attachment_url: Option<String>,
+        /// A short description of the attachment.
+        #[arg(short = 'd', long)]
+        attachment_description: Option<String>,
+        /// Attachment type: "Patch" or "Unspecified".
+        #[arg(short = 'a', long)]
+        attachment_type: Option<String>,
     },
     /// List comments on a bug.
     Comments {
@@ -337,6 +349,12 @@ enum BugCommand {
     },
     /// List subscriptions for a bug.
     Subscriptions {
+        /// The Launchpad bug number.
+        #[arg(short, long)]
+        bug_id: u64,
+    },
+    /// List attachments for a bug.
+    Attachments {
         /// The Launchpad bug number.
         #[arg(short, long)]
         bug_id: u64,
@@ -1212,14 +1230,59 @@ fn print_bug_tasks(tasks: &[bugs::BugTask]) {
     println!("{table}");
 }
 
+/// Resolve the download URL for a bug attachment.
+///
+/// The `data_link` field on a bug attachment points to the Launchpad API
+/// file resource which 303-redirects to the librarian URL containing the
+/// actual filename.  This function resolves that redirect to obtain the
+/// direct download URL.
+async fn resolve_attachment_download_url(
+    client: &LaunchpadClient,
+    attachment: &bugs::BugAttachment,
+) -> String {
+    if let Some(data_link) = attachment.data_link.as_deref() {
+        match client.resolve_redirect(data_link).await {
+            Ok(Some(url)) => url,
+            _ => attachment.web_link.as_deref().unwrap_or("—").to_string(),
+        }
+    } else {
+        attachment.web_link.as_deref().unwrap_or("—").to_string()
+    }
+}
+
+/// Resolve download URLs for all attachments in parallel.
+async fn resolve_all_attachment_urls(
+    client: &LaunchpadClient,
+    attachments: &[bugs::BugAttachment],
+) -> Vec<String> {
+    let futures: Vec<_> = attachments
+        .iter()
+        .map(|a| resolve_attachment_download_url(client, a))
+        .collect();
+    futures_util::future::join_all(futures).await
+}
+
+fn print_bug_attachments(attachments: &[bugs::BugAttachment], download_urls: &[String]) {
+    let mut table = build_table(vec!["Title", "Type", "URL"]);
+    for (a, url) in attachments.iter().zip(download_urls.iter()) {
+        let title = a.title.as_deref().unwrap_or("—").to_string();
+        let kind = a.attachment_type.as_deref().unwrap_or("—").to_string();
+        table.add_row(vec![title, kind, url.clone()]);
+    }
+    println!("{}", "Attachments".bold());
+    println!("{table}");
+    println!("{} attachment(s).", attachments.len());
+}
+
 async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
     let client = authenticated_client()?;
 
     match cmd {
         BugCommand::Show { bug_id } => {
-            let (bug, tasks) = tokio::try_join!(
+            let (bug, tasks, attachments) = tokio::try_join!(
                 bugs::get_bug(&client, bug_id),
                 bugs::get_bug_tasks(&client, bug_id),
+                bugs::get_bug_attachments(&client, bug_id),
             )?;
             println!("{}", format!("Bug #{}", bug.id).bold());
             println!("{}", "─".repeat(60));
@@ -1239,6 +1302,11 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             }
             println!();
             print_bug_tasks(&tasks);
+            if !attachments.is_empty() {
+                let download_urls = resolve_all_attachment_urls(&client, &attachments).await;
+                println!();
+                print_bug_attachments(&attachments, &download_urls);
+            }
         }
 
         BugCommand::Tasks { bug_id } => {
@@ -1289,13 +1357,45 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             println!("{} bug(s) found.", tasks.len());
         }
 
-        BugCommand::Comment { bug_id, message } => {
-            bugs::add_bug_comment(&client, bug_id, &message).await?;
-            println!("{} Comment added to bug #{bug_id}.", "✓".green().bold());
+        BugCommand::AddComment {
+            bug_id,
+            message,
+            attachment_file,
+            attachment_url,
+            attachment_description,
+            attachment_type,
+        } => {
+            let has_attachment = attachment_file.is_some() || attachment_url.is_some();
+            if has_attachment {
+                let is_patch = attachment_type
+                    .as_deref()
+                    .is_some_and(|t| t.eq_ignore_ascii_case("patch"));
+                let file_path = attachment_file.as_deref().map(std::path::Path::new);
+                let params = bugs::AddAttachmentParams {
+                    comment: &message,
+                    file_path,
+                    url: attachment_url.as_deref(),
+                    filename: None,
+                    description: attachment_description.as_deref(),
+                    is_patch,
+                };
+                bugs::add_bug_attachment(&client, bug_id, &params).await?;
+                println!(
+                    "{} Comment with attachment added to bug #{bug_id}.",
+                    "✓".green().bold()
+                );
+            } else {
+                bugs::add_bug_comment(&client, bug_id, &message).await?;
+                println!("{} Comment added to bug #{bug_id}.", "✓".green().bold());
+            }
         }
 
         BugCommand::Comments { bug_id } => {
-            let comments = bugs::get_bug_comments(&client, bug_id).await?;
+            let (comments, attachments) = tokio::try_join!(
+                bugs::get_bug_comments(&client, bug_id),
+                bugs::get_bug_attachments(&client, bug_id),
+            )?;
+            let download_urls = resolve_all_attachment_urls(&client, &attachments).await;
             for (i, c) in comments.iter().enumerate() {
                 let idx = c.index.unwrap_or(i as u64);
                 let author = c.owner_link.as_deref().unwrap_or("unknown");
@@ -1305,6 +1405,20 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                     .unwrap_or_default();
                 println!("{}", format!("Comment #{idx} — {author} — {date}").bold());
                 println!("{}", c.content.as_deref().unwrap_or(""));
+                // Show any attachments associated with this comment.
+                let comment_attachments: Vec<_> = attachments
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| {
+                        a.message_link.as_deref() == c.self_link.as_deref() && c.self_link.is_some()
+                    })
+                    .collect();
+                for (idx, a) in &comment_attachments {
+                    let name = a.title.as_deref().unwrap_or("attachment");
+                    let kind = a.attachment_type.as_deref().unwrap_or("Unspecified");
+                    let url = &download_urls[*idx];
+                    println!("  {} [{kind}] {url}", format!("📎 {name}").cyan());
+                }
                 println!("{}", "─".repeat(60));
             }
         }
@@ -1455,6 +1569,16 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 table.add_row(vec![person, by, &date]);
             }
             println!("{table}");
+        }
+
+        BugCommand::Attachments { bug_id } => {
+            let attachments = bugs::get_bug_attachments(&client, bug_id).await?;
+            if attachments.is_empty() {
+                println!("No attachments for bug #{bug_id}.");
+            } else {
+                let download_urls = resolve_all_attachment_urls(&client, &attachments).await;
+                print_bug_attachments(&attachments, &download_urls);
+            }
         }
 
         BugCommand::AddTask {
@@ -2956,7 +3080,7 @@ async fn handle_queue_search(
             client.url(&format!("/{}", a))
         } else {
             // Assume it's just the archive name under the distro.
-            client.url(&format!("/{}/+archive/{}", &distro, a))
+            client.url(&format!("/{}/+archive/{}", distro, a))
         }
     });
 
