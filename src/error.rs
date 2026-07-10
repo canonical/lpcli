@@ -63,6 +63,11 @@ pub enum LpError {
     #[error("Not found: {0}")]
     NotFound(String),
 
+    /// The authenticated user does not have permission to perform the
+    /// requested operation.
+    #[error("Unauthorized: {0}")]
+    Unauthorized(String),
+
     /// A configuration error (e.g. malformed credential file).
     #[error("Configuration error: {0}")]
     Config(String),
