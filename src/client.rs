@@ -281,6 +281,24 @@ impl LaunchpadClient {
         self.handle_response_ok(resp).await
     }
 
+    /// Perform an authenticated POST request against an absolute URL and return
+    /// `Ok(())` on success, discarding the response body.
+    pub async fn post_url_ok(&self, url: &str, params: &HashMap<&str, &str>) -> Result<()> {
+        let mut req = self
+            .http
+            .post(url)
+            .header("Accept", "application/json")
+            .form(params);
+
+        if let Some(creds) = &self.credentials {
+            let auth_header = auth::build_auth_header(creds)?;
+            req = req.header("Authorization", auth_header);
+        }
+
+        let resp = self.send_with_retry(req).await?;
+        self.handle_response_ok(resp).await
+    }
+
     /// Perform an authenticated POST request and return the `Location` header
     /// from a successful response.
     ///

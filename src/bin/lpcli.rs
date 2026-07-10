@@ -170,6 +170,18 @@ enum BugCommand {
         #[arg(short, long)]
         bug_id: u64,
     },
+    /// Delete a comment that you previously added to a bug.
+    ///
+    /// The comment is identified by its index number as shown in
+    /// `lpcli bug comments`. You must be the original author of the comment.
+    DeleteComment {
+        /// The Launchpad bug number.
+        #[arg(short, long)]
+        bug_id: u64,
+        /// The comment index to delete, as shown by 'lpcli bug comments'.
+        #[arg(short, long)]
+        comment_index: u64,
+    },
     /// Create a new bug on a project or distribution.
     Create {
         /// Project or distribution name (e.g. "ubuntu", "launchpad").
@@ -1243,10 +1255,10 @@ async fn resolve_attachment_download_url(
     if let Some(data_link) = attachment.data_link.as_deref() {
         match client.resolve_redirect(data_link).await {
             Ok(Some(url)) => url,
-            _ => attachment.web_link.as_deref().unwrap_or("—").to_string(),
+            _ => "—".to_string(),
         }
     } else {
-        attachment.web_link.as_deref().unwrap_or("—").to_string()
+        "—".to_string()
     }
 }
 
@@ -1397,6 +1409,10 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             )?;
             let download_urls = resolve_all_attachment_urls(&client, &attachments).await;
             for (i, c) in comments.iter().enumerate() {
+                // Skip comments that were previously deleted.
+                if c.date_deleted.is_some() {
+                    continue;
+                }
                 let idx = c.index.unwrap_or(i as u64);
                 let author = c.owner_link.as_deref().unwrap_or("unknown");
                 let date = c
@@ -1417,10 +1433,25 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                     let name = a.title.as_deref().unwrap_or("attachment");
                     let kind = a.attachment_type.as_deref().unwrap_or("Unspecified");
                     let url = &download_urls[*idx];
-                    println!("  {} [{kind}] {url}", format!("📎 {name}").cyan());
+                    if url == "—" {
+                        println!("  {} [{kind}]", format!("📎 {name}").cyan());
+                    } else {
+                        println!("  {} [{kind}] {url}", format!("📎 {name}").cyan());
+                    }
                 }
                 println!("{}", "─".repeat(60));
             }
+        }
+
+        BugCommand::DeleteComment {
+            bug_id,
+            comment_index,
+        } => {
+            bugs::delete_bug_comment(&client, bug_id, comment_index).await?;
+            println!(
+                "{} Comment #{comment_index} deleted from bug #{bug_id}.",
+                "✓".green().bold()
+            );
         }
 
         BugCommand::Create {

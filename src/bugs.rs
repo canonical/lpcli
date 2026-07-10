@@ -18,6 +18,7 @@
 //! | [`set_bug_assignee`] | Assign a bug task to a Launchpad user |
 //! | [`add_bug_comment`] | Add a comment to a bug |
 //! | [`get_bug_comments`] | List comments on a bug |
+//! | [`delete_bug_comment`] | Delete a comment from a bug |
 //! | [`set_bug_tags`] | Replace the tag list on a bug |
 
 use chrono::{DateTime, Utc};
@@ -155,6 +156,8 @@ pub struct BugComment {
     pub content: Option<String>,
     /// When the comment was posted.
     pub date_created: Option<DateTime<Utc>>,
+    /// When the comment was deleted (if deleted).
+    pub date_deleted: Option<DateTime<Utc>>,
     /// API link to the author.
     pub owner_link: Option<String>,
     /// Sequence number within the bug.
@@ -387,6 +390,67 @@ pub async fn add_bug_comment(client: &LaunchpadClient, bug_id: u64, comment: &st
 pub async fn get_bug_comments(client: &LaunchpadClient, bug_id: u64) -> Result<Vec<BugComment>> {
     let url = client.url(&format!("/bugs/{bug_id}/messages"));
     Collection::fetch_all(client, &url).await
+}
+
+/// Delete the content of a comment from a bug, including any attachments.
+///
+/// The comment is identified by its `comment_index`, as shown by
+/// [`get_bug_comments`]. This removes any bug attachments associated with the
+/// comment (via the Launchpad `removeFromBug` operation) and then uses the
+/// `deleteContent` operation on the comment message's canonical `self_link` to
+/// remove the comment's text. The authenticated user must be the original
+/// author of the comment; otherwise Launchpad will return a permissions error.
+///
+/// # Errors
+///
+/// Returns [`crate::error::LpError::NotFound`] if the comment index does not
+/// exist, or [`crate::error::LpError::Unauthorized`] if the user is not
+/// permitted to delete the comment.
+pub async fn delete_bug_comment(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    comment_index: u64,
+) -> Result<()> {
+    use std::collections::HashMap;
+
+    let (comments, attachments) = tokio::try_join!(
+        get_bug_comments(client, bug_id),
+        get_bug_attachments(client, bug_id),
+    )?;
+
+    let comment = comments
+        .iter()
+        .enumerate()
+        .find(|(i, comment)| comment.index.unwrap_or(*i as u64) == comment_index)
+        .map(|(_, comment)| comment)
+        .ok_or_else(|| {
+            crate::error::LpError::NotFound(format!(
+                "Comment #{comment_index} does not exist on bug #{bug_id}."
+            ))
+        })?;
+    let comment_url = comment.self_link.as_deref().ok_or_else(|| {
+        crate::error::LpError::Other(format!(
+            "Comment #{comment_index} on bug #{bug_id} has no API self_link."
+        ))
+    })?;
+
+    // Remove any attachments associated with this comment.
+    let comment_attachments: Vec<_> = attachments
+        .iter()
+        .filter(|a| a.message_link.as_deref() == Some(comment_url) && a.self_link.is_some())
+        .collect();
+
+    for attachment in &comment_attachments {
+        let attachment_url = attachment.self_link.as_deref().unwrap();
+        let mut params = HashMap::new();
+        params.insert("ws.op", "removeFromBug");
+        client.post_url_ok(attachment_url, &params).await?;
+    }
+
+    // Delete the comment text.
+    let mut params = HashMap::new();
+    params.insert("ws.op", "deleteContent");
+    client.post_url_ok(comment_url, &params).await
 }
 
 /// Parameters for adding a bug attachment.
