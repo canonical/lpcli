@@ -1,20 +1,4 @@
 {
     "name": "Ubuntu Rust Development Container",
-    "initializeCommand": "echo 'FROM scratch' | podman build -t scratch-alias -",
-    "dockerFile": "Containerfile",
-    "customizations": {
-        "vscode": {
-            "extensions": [
-                "rust-lang.rust-analyzer"
-            ]
-        }
-    },
-    "forwardPorts": [
-        8000,
-        8080
-    ],
-    "runArgs": [        
-        "--userns=keep-id",
-        "--security-opt=label=disable"
-    ]
+    "image": "ghcr.io/rmcnew/ubuntu-26.04-rust-1.93-devcontainer:latest"
 }
