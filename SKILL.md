@@ -1,54 +1,49 @@
+---
+name: lpcli
+description: 'Query and manage Launchpad.net via the lpcli CLI. USE FOR: counting or listing bugs against Ubuntu packages or projects, searching Launchpad bugs by status/tag/importance/keyword, looking up CVEs, finding source packages, checking people/teams, reviewing merge proposals, managing upload queues, and any question about Launchpad data. DO NOT USE FOR: GitHub issues, Jira, or non-Launchpad bug trackers.'
+---
+
 # lpcli Skill
 
-> Interact with [Launchpad.net](https://launchpad.net) from the command line
-> or as an async Rust library.
+Use the `lpcli` command-line tool to answer questions about
+[Launchpad.net](https://launchpad.net) — Ubuntu's bug tracker, package archive,
+and project hosting platform.
 
-## What is lpcli?
+## When to Use
 
-`lpcli` is a command-line client and Rust library for the
-[Launchpad.net](https://launchpad.net) web API. It covers bugs, packages,
-projects, people/teams, CVEs, Git repositories, specifications (blueprints),
-questions, webhooks, translations, snap recipes, package upload queues, and
-personal access tokens.
+Use this skill whenever the user asks about **Launchpad** data, including:
 
-Repository: <https://github.com/canonical/lpcli>
+- "How many bugs are opened against **rustc-1.97** in Launchpad?"
+- "List Critical bugs for **curl** in Ubuntu"
+- "Show me the bug tasks for LP #123456"
+- "What packages are in the **noble** Security pocket?"
+- "Find merge proposals needing review for a Launchpad Git repo"
+- "What CVEs are linked to bug #123456?"
+- Any question mentioning **Launchpad**, **LP**, Ubuntu **bugs**, Ubuntu **packages**,
+  or Ubuntu **source packages** by name.
 
----
+### Mapping natural-language questions to commands
 
-## Installation
+| User intent | lpcli command |
+|-------------|---------------|
+| Count/list bugs for a **source package** | `lpcli bug search --target ubuntu --package <name>` |
+| Count/list bugs for a **project** | `lpcli bug search --target <project>` |
+| Filter bugs by status | Add `--status "New"` (or Confirmed, Triaged, In Progress, Fix Committed, Fix Released, etc.) |
+| Filter bugs by importance | Add `--importance "Critical"` (or High, Medium, Low, Wishlist, Undecided) |
+| Filter bugs by tag | Add `--tag <tag>` |
+| Search bugs by keyword | Add `--keyword "<text>"` |
+| Limit results | Add `--limit <n>` |
 
-```bash
-# Clone and build from source (requires Rust 1.88+)
-git clone https://github.com/canonical/lpcli
-cd lpcli
-cargo build --release
-# Binary: target/release/lpcli
+**Counting bugs**: `lpcli bug search` returns matching bugs. To count them,
+pipe through `wc -l` or count the output entries. When the user asks "how many",
+run the search and report the count.
 
-# Or install into $PATH
-cargo install --path .
-```
+## Prerequisites
 
----
-
-## Authentication
-
-Most **read** operations work anonymously. **Write** operations require OAuth
-login first.
-
-```bash
-# Log in (opens browser for OAuth authorisation)
-lpcli login
-
-# Check authentication and connectivity
-lpcli status
-
-# Log out and remove stored credentials
-lpcli logout
-```
-
-Credentials are stored in `~/.config/lpcli/credentials.toml`.
-
----
+- `lpcli` must be on `$PATH` (install via `cargo install --path .` from the
+  [lpcli repo](https://github.com/canonical/lpcli)).
+- Most **read** operations work **anonymously** (no login needed).
+- **Write** operations require `lpcli login` first.
 
 ## CLI Reference
 
@@ -224,93 +219,15 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 
 ---
 
-## Using lpcli as a Rust Library
-
-Add to `Cargo.toml`:
-
-```toml
-[dependencies]
-lpcli = { git = "https://github.com/canonical/lpcli" }
-tokio = { version = "1", features = ["full"] }
-```
-
-### Unauthenticated example
-
-```rust
-use lpcli::{client::LaunchpadClient, bugs};
-
-#[tokio::main]
-async fn main() -> lpcli::error::Result<()> {
-    let lp = LaunchpadClient::new(None);
-    let bug = bugs::get_bug(&lp, 123456).await?;
-    println!("Bug #{}: {}", bug.id, bug.title);
-    Ok(())
-}
-```
-
-### Authenticated example
-
-```rust
-use lpcli::{auth, client::LaunchpadClient, packages};
-
-#[tokio::main]
-async fn main() -> lpcli::error::Result<()> {
-    let creds = auth::load_credentials()?;
-    let lp = LaunchpadClient::new(Some(creds));
-
-    let params = packages::SourceSearchParams {
-        source_name: Some("curl"),
-        ..Default::default()
-    };
-    let results = packages::search_published_sources(&lp, "ubuntu", "noble", &params).await?;
-    for pkg in &results {
-        println!("{} {}",
-            pkg.source_package_name.as_deref().unwrap_or("?"),
-            pkg.source_package_version.as_deref().unwrap_or("?"));
-    }
-    Ok(())
-}
-```
-
-### Error handling
-
-All library functions return `lpcli::error::Result<T>` (alias for
-`std::result::Result<T, lpcli::error::LpError>`).
-
-| Variant | Meaning |
-|---------|---------|
-| `LpError::NotAuthenticated` | No credentials; run `lpcli login` |
-| `LpError::NotFound` | Resource does not exist on Launchpad |
-| `LpError::Api` | Launchpad returned a non-success HTTP status |
-| `LpError::RateLimit` | Launchpad throttled the request (HTTP 429) |
-| `LpError::Timeout` | Request timed out |
-
-### Library modules
-
-| Module | Purpose |
-|--------|---------|
-| `lpcli::bugs` | Bug tracking (show, search, create, comment, tasks, status, tags) |
-| `lpcli::packages` | Source packages, distro series, PPAs, downloads |
-| `lpcli::projects` | Projects, milestones, series |
-| `lpcli::people` | People and teams |
-| `lpcli::cves` | CVE lookup |
-| `lpcli::git` | Git repositories, refs, merge proposals |
-| `lpcli::specifications` | Blueprints / specs |
-| `lpcli::questions` | Answers / support questions |
-| `lpcli::webhooks` | Webhook management |
-| `lpcli::translations` | Translation queues and templates |
-| `lpcli::snaps` | Snap recipes and builds |
-| `lpcli::queue` | Package upload queue management |
-| `lpcli::download` | File download utilities |
-| `lpcli::access_tokens` | Personal access tokens |
-| `lpcli::auth` | OAuth login/logout and credential management |
-| `lpcli::client` | `LaunchpadClient` — low-level HTTP client |
-| `lpcli::status` | Server status and connectivity checks |
-| `lpcli::error` | `LpError` error type |
-
----
-
 ## Common Workflows
+
+### Count open bugs for a source package
+
+```bash
+# "How many bugs are opened against rustc-1.97 in Launchpad?"
+lpcli bug search --target ubuntu --package rustc-1.97
+# To count: pipe output through wc -l or count the returned entries
+```
 
 ### Triage a bug
 
@@ -372,18 +289,14 @@ lpcli person ppas --name jdoe
 
 ## Tips for Agents
 
-1. **No browser needed** — all Launchpad operations run in the terminal via
-   `lpcli`, making it ideal for automated and scripted workflows.
-2. **Read operations are anonymous** — you can query bugs, packages, projects,
-   people, CVEs, and more without authentication.
-3. **Write operations require login** — run `lpcli login` first, which stores
-   OAuth credentials in `~/.config/lpcli/credentials.toml`.
-4. **Use `--help`** — every command and subcommand supports `--help` for full
-   option details (e.g. `lpcli bug search --help`).
-5. **Parse output** — `lpcli` outputs human-readable coloured text and tables.
-   When scripting, pipe through standard text-processing tools.
-6. **Launchpad API docs** — the underlying web API is documented at
-   <https://api.launchpad.net/devel.html> and
-   <https://documentation.ubuntu.com/launchpad/user/explanation/launchpad-api/launchpad-web-service/>.
-7. **Library usage** — for deeper integration, use `lpcli` as an async Rust
-   library crate (see the Rust library section above).
+1. **Run in terminal** — all Launchpad operations use `lpcli` commands; no
+   browser or web scraping needed.
+2. **Read operations are anonymous** — bug searches, package lookups, etc. work
+   without `lpcli login`.
+3. **Use `--help`** — every subcommand supports `--help` for full option details
+   (e.g. `lpcli bug search --help`).
+4. **Counting results** — `lpcli` outputs human-readable tables. To count bugs,
+   pipe through `grep -c` or `wc -l` on the relevant output lines.
+5. **Source package names in Launchpad** may differ from upstream project names
+   (e.g. `rustc-1.97` not `rust`). Use the exact source package name the user
+   provides.
