@@ -77,4 +77,11 @@ then
     exit 1
 fi
 
+# security audit dependencies (cargo audit)
+if ! cargo audit
+then
+    echo "Security audit failed or vulnerabilities found in dependencies. Run 'cargo audit' for more information."
+    exit 1
+fi
+
 exit 0
