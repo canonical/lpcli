@@ -1,0 +1,61 @@
+name: Build and Test
+
+on:
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build, Lint, and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for non-ASCII filenames
+        run: |
+          if git -c core.quotepath=false ls-files | LC_ALL=C grep -q -P '[^\x20-\x7E]'; then
+            echo "::error::Attempt to add non-ASCII file name(s):"
+            git -c core.quotepath=false ls-files | LC_ALL=C grep -P '[^\x20-\x7E]'
+            exit 1
+          fi
+          echo "All tracked filenames are valid ASCII."
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check code formatting (cargo fmt)
+        run: cargo fmt -- --check
+
+      - name: Run clippy linter (cargo clippy)
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Check documentation (cargo doc)
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --locked --no-deps --all-features
+
+      - name: Build all targets (cargo build)
+        run: cargo build --locked --all-targets --all-features
+
+      - name: Run test suite (cargo test)
+        run: cargo test --locked --all-targets --all-features
+
+      - name: Security audit dependencies (cargo audit)
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
