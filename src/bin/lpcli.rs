@@ -196,6 +196,18 @@ enum BugCommand {
         /// Bug description.
         #[arg(short, long)]
         description: String,
+        /// Path to a local file to attach to the bug.
+        #[arg(short = 'f', long)]
+        attachment_file: Option<String>,
+        /// An external URL for the attachment.
+        #[arg(short = 'u', long)]
+        attachment_url: Option<String>,
+        /// A short description of the attachment.
+        #[arg(long)]
+        attachment_description: Option<String>,
+        /// Attachment type: "Patch" or "Unspecified".
+        #[arg(short = 'a', long)]
+        attachment_type: Option<String>,
     },
     /// Change the status of a bug task.
     #[command(
@@ -1459,6 +1471,10 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             package,
             title,
             description,
+            attachment_file,
+            attachment_url,
+            attachment_description,
+            attachment_type,
         } => {
             let effective_target = match &package {
                 Some(pkg) => format!("{target}/+source/{pkg}"),
@@ -1468,6 +1484,28 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             println!("{} Bug #{} created.", "✓".green().bold(), bug.id);
             if let Some(link) = &bug.web_link {
                 println!("URL: {}", link.underline());
+            }
+
+            let has_attachment = attachment_file.is_some() || attachment_url.is_some();
+            if has_attachment {
+                let is_patch = attachment_type
+                    .as_deref()
+                    .is_some_and(|t| t.eq_ignore_ascii_case("patch"));
+                let file_path = attachment_file.as_deref().map(std::path::Path::new);
+                let params = bugs::AddAttachmentParams {
+                    comment: "",
+                    file_path,
+                    url: attachment_url.as_deref(),
+                    filename: None,
+                    description: attachment_description.as_deref(),
+                    is_patch,
+                };
+                bugs::add_bug_attachment(&client, bug.id, &params).await?;
+                println!(
+                    "{} Attachment added to bug #{}.",
+                    "✓".green().bold(),
+                    bug.id
+                );
             }
         }
 
@@ -3850,21 +3888,12 @@ async fn handle_package_download(
     Ok(())
 }
 
-/// Format a byte size in a human-friendly way.
+/// Format a byte size in a human-friendly way using binary prefixes.
 #[allow(dead_code)]
 fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1_024;
-    const MB: u64 = 1_024 * KB;
-    const GB: u64 = 1_024 * MB;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
+    match unit_prefix::NumberPrefix::binary(bytes as f64) {
+        unit_prefix::NumberPrefix::Standalone(bytes) => format!("{bytes} B"),
+        unit_prefix::NumberPrefix::Prefixed(prefix, n) => format!("{n:.1} {prefix}B"),
     }
 }
 
@@ -5087,5 +5116,148 @@ mod tests {
             Cli::try_parse_from(full).is_err(),
             "--remove-many-tags and --remove-all-tags must be mutually exclusive"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // CLI argument parsing — Create subcommand
+    // -----------------------------------------------------------------------
+
+    /// Helper: parse a `BugCommand::Create` from CLI tokens and return the variant.
+    fn parse_create_cmd(args: &[&str]) -> BugCommand {
+        let full: Vec<&str> = std::iter::once("lpcli")
+            .chain(std::iter::once("bug"))
+            .chain(std::iter::once("create"))
+            .chain(args.iter().copied())
+            .collect();
+        let cli = Cli::try_parse_from(full).expect("CLI parsing failed");
+        match cli.command {
+            Command::Bug(cmd) => cmd,
+            _ => panic!("Expected Bug command"),
+        }
+    }
+
+    #[test]
+    fn cli_create_bug_basic() {
+        let cmd = parse_create_cmd(&[
+            "--target",
+            "ubuntu",
+            "--package",
+            "curl",
+            "--title",
+            "crash on boot",
+            "--description",
+            "detailed description",
+        ]);
+        let BugCommand::Create {
+            target,
+            package,
+            title,
+            description,
+            attachment_file,
+            attachment_url,
+            attachment_description,
+            attachment_type,
+        } = cmd
+        else {
+            panic!("Expected Create variant");
+        };
+        assert_eq!(target, "ubuntu");
+        assert_eq!(package, Some("curl".to_string()));
+        assert_eq!(title, "crash on boot");
+        assert_eq!(description, "detailed description");
+        assert!(attachment_file.is_none());
+        assert!(attachment_url.is_none());
+        assert!(attachment_description.is_none());
+        assert!(attachment_type.is_none());
+    }
+
+    #[test]
+    fn cli_create_bug_with_attachment_file() {
+        let cmd = parse_create_cmd(&[
+            "-t",
+            "launchpad",
+            "-T",
+            "new bug",
+            "-d",
+            "some issue",
+            "-f",
+            "/tmp/patch.diff",
+            "--attachment-description",
+            "fix for crash",
+            "-a",
+            "Patch",
+        ]);
+        let BugCommand::Create {
+            target,
+            package,
+            title,
+            description,
+            attachment_file,
+            attachment_url,
+            attachment_description,
+            attachment_type,
+        } = cmd
+        else {
+            panic!("Expected Create variant");
+        };
+        assert_eq!(target, "launchpad");
+        assert!(package.is_none());
+        assert_eq!(title, "new bug");
+        assert_eq!(description, "some issue");
+        assert_eq!(attachment_file, Some("/tmp/patch.diff".to_string()));
+        assert!(attachment_url.is_none());
+        assert_eq!(attachment_description, Some("fix for crash".to_string()));
+        assert_eq!(attachment_type, Some("Patch".to_string()));
+    }
+
+    #[test]
+    fn cli_create_bug_with_attachment_url() {
+        let cmd = parse_create_cmd(&[
+            "-T",
+            "new bug",
+            "-d",
+            "some issue",
+            "-u",
+            "https://example.com/log.txt",
+        ]);
+        let BugCommand::Create {
+            target,
+            package,
+            title,
+            description,
+            attachment_file,
+            attachment_url,
+            attachment_description,
+            attachment_type,
+        } = cmd
+        else {
+            panic!("Expected Create variant");
+        };
+        assert_eq!(target, "ubuntu"); // default value
+        assert!(package.is_none());
+        assert_eq!(title, "new bug");
+        assert_eq!(description, "some issue");
+        assert!(attachment_file.is_none());
+        assert_eq!(
+            attachment_url,
+            Some("https://example.com/log.txt".to_string())
+        );
+        assert!(attachment_description.is_none());
+        assert!(attachment_type.is_none());
+    }
+
+    #[test]
+    fn format_size_standalone_bytes() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn format_size_binary_prefixes() {
+        assert_eq!(format_size(1_024), "1.0 KiB");
+        assert_eq!(format_size(1_536), "1.5 KiB");
+        assert_eq!(format_size(1_048_576), "1.0 MiB");
+        assert_eq!(format_size(1_073_741_824), "1.0 GiB");
     }
 }

@@ -60,6 +60,7 @@ mime_guess = "2"
 colored = "3"
 comfy-table = "7"
 indicatif = "0.18"
+unit-prefix = "0.5.2"
 
 [dev-dependencies]
 tokio-test = "0.4"
