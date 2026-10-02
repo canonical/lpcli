@@ -3888,21 +3888,12 @@ async fn handle_package_download(
     Ok(())
 }
 
-/// Format a byte size in a human-friendly way.
+/// Format a byte size in a human-friendly way using binary prefixes.
 #[allow(dead_code)]
 fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1_024;
-    const MB: u64 = 1_024 * KB;
-    const GB: u64 = 1_024 * MB;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
+    match unit_prefix::NumberPrefix::binary(bytes as f64) {
+        unit_prefix::NumberPrefix::Standalone(bytes) => format!("{bytes} B"),
+        unit_prefix::NumberPrefix::Prefixed(prefix, n) => format!("{n:.1} {prefix}B"),
     }
 }
 
@@ -5253,5 +5244,20 @@ mod tests {
         );
         assert!(attachment_description.is_none());
         assert!(attachment_type.is_none());
+    }
+
+    #[test]
+    fn format_size_standalone_bytes() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn format_size_binary_prefixes() {
+        assert_eq!(format_size(1_024), "1.0 KiB");
+        assert_eq!(format_size(1_536), "1.5 KiB");
+        assert_eq!(format_size(1_048_576), "1.0 MiB");
+        assert_eq!(format_size(1_073_741_824), "1.0 GiB");
     }
 }
