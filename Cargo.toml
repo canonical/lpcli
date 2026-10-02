@@ -58,7 +58,7 @@ mime_guess = "2"
 
 # Pretty terminal output
 colored = "3"
-comfy-table = "7"
+comfy-table = "8"
 indicatif = "0.18"
 unit-prefix = "0.5.2"
 
