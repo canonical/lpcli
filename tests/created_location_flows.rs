@@ -227,3 +227,70 @@ async fn created_location_requires_location_header() {
 
     post_mock.assert_async().await;
 }
+
+#[tokio::test]
+async fn add_bug_attachment_with_url_follows_location() {
+    let mut server = Server::new_async().await;
+
+    let attachment_location = format!("{}/bugs/123/comments/1", server.url());
+
+    let add_attachment_mock = server
+        .mock("POST", "/bugs/123")
+        .with_status(201)
+        .with_header("location", &attachment_location)
+        .create_async()
+        .await;
+
+    let client = LaunchpadClient::new(None).with_base_url(server.url());
+    let params = bugs::AddAttachmentParams {
+        comment: "",
+        file_path: None,
+        url: Some("https://example.com/log.txt"),
+        filename: None,
+        description: Some("attachment log"),
+        is_patch: false,
+    };
+
+    let loc = bugs::add_bug_attachment(&client, 123, &params)
+        .await
+        .expect("add_bug_attachment should return Location");
+
+    assert_eq!(loc, attachment_location);
+    add_attachment_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn add_bug_attachment_with_file_follows_location() {
+    let mut server = Server::new_async().await;
+
+    let attachment_location = format!("{}/bugs/123/comments/1", server.url());
+
+    let add_attachment_mock = server
+        .mock("POST", "/bugs/123")
+        .with_status(201)
+        .with_header("location", &attachment_location)
+        .create_async()
+        .await;
+
+    let temp_path = std::env::temp_dir().join(format!("test_patch_{}.patch", std::process::id()));
+    std::fs::write(&temp_path, b"patch content").unwrap();
+
+    let client = LaunchpadClient::new(None).with_base_url(server.url());
+    let params = bugs::AddAttachmentParams {
+        comment: "",
+        file_path: Some(&temp_path),
+        url: None,
+        filename: Some("fix.patch"),
+        description: Some("bug fix"),
+        is_patch: true,
+    };
+
+    let loc = bugs::add_bug_attachment(&client, 123, &params)
+        .await
+        .expect("add_bug_attachment should return Location");
+
+    let _ = std::fs::remove_file(&temp_path);
+
+    assert_eq!(loc, attachment_location);
+    add_attachment_mock.assert_async().await;
+}
