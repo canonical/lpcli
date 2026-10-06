@@ -3726,7 +3726,7 @@ async fn handle_queue_info(
             debs.len(),
         );
         let mut table = Table::new();
-        table.load_preset(UTF8_FULL_CONDENSED);
+        table.load_style(UTF8_FULL_CONDENSED);
         table.set_header(vec![
             "Package",
             "Version",
@@ -3756,7 +3756,7 @@ async fn handle_queue_info(
             ddebs.len(),
         );
         let mut table = Table::new();
-        table.load_preset(UTF8_FULL_CONDENSED);
+        table.load_style(UTF8_FULL_CONDENSED);
         table.set_header(vec![
             "Package",
             "Version",
@@ -3914,7 +3914,7 @@ fn authenticated_client() -> lpcli::error::Result<LaunchpadClient> {
 /// Build a [`comfy_table::Table`] with headers.
 fn build_table(headers: Vec<&str>) -> Table {
     let mut table = Table::new();
-    table.load_preset(UTF8_FULL_CONDENSED);
+    table.load_style(UTF8_FULL_CONDENSED);
     table.set_header(headers);
     table
 }
