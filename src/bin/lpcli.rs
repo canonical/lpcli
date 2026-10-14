@@ -2,7 +2,7 @@
 //!
 //! Parse command-line arguments with `clap` and dispatch to the `lpcli` library.
 
-use clap::{ArgGroup, Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 
@@ -103,6 +103,84 @@ enum Command {
 // ---------------------------------------------------------------------------
 // Bug sub-commands
 // ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Copy, ValueEnum)]
+enum BugTaskStatus {
+    #[value(name = "New")]
+    New,
+    #[value(name = "Confirmed")]
+    Confirmed,
+    #[value(name = "Triaged")]
+    Triaged,
+    #[value(name = "In Progress")]
+    InProgress,
+    #[value(name = "Fix Committed")]
+    FixCommitted,
+    #[value(name = "Fix Released")]
+    FixReleased,
+    #[value(name = "Invalid")]
+    Invalid,
+    #[value(name = "Won't Fix")]
+    WontFix,
+    #[value(name = "Opinion")]
+    Opinion,
+    #[value(name = "Expired")]
+    Expired,
+}
+
+impl std::fmt::Display for BugTaskStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::New => write!(f, "New"),
+            Self::Confirmed => write!(f, "Confirmed"),
+            Self::Triaged => write!(f, "Triaged"),
+            Self::InProgress => write!(f, "In Progress"),
+            Self::FixCommitted => write!(f, "Fix Committed"),
+            Self::FixReleased => write!(f, "Fix Released"),
+            Self::Invalid => write!(f, "Invalid"),
+            Self::WontFix => write!(f, "Won't Fix"),
+            Self::Opinion => write!(f, "Opinion"),
+            Self::Expired => write!(f, "Expired"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Copy, ValueEnum)]
+enum BugTaskImportance {
+    #[value(name = "Undecided")]
+    Undecided,
+    #[value(name = "Wishlist")]
+    Wishlist,
+    #[value(name = "Low")]
+    Low,
+    #[value(name = "Medium")]
+    Medium,
+    #[value(name = "High")]
+    High,
+    #[value(name = "Critical")]
+    Critical,
+}
+
+impl std::fmt::Display for BugTaskImportance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Undecided => write!(f, "Undecided"),
+            Self::Wishlist => write!(f, "Wishlist"),
+            Self::Low => write!(f, "Low"),
+            Self::Medium => write!(f, "Medium"),
+            Self::High => write!(f, "High"),
+            Self::Critical => write!(f, "Critical"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct TaskLinkSelector {
+    target: Option<String>,
+    package: Option<String>,
+    series: Option<String>,
+    task_url: Option<String>,
+}
 
 #[derive(Debug, Subcommand)]
 enum BugCommand {
@@ -255,7 +333,7 @@ enum BugCommand {
         no_series: bool,
         /// New status (e.g. "Confirmed", "Fix Released", "In Progress").
         #[arg(short, long)]
-        status: String,
+        status: BugTaskStatus,
     },
     /// Change the importance of a bug task.
     #[command(
@@ -303,7 +381,7 @@ enum BugCommand {
         no_series: bool,
         /// New importance (e.g. "Critical", "High", "Medium", "Low").
         #[arg(short, long)]
-        importance: String,
+        importance: BugTaskImportance,
     },
     /// Assign a bug task to a Launchpad user.
     #[command(
@@ -408,10 +486,10 @@ enum BugCommand {
         many_series: Option<String>,
         /// Task importance (e.g. "Undecided", "Critical", "High", "Medium", "Low").
         #[arg(long)]
-        importance: Option<String>,
+        importance: Option<BugTaskImportance>,
         /// Task status (e.g. "New", "Confirmed", "In Progress").
         #[arg(long)]
-        status: Option<String>,
+        status: Option<BugTaskStatus>,
         /// Launchpad username to assign (without ~).
         #[arg(long)]
         assignee: Option<String>,
@@ -488,12 +566,7 @@ enum BugCommand {
         remove_all_tags: bool,
     },
     /// Link a bug task to a remote bug (e.g. in Debian or an upstream bug tracker).
-    #[command(
-        alias = "link-task",
-        alias = "link-bug",
-        alias = "link-bug-watch",
-        alias = "add-watch"
-    )]
+    #[command(alias = "link-task")]
     LinkRemote {
         /// The Launchpad bug number.
         #[arg(short, long)]
@@ -1634,7 +1707,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 let task_url = task.self_link.as_deref().ok_or_else(|| {
                     lpcli::error::LpError::Other("Bug task has no self_link".into())
                 })?;
-                bugs::set_bug_status(&client, task_url, &status).await?;
+                bugs::set_bug_status(&client, task_url, &status.to_string()).await?;
             }
             println!(
                 "{} Status updated to '{}' for {} task(s) on bug #{bug_id}.",
@@ -1663,7 +1736,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 let task_url = task.self_link.as_deref().ok_or_else(|| {
                     lpcli::error::LpError::Other("Bug task has no self_link".into())
                 })?;
-                bugs::set_bug_importance(&client, task_url, &importance).await?;
+                bugs::set_bug_importance(&client, task_url, &importance.to_string()).await?;
             }
             println!(
                 "{} Importance updated to '{}' for {} task(s) on bug #{bug_id}.",
@@ -1842,7 +1915,8 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 };
 
                 if let Some(imp) = &importance
-                    && let Err(e) = bugs::set_bug_importance(&client, &task_url, imp).await
+                    && let Err(e) =
+                        bugs::set_bug_importance(&client, &task_url, &imp.to_string()).await
                 {
                     eprintln!(
                         "{} Failed to set importance on task for '{}': {e}",
@@ -1851,7 +1925,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                     );
                 }
                 if let Some(st) = &status
-                    && let Err(e) = bugs::set_bug_status(&client, &task_url, st).await
+                    && let Err(e) = bugs::set_bug_status(&client, &task_url, &st.to_string()).await
                 {
                     eprintln!(
                         "{} Failed to set status on task for '{}': {e}",
@@ -1879,15 +1953,15 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 println!("{} Bug task added: {}", "✓".green().bold(), display_name,);
 
                 if let (Some(tracker_name), Some(remote_id)) = (&bug_tracker, &remote_bug) {
-                    match bugs::link_bug_task_remote(
+                    let link_result = bugs::link_bug_task_remote(
                         &client,
                         bug_id,
                         &task_url,
                         tracker_name,
                         remote_id,
                     )
-                    .await
-                    {
+                    .await;
+                    match link_result {
                         Ok((_, watch)) => {
                             let watch_id = watch
                                 .self_link
@@ -2064,14 +2138,13 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             task_url,
         } => {
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let task = find_task_to_link(
-                &tasks,
-                bug_id,
-                task_url.as_deref(),
-                target.as_deref(),
-                package.as_deref(),
-                series.as_deref(),
-            )?;
+            let selector = TaskLinkSelector {
+                target: target.clone(),
+                package: package.clone(),
+                series: series.clone(),
+                task_url: task_url.clone(),
+            };
+            let task = find_task_to_link(&tasks, bug_id, &selector)?;
             let effective_task_url = task.self_link.as_deref().ok_or_else(|| {
                 lpcli::error::LpError::NotFound(format!(
                     "Selected bug task has no self_link on bug #{bug_id}."
@@ -2117,14 +2190,13 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             task_url,
         } => {
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let task = find_task_to_link(
-                &tasks,
-                bug_id,
-                task_url.as_deref(),
-                target.as_deref(),
-                package.as_deref(),
-                series.as_deref(),
-            )?;
+            let selector = TaskLinkSelector {
+                target: target.clone(),
+                package: package.clone(),
+                series: series.clone(),
+                task_url: task_url.clone(),
+            };
+            let task = find_task_to_link(&tasks, bug_id, &selector)?;
             let effective_task_url = task.self_link.as_deref().ok_or_else(|| {
                 lpcli::error::LpError::NotFound(format!(
                     "Selected bug task has no self_link on bug #{bug_id}."
@@ -4464,16 +4536,18 @@ fn collect_matching_tasks<'a>(
 fn find_task_to_link<'a>(
     tasks: &'a [bugs::BugTask],
     bug_id: u64,
-    task_url: Option<&str>,
-    target: Option<&str>,
-    package: Option<&str>,
-    series: Option<&str>,
+    selector: &TaskLinkSelector,
 ) -> lpcli::error::Result<&'a bugs::BugTask> {
     if tasks.is_empty() {
         return Err(lpcli::error::LpError::NotFound(format!(
             "Bug #{bug_id} has no bug tasks."
         )));
     }
+
+    let task_url = selector.task_url.as_deref();
+    let target = selector.target.as_deref();
+    let package = selector.package.as_deref();
+    let series = selector.series.as_deref();
 
     if let Some(url) = task_url {
         return tasks
@@ -5763,7 +5837,7 @@ mod tests {
             "bug",
             "add-task",
             "--bug-id",
-            "2120577",
+            "42",
             "--target",
             "debian",
             "--package",
@@ -5771,7 +5845,7 @@ mod tests {
             "--bug-tracker",
             "debbugs",
             "--remote-bug",
-            "1150409",
+            "12345",
         ];
         let cli = Cli::try_parse_from(full).expect("CLI parsing failed");
         let Command::Bug(BugCommand::AddTask {
@@ -5785,11 +5859,11 @@ mod tests {
         else {
             panic!("Expected AddTask");
         };
-        assert_eq!(bug_id, 2120577);
+        assert_eq!(bug_id, 42);
         assert_eq!(target, "debian");
         assert_eq!(package.as_deref(), Some("arctica-greeter"));
         assert_eq!(bug_tracker.as_deref(), Some("debbugs"));
-        assert_eq!(remote_bug.as_deref(), Some("1150409"));
+        assert_eq!(remote_bug.as_deref(), Some("12345"));
     }
 
     #[test]
@@ -5799,7 +5873,7 @@ mod tests {
             "bug",
             "link-remote",
             "--bug-id",
-            "2120577",
+            "42",
             "--target",
             "debian",
             "--package",
@@ -5807,7 +5881,7 @@ mod tests {
             "--bug-tracker",
             "debbugs",
             "--remote-bug",
-            "1150409",
+            "12345",
         ];
         let cli = Cli::try_parse_from(full).expect("CLI parsing failed");
         let Command::Bug(BugCommand::LinkRemote {
@@ -5822,18 +5896,18 @@ mod tests {
         else {
             panic!("Expected LinkRemote");
         };
-        assert_eq!(bug_id, 2120577);
+        assert_eq!(bug_id, 42);
         assert_eq!(target.as_deref(), Some("debian"));
         assert_eq!(package.as_deref(), Some("arctica-greeter"));
         assert_eq!(bug_tracker, "debbugs");
-        assert_eq!(remote_bug, "1150409");
+        assert_eq!(remote_bug, "12345");
         assert!(series.is_none());
         assert!(task_url.is_none());
     }
 
     #[test]
     fn cli_link_remote_aliases() {
-        for alias in &["link-task", "link-bug", "add-watch", "link-bug-watch"] {
+        for alias in &["link-remote", "link-task"] {
             let full = [
                 "lpcli",
                 "bug",
@@ -5868,7 +5942,7 @@ mod tests {
             "bug",
             "unlink-remote",
             "--bug-id",
-            "2120577",
+            "42",
             "--target",
             "debian",
         ];
@@ -5876,18 +5950,18 @@ mod tests {
         let Command::Bug(BugCommand::UnlinkRemote { bug_id, target, .. }) = cli.command else {
             panic!("Expected UnlinkRemote");
         };
-        assert_eq!(bug_id, 2120577);
+        assert_eq!(bug_id, 42);
         assert_eq!(target.as_deref(), Some("debian"));
     }
 
     #[test]
     fn cli_watches() {
-        let full = ["lpcli", "bug", "watches", "--bug-id", "2120577"];
+        let full = ["lpcli", "bug", "watches", "--bug-id", "42"];
         let cli = Cli::try_parse_from(full).expect("CLI parsing failed");
         let Command::Bug(BugCommand::Watches { bug_id }) = cli.command else {
             panic!("Expected Watches");
         };
-        assert_eq!(bug_id, 2120577);
+        assert_eq!(bug_id, 42);
     }
 
     #[test]
@@ -5995,15 +6069,13 @@ mod tests {
             None,
         );
         let tasks = vec![t1, t2];
-        let found = find_task_to_link(
-            &tasks,
-            42,
-            Some("https://api.launchpad.net/devel/debian/+source/curl/+bug/42"),
-            None,
-            None,
-            None,
-        )
-        .expect("Should find task by url");
+        let selector = TaskLinkSelector {
+            task_url: Some(
+                "https://api.launchpad.net/devel/debian/+source/curl/+bug/42".to_string(),
+            ),
+            ..Default::default()
+        };
+        let found = find_task_to_link(&tasks, 42, &selector).expect("Should find task by url");
 
         assert_eq!(
             found.self_link.as_deref(),
@@ -6026,8 +6098,11 @@ mod tests {
             None,
         );
         let tasks = vec![t1, t2];
-        let found = find_task_to_link(&tasks, 42, None, Some("debian"), None, None)
-            .expect("Should find debian task");
+        let selector = TaskLinkSelector {
+            target: Some("debian".to_string()),
+            ..Default::default()
+        };
+        let found = find_task_to_link(&tasks, 42, &selector).expect("Should find debian task");
 
         assert_eq!(
             found.bug_target_display_name.as_deref(),
@@ -6050,8 +6125,12 @@ mod tests {
             None,
         );
         let tasks = vec![t1, t2];
-        let found = find_task_to_link(&tasks, 42, None, Some("curl"), None, None)
-            .expect("Should prefer series-less task");
+        let selector = TaskLinkSelector {
+            target: Some("curl".to_string()),
+            ..Default::default()
+        };
+        let found =
+            find_task_to_link(&tasks, 42, &selector).expect("Should prefer series-less task");
 
         assert_eq!(
             found.bug_target_display_name.as_deref(),
@@ -6074,8 +6153,12 @@ mod tests {
             None,
         );
         let tasks = vec![t1, t2];
-        let found = find_task_to_link(&tasks, 42, None, Some("curl"), None, Some("noble"))
-            .expect("Should match noble series");
+        let selector = TaskLinkSelector {
+            target: Some("curl".to_string()),
+            series: Some("noble".to_string()),
+            ..Default::default()
+        };
+        let found = find_task_to_link(&tasks, 42, &selector).expect("Should match noble series");
 
         assert_eq!(
             found.bug_target_display_name.as_deref(),
@@ -6098,7 +6181,11 @@ mod tests {
             None,
         );
         let tasks = vec![t1, t2];
-        let res = find_task_to_link(&tasks, 42, None, None, Some("curl"), None);
+        let selector = TaskLinkSelector {
+            package: Some("curl".to_string()),
+            ..Default::default()
+        };
+        let res = find_task_to_link(&tasks, 42, &selector);
         assert!(res.is_err());
     }
 
@@ -6111,7 +6198,11 @@ mod tests {
             None,
         );
         let tasks = vec![t1];
-        let res = find_task_to_link(&tasks, 42, None, Some("debian"), None, None);
+        let selector = TaskLinkSelector {
+            target: Some("debian".to_string()),
+            ..Default::default()
+        };
+        let res = find_task_to_link(&tasks, 42, &selector);
         assert!(res.is_err());
     }
 }
