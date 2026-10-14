@@ -83,6 +83,10 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 | Unsubscribe a person | `lpcli bug unsubscribe --bug-id 123456 --name jdoe` |
 | List subscribers | `lpcli bug subscriptions --bug-id 123456` |
 | Add a bug task | `lpcli bug add-task --bug-id 123456 --target ubuntu --package curl --series noble --status "New" --importance "Undecided"` |
+| Add a bug task with remote bug link | `lpcli bug add-task --bug-id 123456 --target debian --package curl --bug-tracker debbugs --remote-bug 654321` |
+| Link bug task to remote bug | `lpcli bug link-remote --bug-id 123456 --target debian --bug-tracker debbugs --remote-bug 654321` |
+| Unlink remote bug watch from task | `lpcli bug unlink-remote --bug-id 123456 --target debian` |
+| List bug watches | `lpcli bug watches --bug-id 123456` |
 | Delete a bug task | `lpcli bug delete-task --bug-id 123456 --target ubuntu --package curl --series noble` |
 | Add a tag | `lpcli bug tag --bug-id 123456 --add-tag regression` |
 | Add multiple tags | `lpcli bug tag --bug-id 123456 --add-many-tags "regression, oem, sru"` |
@@ -239,6 +243,21 @@ lpcli bug set-status --bug-id 123456 --target curl \
 lpcli bug set-importance --bug-id 123456 --target curl \
     --series noble --importance "High"
 lpcli bug comment --bug-id 123456 --message "Triaged as High for Noble."
+```
+
+### Forward a bug to Debian or upstream
+
+```bash
+# Add a Debian task and link it to the Debian BTS bug in one step
+lpcli bug add-task --bug-id 123456 --target debian --package curl \
+    --bug-tracker debbugs --remote-bug 654321
+
+# Or link an existing task to the remote bug
+lpcli bug link-remote --bug-id 123456 --target debian --package curl \
+    --bug-tracker debbugs --remote-bug 654321
+
+# Check bug watches on the bug
+lpcli bug watches --bug-id 123456
 ```
 
 ### Find packages in a series

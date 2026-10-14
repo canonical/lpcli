@@ -415,6 +415,12 @@ enum BugCommand {
         /// Launchpad username to assign (without ~).
         #[arg(long)]
         assignee: Option<String>,
+        /// Remote bug tracker name from 'lpcli bug remote-bug-trackers'.
+        #[arg(long, visible_alias = "tracker", requires = "remote_bug")]
+        bug_tracker: Option<String>,
+        /// Remote bug ID or number in the tracker (e.g. "1150409") to link this task to.
+        #[arg(long, visible_alias = "remote", requires = "bug_tracker")]
+        remote_bug: Option<String>,
     },
     /// Delete bug tasks from a bug matching the given target and optional series.
     #[command(
@@ -480,6 +486,70 @@ enum BugCommand {
         /// Mutually exclusive with --remove-tag and --remove-many-tags.
         #[arg(long)]
         remove_all_tags: bool,
+    },
+    /// Link a bug task to a remote bug (e.g. in Debian or an upstream bug tracker).
+    #[command(
+        alias = "link-task",
+        alias = "link-bug",
+        alias = "link-bug-watch",
+        alias = "add-watch"
+    )]
+    LinkRemote {
+        /// The Launchpad bug number.
+        #[arg(short, long)]
+        bug_id: u64,
+        /// Remote bug tracker name from 'lpcli bug remote-bug-trackers'.
+        #[arg(short = 'g', long, visible_alias = "tracker")]
+        bug_tracker: String,
+        /// Remote bug ID or number in the tracker (e.g. "1150409").
+        #[arg(short = 'r', long, visible_alias = "remote")]
+        remote_bug: String,
+        /// Project or distribution name to match (e.g. "debian", "ubuntu").
+        #[arg(short, long)]
+        target: Option<String>,
+        /// Source package name to match (e.g. "arctica-greeter").
+        #[arg(short, long)]
+        package: Option<String>,
+        /// Ubuntu series to match (e.g. "noble").
+        #[arg(short, long)]
+        series: Option<String>,
+        /// Direct API URL of the bug task to link (bypasses target/package matching).
+        #[arg(short = 'u', long)]
+        task_url: Option<String>,
+    },
+    /// Unlink a bug task from its remote bug watch.
+    #[command(alias = "unlink-task", alias = "unlink-bug")]
+    UnlinkRemote {
+        /// The Launchpad bug number.
+        #[arg(short, long)]
+        bug_id: u64,
+        /// Project or distribution name to match (e.g. "debian", "ubuntu").
+        #[arg(short, long)]
+        target: Option<String>,
+        /// Source package name to match (e.g. "arctica-greeter").
+        #[arg(short, long)]
+        package: Option<String>,
+        /// Ubuntu series to match (e.g. "noble").
+        #[arg(short, long)]
+        series: Option<String>,
+        /// Direct API URL of the bug task to unlink.
+        #[arg(short = 'u', long)]
+        task_url: Option<String>,
+    },
+    /// List bug watches (links to remote bugs) for a bug.
+    Watches {
+        /// The Launchpad bug number.
+        #[arg(short, long)]
+        bug_id: u64,
+    },
+    /// List remote bug trackers registered in Launchpad.
+    RemoteBugTrackers {
+        /// Maximum number of remote bug trackers to return.
+        #[arg(short, long, value_parser = parse_positive_limit)]
+        limit: Option<usize>,
+        /// Case-insensitive substring to match against tracker metadata.
+        #[arg(short, long)]
+        search: Option<String>,
     },
 }
 
@@ -1224,11 +1294,34 @@ fn print_bug_tasks(tasks: &[bugs::BugTask]) {
         });
     }
 
-    let mut table = build_table(vec!["Target", "Series", "Status", "Importance", "Assignee"]);
+    let has_any_watch = tasks.iter().any(|t| t.bug_watch_link.is_some());
+    let header = if has_any_watch {
+        vec![
+            "Target",
+            "Series",
+            "Status",
+            "Importance",
+            "Assignee",
+            "Watch",
+        ]
+    } else {
+        vec!["Target", "Series", "Status", "Importance", "Assignee"]
+    };
+    let mut table = build_table(header);
     for (target_name, tasks_for_target) in &by_target {
         for pt in tasks_for_target {
             let display_target = match &pt.series {
-                None => target_name.clone(),
+                None => {
+                    if let Some(disp) = pt.task.bug_target_display_name.as_deref() {
+                        if disp.contains('(') {
+                            disp.to_string()
+                        } else {
+                            target_name.clone()
+                        }
+                    } else {
+                        target_name.clone()
+                    }
+                }
                 Some(_) => format!("    {target_name}"),
             };
             let series_str = pt.series.as_deref().unwrap_or("").to_string();
@@ -1242,13 +1335,22 @@ fn print_bug_tasks(tasks: &[bugs::BugTask]) {
                         .map(|seg| seg.trim_start_matches('~').to_string())
                 })
                 .unwrap_or_else(|| "—".to_string());
-            table.add_row(vec![
+            let mut row = vec![
                 display_target,
                 series_str,
                 pt.task.status.as_deref().unwrap_or("—").to_string(),
                 pt.task.importance.as_deref().unwrap_or("—").to_string(),
                 assignee_str,
-            ]);
+            ];
+            if has_any_watch {
+                let watch_str = pt
+                    .task
+                    .bug_watch_id()
+                    .map(|id| format!("#{id}"))
+                    .unwrap_or_else(|| "—".to_string());
+                row.push(watch_str);
+            }
+            table.add_row(row);
         }
     }
     println!("{table}");
@@ -1299,7 +1401,11 @@ fn print_bug_attachments(attachments: &[bugs::BugAttachment], download_urls: &[S
 }
 
 async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
-    let client = authenticated_client()?;
+    let client = if matches!(&cmd, BugCommand::RemoteBugTrackers { .. }) {
+        LaunchpadClient::new(None).with_max_retries(2)
+    } else {
+        authenticated_client()?
+    };
 
     match cmd {
         BugCommand::Show { bug_id } => {
@@ -1659,6 +1765,8 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             importance,
             status,
             assignee,
+            bug_tracker,
+            remote_bug,
         } => {
             // Build the list of target URLs to add tasks for.  When no series
             // is supplied we add a single task directly against the base target
@@ -1698,6 +1806,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             };
 
             let mut created = 0usize;
+            let mut remote_link_failures = Vec::new();
             for (series_name, target_url) in &targets {
                 let task = match bugs::add_bug_task(&client, bug_id, target_url).await {
                     Ok(t) => t,
@@ -1719,6 +1828,14 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                             "!".yellow().bold(),
                             series_name,
                         );
+                        if let (Some(tracker_name), Some(remote_id)) = (&bug_tracker, &remote_bug) {
+                            remote_link_failures.push(remote_link_failure(
+                                series_name,
+                                tracker_name,
+                                remote_id,
+                                "new task has no self_link",
+                            ));
+                        }
                         created += 1;
                         continue;
                     }
@@ -1760,6 +1877,51 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                     .as_deref()
                     .unwrap_or(series_name.as_str());
                 println!("{} Bug task added: {}", "✓".green().bold(), display_name,);
+
+                if let (Some(tracker_name), Some(remote_id)) = (&bug_tracker, &remote_bug) {
+                    match bugs::link_bug_task_remote(
+                        &client,
+                        bug_id,
+                        &task_url,
+                        tracker_name,
+                        remote_id,
+                    )
+                    .await
+                    {
+                        Ok((_, watch)) => {
+                            let watch_id = watch
+                                .self_link
+                                .as_deref()
+                                .and_then(|u| u.rsplit('/').next())
+                                .unwrap_or(remote_id);
+                            let watch_title = watch.title.as_deref().unwrap_or(watch_id);
+                            println!(
+                                "{} Bug task linked to remote bug: {}",
+                                "✓".green().bold(),
+                                watch_title,
+                            );
+                            if let Some(url) = &watch.url {
+                                println!("  Remote URL: {url}");
+                            }
+                        }
+                        Err(e) => {
+                            remote_link_failures.push(remote_link_failure(
+                                series_name,
+                                tracker_name,
+                                remote_id,
+                                &e.to_string(),
+                            ));
+                            eprintln!(
+                                "{} Failed to link task for '{}' to remote bug '{}' on tracker '{}': {e}",
+                                "!".yellow().bold(),
+                                series_name,
+                                remote_id,
+                                tracker_name,
+                            );
+                        }
+                    }
+                }
+
                 created += 1;
             }
 
@@ -1767,6 +1929,10 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 return Err(lpcli::error::LpError::Other(format!(
                     "No bug tasks were created on bug #{bug_id}."
                 )));
+            }
+
+            if let Some(error) = remote_link_failure_error(bug_id, &remote_link_failures) {
+                return Err(error);
             }
         }
 
@@ -1887,8 +2053,173 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 );
             }
         }
+
+        BugCommand::LinkRemote {
+            bug_id,
+            bug_tracker,
+            remote_bug,
+            target,
+            package,
+            series,
+            task_url,
+        } => {
+            let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
+            let task = find_task_to_link(
+                &tasks,
+                bug_id,
+                task_url.as_deref(),
+                target.as_deref(),
+                package.as_deref(),
+                series.as_deref(),
+            )?;
+            let effective_task_url = task.self_link.as_deref().ok_or_else(|| {
+                lpcli::error::LpError::NotFound(format!(
+                    "Selected bug task has no self_link on bug #{bug_id}."
+                ))
+            })?;
+            let display_name = task
+                .bug_target_display_name
+                .as_deref()
+                .unwrap_or(effective_task_url);
+
+            let (_updated_task, watch) = bugs::link_bug_task_remote(
+                &client,
+                bug_id,
+                effective_task_url,
+                &bug_tracker,
+                &remote_bug,
+            )
+            .await?;
+
+            let watch_id = watch
+                .self_link
+                .as_deref()
+                .and_then(|u| u.rsplit('/').next())
+                .unwrap_or(&remote_bug);
+            let watch_title = watch.title.as_deref().unwrap_or(watch_id);
+
+            println!(
+                "{} Linked task '{}' to remote bug: {}",
+                "✓".green().bold(),
+                display_name,
+                watch_title,
+            );
+            if let Some(url) = &watch.url {
+                println!("  URL: {url}");
+            }
+        }
+
+        BugCommand::UnlinkRemote {
+            bug_id,
+            target,
+            package,
+            series,
+            task_url,
+        } => {
+            let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
+            let task = find_task_to_link(
+                &tasks,
+                bug_id,
+                task_url.as_deref(),
+                target.as_deref(),
+                package.as_deref(),
+                series.as_deref(),
+            )?;
+            let effective_task_url = task.self_link.as_deref().ok_or_else(|| {
+                lpcli::error::LpError::NotFound(format!(
+                    "Selected bug task has no self_link on bug #{bug_id}."
+                ))
+            })?;
+            let display_name = task
+                .bug_target_display_name
+                .as_deref()
+                .unwrap_or(effective_task_url);
+
+            bugs::unset_bug_watch(&client, effective_task_url).await?;
+
+            println!(
+                "{} Unlinked remote bug watch from task '{}'.",
+                "✓".green().bold(),
+                display_name,
+            );
+        }
+
+        BugCommand::Watches { bug_id } => {
+            let watches = bugs::get_bug_watches(&client, bug_id).await?;
+            if watches.is_empty() {
+                println!("No bug watches found for bug #{bug_id}.");
+                return Ok(());
+            }
+            let mut table = build_table(vec!["Watch ID", "Tracker", "Remote Bug", "Status", "URL"]);
+            for w in &watches {
+                let watch_id = w
+                    .self_link
+                    .as_deref()
+                    .and_then(|u| u.rsplit('/').next())
+                    .unwrap_or("—");
+                let tracker = w
+                    .bug_tracker_link
+                    .as_deref()
+                    .and_then(|u| u.rsplit('/').next())
+                    .unwrap_or("—");
+                let remote_bug = w.remote_bug.as_deref().unwrap_or("—");
+                let status = w.remote_status.as_deref().unwrap_or("—");
+                let url = w.url.as_deref().unwrap_or("—");
+                table.add_row(vec![
+                    watch_id.to_string(),
+                    tracker.to_string(),
+                    remote_bug.to_string(),
+                    status.to_string(),
+                    url.to_string(),
+                ]);
+            }
+            println!("{}", "Bug Watches".bold());
+            println!("{table}");
+            println!("{} bug watch(es).", watches.len());
+        }
+
+        BugCommand::RemoteBugTrackers { limit, search } => {
+            let trackers = bugs::search_bug_trackers(&client, search.as_deref(), limit).await?;
+            if trackers.is_empty() {
+                if search.is_some() {
+                    println!("No remote bug trackers matched the search.");
+                } else {
+                    println!("No remote bug trackers found.");
+                }
+                return Ok(());
+            }
+
+            let mut table = build_table(vec!["Name", "Title", "Type", "Base URL"]);
+            for tracker in &trackers {
+                table.add_row(vec![
+                    tracker.name.as_deref().unwrap_or("—").to_string(),
+                    tracker.title.as_deref().unwrap_or("—").to_string(),
+                    tracker
+                        .bug_tracker_type
+                        .as_deref()
+                        .unwrap_or("—")
+                        .to_string(),
+                    tracker.base_url.as_deref().unwrap_or("—").to_string(),
+                ]);
+            }
+            println!("{table}");
+            println!(
+                "{} remote bug tracker(s). Use the Name value with --bug-tracker.",
+                trackers.len()
+            );
+        }
     }
     Ok(())
+}
+
+fn parse_positive_limit(value: &str) -> Result<usize, String> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| "limit must be a positive number".to_string())?;
+    if limit == 0 {
+        return Err("limit must be a positive number".to_string());
+    }
+    Ok(limit)
 }
 
 // ---------------------------------------------------------------------------
@@ -4122,6 +4453,165 @@ fn collect_matching_tasks<'a>(
     Ok(matched)
 }
 
+/// Find a single bug task from a list of tasks matching the given criteria.
+///
+/// If `task_url` is provided, matches directly by `self_link`.
+/// Otherwise, filters by `target` (matching package name, distro in URL, or display name),
+/// `package`, and `series`.
+///
+/// If multiple tasks match and `series` was not specified, prefers series-less tasks
+/// (e.g. distribution-level or upstream tasks).
+fn find_task_to_link<'a>(
+    tasks: &'a [bugs::BugTask],
+    bug_id: u64,
+    task_url: Option<&str>,
+    target: Option<&str>,
+    package: Option<&str>,
+    series: Option<&str>,
+) -> lpcli::error::Result<&'a bugs::BugTask> {
+    if tasks.is_empty() {
+        return Err(lpcli::error::LpError::NotFound(format!(
+            "Bug #{bug_id} has no bug tasks."
+        )));
+    }
+
+    if let Some(url) = task_url {
+        return tasks
+            .iter()
+            .find(|t| t.self_link.as_deref() == Some(url))
+            .ok_or_else(|| {
+                lpcli::error::LpError::NotFound(format!(
+                    "No task with self_link '{url}' found on bug #{bug_id}."
+                ))
+            });
+    }
+
+    // Filter tasks based on target, package, and series.
+    let mut candidates: Vec<&bugs::BugTask> = tasks
+        .iter()
+        .filter(|t| {
+            let target_link = t.target_link.as_deref().unwrap_or("");
+            let (task_target, task_series) = bugs::parse_target_link(target_link);
+            let display_name = t.bug_target_display_name.as_deref().unwrap_or("");
+
+            // Series check
+            if let Some(ser) = series {
+                let matches_series = task_series
+                    .as_deref()
+                    .map(|ts| ts.eq_ignore_ascii_case(ser))
+                    .unwrap_or(false);
+                if !matches_series {
+                    return false;
+                }
+            }
+
+            // Package check
+            if let Some(pkg) = package {
+                let matches_pkg = task_target.eq_ignore_ascii_case(pkg)
+                    || target_link
+                        .to_ascii_lowercase()
+                        .contains(&format!("/+source/{}", pkg.to_ascii_lowercase()));
+                if !matches_pkg {
+                    return false;
+                }
+            }
+
+            // Target check: matches target name, distro in target_link, or substring in display_name.
+            if let Some(tgt) = target {
+                let tgt_lower = tgt.to_ascii_lowercase();
+                let matches_target = task_target.eq_ignore_ascii_case(tgt)
+                    || target_link
+                        .to_ascii_lowercase()
+                        .starts_with(&format!("https://api.launchpad.net/devel/{tgt_lower}"))
+                    || target_link
+                        .to_ascii_lowercase()
+                        .starts_with(&format!("/{tgt_lower}"))
+                    || target_link
+                        .to_ascii_lowercase()
+                        .contains(&format!("/{tgt_lower}/"))
+                    || display_name.to_ascii_lowercase().contains(&tgt_lower);
+                if !matches_target {
+                    return false;
+                }
+            }
+
+            true
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        let available: Vec<String> = tasks
+            .iter()
+            .filter_map(|t| {
+                t.bug_target_display_name
+                    .as_deref()
+                    .or(t.target_link.as_deref())
+            })
+            .map(|s| s.to_string())
+            .collect();
+        return Err(lpcli::error::LpError::NotFound(format!(
+            "No task matching criteria on bug #{bug_id}. Available tasks: {}.",
+            if available.is_empty() {
+                "none".to_string()
+            } else {
+                available.join(", ")
+            }
+        )));
+    }
+
+    // If no series was specified and multiple candidates matched, prefer series-less tasks
+    // (e.g. the distro-level /debian/+source/pkg or upstream task).
+    if series.is_none() && candidates.len() > 1 {
+        let series_less: Vec<&bugs::BugTask> = candidates
+            .iter()
+            .copied()
+            .filter(|t| {
+                let (_, s) = bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
+                s.is_none()
+            })
+            .collect();
+        if series_less.len() == 1 {
+            return Ok(series_less[0]);
+        } else if !series_less.is_empty() {
+            candidates = series_less;
+        }
+    }
+
+    if candidates.len() == 1 {
+        Ok(candidates[0])
+    } else {
+        let names: Vec<String> = candidates
+            .iter()
+            .filter_map(|t| {
+                t.bug_target_display_name
+                    .as_deref()
+                    .or(t.target_link.as_deref())
+            })
+            .map(|s| s.to_string())
+            .collect();
+        Err(lpcli::error::LpError::Other(format!(
+            "Multiple matching tasks on bug #{bug_id}: {}. Please specify --target, --package, or --series to disambiguate.",
+            names.join(", ")
+        )))
+    }
+}
+
+fn remote_link_failure(series: &str, tracker: &str, remote_bug: &str, reason: &str) -> String {
+    format!("series '{series}', tracker '{tracker}', remote bug '{remote_bug}': {reason}")
+}
+
+fn remote_link_failure_error(bug_id: u64, failures: &[String]) -> Option<lpcli::error::LpError> {
+    if failures.is_empty() {
+        return None;
+    }
+
+    Some(lpcli::error::LpError::Other(format!(
+        "Failed to link remote bugs for one or more tasks on bug #{bug_id}; \
+         task creation may already have succeeded: {}",
+        failures.join("; ")
+    )))
+}
+
 /// Truncate a string to at most `max` characters, appending `…` if truncated.
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -4223,6 +4713,7 @@ mod tests {
             date_created: None,
             bug_target_display_name: None,
             target_link: Some(format!("https://api.launchpad.net/devel{target_link}")),
+            bug_watch_link: None,
         }
     }
 
@@ -5259,5 +5750,368 @@ mod tests {
         assert_eq!(format_size(1_536), "1.5 KiB");
         assert_eq!(format_size(1_048_576), "1.0 MiB");
         assert_eq!(format_size(1_073_741_824), "1.0 GiB");
+    }
+
+    // -----------------------------------------------------------------------
+    // CLI argument parsing — AddTask with remote bug tracker
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cli_add_task_with_remote_bug_and_tracker() {
+        let full = [
+            "lpcli",
+            "bug",
+            "add-task",
+            "--bug-id",
+            "2120577",
+            "--target",
+            "debian",
+            "--package",
+            "arctica-greeter",
+            "--bug-tracker",
+            "debbugs",
+            "--remote-bug",
+            "1150409",
+        ];
+        let cli = Cli::try_parse_from(full).expect("CLI parsing failed");
+        let Command::Bug(BugCommand::AddTask {
+            bug_id,
+            target,
+            package,
+            bug_tracker,
+            remote_bug,
+            ..
+        }) = cli.command
+        else {
+            panic!("Expected AddTask");
+        };
+        assert_eq!(bug_id, 2120577);
+        assert_eq!(target, "debian");
+        assert_eq!(package.as_deref(), Some("arctica-greeter"));
+        assert_eq!(bug_tracker.as_deref(), Some("debbugs"));
+        assert_eq!(remote_bug.as_deref(), Some("1150409"));
+    }
+
+    #[test]
+    fn cli_link_remote_full() {
+        let full = [
+            "lpcli",
+            "bug",
+            "link-remote",
+            "--bug-id",
+            "2120577",
+            "--target",
+            "debian",
+            "--package",
+            "arctica-greeter",
+            "--bug-tracker",
+            "debbugs",
+            "--remote-bug",
+            "1150409",
+        ];
+        let cli = Cli::try_parse_from(full).expect("CLI parsing failed");
+        let Command::Bug(BugCommand::LinkRemote {
+            bug_id,
+            target,
+            package,
+            bug_tracker,
+            remote_bug,
+            series,
+            task_url,
+        }) = cli.command
+        else {
+            panic!("Expected LinkRemote");
+        };
+        assert_eq!(bug_id, 2120577);
+        assert_eq!(target.as_deref(), Some("debian"));
+        assert_eq!(package.as_deref(), Some("arctica-greeter"));
+        assert_eq!(bug_tracker, "debbugs");
+        assert_eq!(remote_bug, "1150409");
+        assert!(series.is_none());
+        assert!(task_url.is_none());
+    }
+
+    #[test]
+    fn cli_link_remote_aliases() {
+        for alias in &["link-task", "link-bug", "add-watch", "link-bug-watch"] {
+            let full = [
+                "lpcli",
+                "bug",
+                alias,
+                "--bug-id",
+                "42",
+                "--tracker",
+                "debbugs",
+                "--remote",
+                "12345",
+            ];
+            let cli = Cli::try_parse_from(full).expect("CLI parsing failed for alias");
+            let Command::Bug(BugCommand::LinkRemote {
+                bug_id,
+                bug_tracker,
+                remote_bug,
+                ..
+            }) = cli.command
+            else {
+                panic!("Expected LinkRemote for alias {alias}");
+            };
+            assert_eq!(bug_id, 42);
+            assert_eq!(bug_tracker, "debbugs");
+            assert_eq!(remote_bug, "12345");
+        }
+    }
+
+    #[test]
+    fn cli_unlink_remote() {
+        let full = [
+            "lpcli",
+            "bug",
+            "unlink-remote",
+            "--bug-id",
+            "2120577",
+            "--target",
+            "debian",
+        ];
+        let cli = Cli::try_parse_from(full).expect("CLI parsing failed");
+        let Command::Bug(BugCommand::UnlinkRemote { bug_id, target, .. }) = cli.command else {
+            panic!("Expected UnlinkRemote");
+        };
+        assert_eq!(bug_id, 2120577);
+        assert_eq!(target.as_deref(), Some("debian"));
+    }
+
+    #[test]
+    fn cli_watches() {
+        let full = ["lpcli", "bug", "watches", "--bug-id", "2120577"];
+        let cli = Cli::try_parse_from(full).expect("CLI parsing failed");
+        let Command::Bug(BugCommand::Watches { bug_id }) = cli.command else {
+            panic!("Expected Watches");
+        };
+        assert_eq!(bug_id, 2120577);
+    }
+
+    #[test]
+    fn cli_remote_bug_trackers_filters_and_limits() {
+        let cli = Cli::try_parse_from([
+            "lpcli",
+            "bug",
+            "remote-bug-trackers",
+            "--limit",
+            "2",
+            "--search",
+            "DebÜG",
+        ])
+        .expect("CLI parsing failed");
+        let Command::Bug(BugCommand::RemoteBugTrackers { limit, search }) = cli.command else {
+            panic!("Expected RemoteBugTrackers");
+        };
+        assert_eq!(limit, Some(2));
+        assert_eq!(search.as_deref(), Some("DebÜG"));
+    }
+
+    #[test]
+    fn cli_remote_bug_trackers_accepts_short_options() {
+        let cli = Cli::try_parse_from([
+            "lpcli",
+            "bug",
+            "remote-bug-trackers",
+            "-l",
+            "3",
+            "-s",
+            "debian",
+        ])
+        .expect("CLI parsing failed");
+        let Command::Bug(BugCommand::RemoteBugTrackers { limit, search }) = cli.command else {
+            panic!("Expected RemoteBugTrackers");
+        };
+        assert_eq!(limit, Some(3));
+        assert_eq!(search.as_deref(), Some("debian"));
+    }
+
+    #[test]
+    fn cli_remote_bug_trackers_rejects_zero_limit() {
+        let result = Cli::try_parse_from(["lpcli", "bug", "remote-bug-trackers", "--limit", "0"]);
+        assert!(result.is_err(), "the limit must be positive");
+    }
+
+    #[test]
+    fn remote_link_failures_include_all_targets_and_missing_self_link() {
+        let failures = vec![
+            remote_link_failure("noble", "debbugs", "1150409", "Launchpad API error 500"),
+            remote_link_failure("jammy", "debbugs", "1150409", "new task has no self_link"),
+        ];
+        let err = remote_link_failure_error(42, &failures)
+            .expect("remote-link failures should become a command error");
+        let message = err.to_string();
+
+        assert!(message.contains("bug #42"));
+        assert!(message.contains("task creation may already have succeeded"));
+        assert!(message.contains("series 'noble'"));
+        assert!(message.contains("series 'jammy'"));
+        assert!(message.contains("new task has no self_link"));
+    }
+
+    #[test]
+    fn no_remote_link_failures_preserve_success() {
+        assert!(remote_link_failure_error(42, &[]).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // find_task_to_link unit tests
+    // -----------------------------------------------------------------------
+
+    fn make_test_task(
+        self_link: &str,
+        target_link: &str,
+        display_name: &str,
+        watch_link: Option<&str>,
+    ) -> bugs::BugTask {
+        bugs::BugTask {
+            self_link: Some(self_link.to_string()),
+            bug_link: Some("https://api.launchpad.net/devel/bugs/42".to_string()),
+            title: Some("Test bug".to_string()),
+            status: Some("New".to_string()),
+            importance: Some("Undecided".to_string()),
+            assignee_link: None,
+            date_created: None,
+            bug_target_display_name: Some(display_name.to_string()),
+            target_link: Some(target_link.to_string()),
+            bug_watch_link: watch_link.map(|w| w.to_string()),
+        }
+    }
+
+    #[test]
+    fn find_task_to_link_by_task_url() {
+        let t1 = make_test_task(
+            "https://api.launchpad.net/devel/ubuntu/+source/curl/+bug/42",
+            "https://api.launchpad.net/devel/ubuntu/+source/curl",
+            "curl (Ubuntu)",
+            None,
+        );
+        let t2 = make_test_task(
+            "https://api.launchpad.net/devel/debian/+source/curl/+bug/42",
+            "https://api.launchpad.net/devel/debian/+source/curl",
+            "curl (Debian)",
+            None,
+        );
+        let tasks = vec![t1, t2];
+        let found = find_task_to_link(
+            &tasks,
+            42,
+            Some("https://api.launchpad.net/devel/debian/+source/curl/+bug/42"),
+            None,
+            None,
+            None,
+        )
+        .expect("Should find task by url");
+
+        assert_eq!(
+            found.self_link.as_deref(),
+            Some("https://api.launchpad.net/devel/debian/+source/curl/+bug/42")
+        );
+    }
+
+    #[test]
+    fn find_task_to_link_by_target_and_distro() {
+        let t1 = make_test_task(
+            "https://api.launchpad.net/devel/ubuntu/+source/curl/+bug/42",
+            "https://api.launchpad.net/devel/ubuntu/+source/curl",
+            "curl (Ubuntu)",
+            None,
+        );
+        let t2 = make_test_task(
+            "https://api.launchpad.net/devel/debian/+source/curl/+bug/42",
+            "https://api.launchpad.net/devel/debian/+source/curl",
+            "curl (Debian)",
+            None,
+        );
+        let tasks = vec![t1, t2];
+        let found = find_task_to_link(&tasks, 42, None, Some("debian"), None, None)
+            .expect("Should find debian task");
+
+        assert_eq!(
+            found.bug_target_display_name.as_deref(),
+            Some("curl (Debian)")
+        );
+    }
+
+    #[test]
+    fn find_task_to_link_prefers_series_less() {
+        let t1 = make_test_task(
+            "https://api.launchpad.net/devel/ubuntu/+source/curl/+bug/42",
+            "https://api.launchpad.net/devel/ubuntu/+source/curl",
+            "curl (Ubuntu)",
+            None,
+        );
+        let t2 = make_test_task(
+            "https://api.launchpad.net/devel/ubuntu/noble/+source/curl/+bug/42",
+            "https://api.launchpad.net/devel/ubuntu/noble/+source/curl",
+            "curl (Ubuntu Noble)",
+            None,
+        );
+        let tasks = vec![t1, t2];
+        let found = find_task_to_link(&tasks, 42, None, Some("curl"), None, None)
+            .expect("Should prefer series-less task");
+
+        assert_eq!(
+            found.bug_target_display_name.as_deref(),
+            Some("curl (Ubuntu)")
+        );
+    }
+
+    #[test]
+    fn find_task_to_link_with_series() {
+        let t1 = make_test_task(
+            "https://api.launchpad.net/devel/ubuntu/+source/curl/+bug/42",
+            "https://api.launchpad.net/devel/ubuntu/+source/curl",
+            "curl (Ubuntu)",
+            None,
+        );
+        let t2 = make_test_task(
+            "https://api.launchpad.net/devel/ubuntu/noble/+source/curl/+bug/42",
+            "https://api.launchpad.net/devel/ubuntu/noble/+source/curl",
+            "curl (Ubuntu Noble)",
+            None,
+        );
+        let tasks = vec![t1, t2];
+        let found = find_task_to_link(&tasks, 42, None, Some("curl"), None, Some("noble"))
+            .expect("Should match noble series");
+
+        assert_eq!(
+            found.bug_target_display_name.as_deref(),
+            Some("curl (Ubuntu Noble)")
+        );
+    }
+
+    #[test]
+    fn find_task_to_link_ambiguous_fails() {
+        let t1 = make_test_task(
+            "https://api.launchpad.net/devel/ubuntu/+source/curl/+bug/42",
+            "https://api.launchpad.net/devel/ubuntu/+source/curl",
+            "curl (Ubuntu)",
+            None,
+        );
+        let t2 = make_test_task(
+            "https://api.launchpad.net/devel/debian/+source/curl/+bug/42",
+            "https://api.launchpad.net/devel/debian/+source/curl",
+            "curl (Debian)",
+            None,
+        );
+        let tasks = vec![t1, t2];
+        let res = find_task_to_link(&tasks, 42, None, None, Some("curl"), None);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn find_task_to_link_not_found_fails() {
+        let t1 = make_test_task(
+            "https://api.launchpad.net/devel/ubuntu/+source/curl/+bug/42",
+            "https://api.launchpad.net/devel/ubuntu/+source/curl",
+            "curl (Ubuntu)",
+            None,
+        );
+        let tasks = vec![t1];
+        let res = find_task_to_link(&tasks, 42, None, Some("debian"), None, None);
+        assert!(res.is_err());
     }
 }

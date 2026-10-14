@@ -161,6 +161,24 @@ lpcli bug subscriptions --bug-id 123456
 lpcli bug add-task --bug-id 123456 --target ubuntu --package curl \
     --series noble --status "New" --importance "Undecided"
 
+# Add a bug task and link it to a remote bug (e.g. forward to Debian)
+lpcli bug add-task --bug-id 2120577 --target debian --package arctica-greeter \
+    --bug-tracker debbugs --remote-bug 1150409
+
+# List the Launchpad tracker names accepted by --bug-tracker
+lpcli bug remote-bug-trackers
+# Search tracker metadata and cap results; -s and -l are short forms.
+lpcli bug remote-bug-trackers --search debian --limit 10
+
+# Link an existing bug task to a remote bug tracker
+lpcli bug link-remote --bug-id 2120577 --target debian --bug-tracker debbugs --remote-bug 1150409
+
+# List bug watches (remote bug links) for a bug
+lpcli bug watches --bug-id 2120577
+
+# Unlink a bug task from its remote bug watch
+lpcli bug unlink-remote --bug-id 2120577 --target debian
+
 # Delete a bug task
 lpcli bug delete-task --bug-id 123456 --target ubuntu --package curl --series noble
 
