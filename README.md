@@ -113,35 +113,37 @@ lpcli bug comments --bug-id 123456
 lpcli bug create --target ubuntu --package curl --title "curl crashes on redirect" \
     --description "Steps to reproduce: ..."
 
-# Change the status of a bug task (--target is the name shown by 'lpcli bug tasks')
+# Change the status of a bug task (--target is the name shown by 'lpcli bug tasks';
+# status values are kebab-case: new, confirmed, triaged, in-progress,
+# fix-committed, fix-released, invalid, wont-fix, opinion, expired)
 lpcli bug set-status --bug-id 123456 --target curl \
-    --series noble --status "In Progress"
+    --series noble --status in-progress
 
 # Change status across multiple series at once
 lpcli bug set-status --bug-id 123456 --target curl \
-    --many-series "noble, jammy" --status "Fix Released"
+    --many-series "noble, jammy" --status fix-released
 
 # Change status on every series the bug currently has a task for
 lpcli bug set-status --bug-id 123456 --target curl \
-    --all-series --status "Fix Released"
+    --all-series --status fix-released
 
 # Change status across multiple targets
 lpcli bug set-status --bug-id 123456 --many-targets "rust-alacritty, rust-eza" \
-    --all-series --status "Fix Released"
+    --all-series --status fix-released
 
 # Change status on all targets the bug currently has tasks for
-lpcli bug set-status --bug-id 123456 --all-targets --all-series --status "Fix Released"
+lpcli bug set-status --bug-id 123456 --all-targets --all-series --status fix-released
 
 # Change status only on series-less (distribution-level or upstream) tasks
 lpcli bug set-status --bug-id 123456 --target curl \
-    --no-series --status "Fix Released"
+    --no-series --status fix-released
 
 # Change the importance of a bug task
 lpcli bug set-importance --bug-id 123456 --target curl \
-    --series noble --importance "High"
+    --series noble --importance high
 
 # Change importance across multiple targets / series
-lpcli bug set-importance --bug-id 123456 --all-targets --all-series --importance "Critical"
+lpcli bug set-importance --bug-id 123456 --all-targets --all-series --importance critical
 
 # Assign a bug task to a user
 lpcli bug set-assignee --bug-id 123456 --target curl \
@@ -159,7 +161,7 @@ lpcli bug subscriptions --bug-id 123456
 
 # Add a bug task (targeting a new project or series)
 lpcli bug add-task --bug-id 123456 --target ubuntu --package curl \
-    --series noble --status "New" --importance "Undecided"
+    --series noble --status new --importance undecided
 
 # Add a bug task and link it to a remote bug (e.g. forward to Debian)
 lpcli bug add-task --bug-id 2120577 --target debian --package arctica-greeter \

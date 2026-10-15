@@ -411,14 +411,18 @@ pub async fn delete_bug_task(client: &LaunchpadClient, task_url: &str) -> Result
 }
 
 /// Update the status of a bug task identified by its API self-link.
+///
+/// The status is converted to its Launchpad API form (e.g.
+/// [`BugTaskStatus::WontFix`] is sent as `"Won't Fix"`).
 pub async fn set_bug_status(
     client: &LaunchpadClient,
     task_url: &str,
-    status: &str,
+    status: &BugTaskStatus,
 ) -> Result<BugTask> {
     use std::collections::HashMap;
+    let status_str = status.to_string();
     let mut params = HashMap::new();
-    params.insert("status", status);
+    params.insert("status", status_str.as_str());
     client.patch_url(task_url, &params).await
 }
 
@@ -426,11 +430,12 @@ pub async fn set_bug_status(
 pub async fn set_bug_importance(
     client: &LaunchpadClient,
     task_url: &str,
-    importance: &str,
+    importance: &BugImportance,
 ) -> Result<BugTask> {
     use std::collections::HashMap;
+    let importance_str = importance.to_string();
     let mut params = HashMap::new();
-    params.insert("importance", importance);
+    params.insert("importance", importance_str.as_str());
     client.patch_url(task_url, &params).await
 }
 
