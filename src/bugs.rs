@@ -20,12 +20,22 @@
 //! | [`get_bug_comments`] | List comments on a bug |
 //! | [`delete_bug_comment`] | Delete a comment from a bug |
 //! | [`set_bug_tags`] | Replace the tag list on a bug |
+//! | [`get_bug_tracker_by_name`] | Fetch a bug tracker by name |
+//! | [`get_bug_trackers`] | List registered remote bug trackers |
+//! | [`get_bug_tracker`] | Fetch a bug tracker by API self-link |
+//! | [`add_bug_watch`] | Create a new bug watch on a bug |
+//! | [`get_bug_watches`] | List all bug watches for a bug |
+//! | [`get_bug_watch`] | Fetch a bug watch by API self-link |
+//! | [`set_bug_watch`] | Link a bug task to a bug watch |
+//! | [`unset_bug_watch`] | Unlink a bug watch from a bug task |
+//! | [`link_bug_task_remote`] | Look up tracker, create/find watch, and link bug task |
 
 use chrono::{DateTime, Utc};
+use futures_util::future::try_join_all;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Collection, LaunchpadClient};
-use crate::error::Result;
+use crate::error::{LpError, Result};
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -125,7 +135,7 @@ impl std::fmt::Display for BugImportance {
 }
 
 /// A bug task — a bug as it applies to a specific project or source package.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BugTask {
     /// API self-link.
     pub self_link: Option<String>,
@@ -145,6 +155,78 @@ pub struct BugTask {
     pub bug_target_display_name: Option<String>,
     /// Target API link.
     pub target_link: Option<String>,
+    /// API link to the associated bug watch, if any.
+    pub bug_watch_link: Option<String>,
+}
+
+impl BugTask {
+    /// Extract the bug watch ID (if any) from `bug_watch_link`.
+    pub fn bug_watch_id(&self) -> Option<&str> {
+        self.bug_watch_link
+            .as_deref()
+            .and_then(|url| url.rsplit('/').next().filter(|s| !s.is_empty()))
+    }
+}
+
+/// A remote bug tracker registered in Launchpad (e.g. "debbugs").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BugTracker {
+    /// API self-link (e.g. `https://api.launchpad.net/devel/bugs/bugtrackers/debbugs`).
+    pub self_link: Option<String>,
+    /// Unique identifier name of the bug tracker (e.g. `"debbugs"`).
+    pub name: Option<String>,
+    /// Title of the bug tracker (e.g. `"Debian Bug tracker"`).
+    pub title: Option<String>,
+    /// Summary description of the tracker.
+    pub summary: Option<String>,
+    /// Base URL of the remote tracker (e.g. `"https://bugs.debian.org/"`).
+    pub base_url: Option<String>,
+    /// Bug tracker type (e.g. `"Debbugs"`, `"Bugzilla"`, `"GitHub"`).
+    pub bug_tracker_type: Option<String>,
+    /// Web link on Launchpad.
+    pub web_link: Option<String>,
+}
+
+/// A bug watch linking a Launchpad bug to a remote bug tracker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BugWatch {
+    /// API self-link (e.g. `https://api.launchpad.net/devel/bugs/12345/+watch/67890`).
+    pub self_link: Option<String>,
+    /// Link to the parent Launchpad bug.
+    pub bug_link: Option<String>,
+    /// Link to the remote bug tracker.
+    pub bug_tracker_link: Option<String>,
+    /// The remote bug identifier/number (e.g. `"1150409"`).
+    pub remote_bug: Option<String>,
+    /// Title of the watch (e.g. `"Debian Bug tracker #1150409"`).
+    pub title: Option<String>,
+    /// Direct URL to the remote bug report (e.g. `"https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1150409"`).
+    pub url: Option<String>,
+    /// Web link to the bug watch on Launchpad.
+    pub web_link: Option<String>,
+    /// Status on the remote bug tracker.
+    pub remote_status: Option<String>,
+    /// Importance on the remote bug tracker.
+    pub remote_importance: Option<String>,
+    /// Date this watch was created.
+    pub date_created: Option<DateTime<Utc>>,
+    /// Date this watch was last checked by Launchpad.
+    pub date_last_checked: Option<DateTime<Utc>>,
+    /// Date this watch was last changed on the remote tracker.
+    pub date_last_changed: Option<DateTime<Utc>>,
+    /// API link to the owner who created this watch.
+    pub owner_link: Option<String>,
+    /// Last error encountered when checking the remote bug, if any.
+    pub last_error_type: Option<String>,
+}
+
+impl BugWatch {
+    /// Extract the bug watch numeric ID from its `self_link`.
+    pub fn id(&self) -> Option<&str> {
+        self.self_link
+            .as_deref()
+            .and_then(|url| url.rsplit('/').next().filter(|s| !s.is_empty()))
+    }
 }
 
 /// A comment on a bug.
@@ -329,14 +411,18 @@ pub async fn delete_bug_task(client: &LaunchpadClient, task_url: &str) -> Result
 }
 
 /// Update the status of a bug task identified by its API self-link.
+///
+/// The status is converted to its Launchpad API form (e.g.
+/// [`BugTaskStatus::WontFix`] is sent as `"Won't Fix"`).
 pub async fn set_bug_status(
     client: &LaunchpadClient,
     task_url: &str,
-    status: &str,
+    status: &BugTaskStatus,
 ) -> Result<BugTask> {
     use std::collections::HashMap;
+    let status_str = status.to_string();
     let mut params = HashMap::new();
-    params.insert("status", status);
+    params.insert("status", status_str.as_str());
     client.patch_url(task_url, &params).await
 }
 
@@ -344,11 +430,12 @@ pub async fn set_bug_status(
 pub async fn set_bug_importance(
     client: &LaunchpadClient,
     task_url: &str,
-    importance: &str,
+    importance: &BugImportance,
 ) -> Result<BugTask> {
     use std::collections::HashMap;
+    let importance_str = importance.to_string();
     let mut params = HashMap::new();
-    params.insert("importance", importance);
+    params.insert("importance", importance_str.as_str());
     client.patch_url(task_url, &params).await
 }
 
@@ -620,6 +707,239 @@ pub async fn get_bug_subscriptions(
     Collection::fetch_all(client, &url).await
 }
 
+/// Fetch a bug tracker by its unique name (e.g. `"debbugs"`).
+///
+/// Calls `bug_trackers.getByName(name)`.
+///
+/// # Errors
+///
+/// Returns [`crate::error::LpError::NotFound`] if the tracker does not exist.
+pub async fn get_bug_tracker_by_name(client: &LaunchpadClient, name: &str) -> Result<BugTracker> {
+    let url = client.url(&format!(
+        "/bugs/bugtrackers?ws.op=getByName&name={}",
+        urlenc(name.trim())
+    ));
+    let tracker: Option<BugTracker> = client.get_url(&url).await?;
+    tracker.ok_or_else(|| LpError::NotFound(format!("Bug tracker '{name}' not found.")))
+}
+
+/// List all remote bug trackers registered in Launchpad.
+///
+/// The `name` field on each returned tracker is the value accepted by
+/// [`get_bug_tracker_by_name`] and the `--bug-tracker` CLI option.
+pub async fn get_bug_trackers(client: &LaunchpadClient) -> Result<Vec<BugTracker>> {
+    const PAGE_SIZE: usize = 100;
+    const PAGES_PER_BATCH: usize = 8;
+
+    let first_url = client.url(&format!("/bugs/bugtrackers?ws.size={PAGE_SIZE}"));
+    let first_page: Collection<BugTracker> = client.get_url(&first_url).await?;
+    let Some(total_size) = first_page.total_size else {
+        let mut trackers = first_page.entries;
+        let mut next_url = first_page.next_collection_link;
+        while let Some(url) = next_url {
+            let page: Collection<BugTracker> = client.get_url(&url).await?;
+            trackers.extend(page.entries);
+            next_url = page.next_collection_link;
+        }
+        return Ok(trackers);
+    };
+
+    let total_size = usize::try_from(total_size)
+        .map_err(|_| LpError::Other("Bug tracker collection is too large.".to_string()))?;
+    let mut trackers = first_page.entries;
+    let page_starts: Vec<usize> = (PAGE_SIZE..total_size).step_by(PAGE_SIZE).collect();
+
+    for batch in page_starts.chunks(PAGES_PER_BATCH) {
+        let pages = try_join_all(batch.iter().map(|start| {
+            let url = client.url(&format!(
+                "/bugs/bugtrackers?ws.size={PAGE_SIZE}&memo={start}&ws.start={start}"
+            ));
+            async move { Collection::<BugTracker>::fetch_page(client, &url).await }
+        }))
+        .await?;
+        trackers.extend(pages.into_iter().flatten());
+    }
+
+    Ok(trackers)
+}
+
+/// Search registered remote bug trackers and optionally stop after `limit`
+/// matches.
+///
+/// Search is a case-insensitive substring match over tracker metadata.
+/// Pages are fetched sequentially so a limit can stop requests as soon as
+/// enough matching entries have been collected.
+pub async fn search_bug_trackers(
+    client: &LaunchpadClient,
+    search: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<BugTracker>> {
+    const PAGE_SIZE: usize = 100;
+
+    let mut page_url = client.url(&format!("/bugs/bugtrackers?ws.size={PAGE_SIZE}"));
+    let search = search.map(str::to_lowercase);
+    let mut matches = Vec::new();
+
+    loop {
+        let page: Collection<BugTracker> = client.get_url(&page_url).await?;
+        for tracker in page.entries {
+            let matches_search = search.as_deref().is_none_or(|search| {
+                [
+                    tracker.name.as_deref(),
+                    tracker.title.as_deref(),
+                    tracker.summary.as_deref(),
+                    tracker.bug_tracker_type.as_deref(),
+                    tracker.base_url.as_deref(),
+                    tracker.self_link.as_deref(),
+                    tracker.web_link.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|field| field.to_lowercase().contains(search))
+            });
+
+            if matches_search {
+                matches.push(tracker);
+                if limit.is_some_and(|limit| matches.len() >= limit) {
+                    return Ok(matches);
+                }
+            }
+        }
+
+        let Some(next_url) = page.next_collection_link else {
+            return Ok(matches);
+        };
+        page_url = next_url;
+    }
+}
+
+/// Fetch a bug tracker by its API self-link URL.
+pub async fn get_bug_tracker(client: &LaunchpadClient, tracker_url: &str) -> Result<BugTracker> {
+    client.get_url(tracker_url).await
+}
+
+/// Create a new bug watch on a bug for the given remote bug tracker and remote bug ID.
+///
+/// `bug_tracker_url` must be the full Launchpad API URL of the bug tracker
+/// (e.g. `"https://api.launchpad.net/devel/bugs/bugtrackers/debbugs"`), typically
+/// obtained via [`get_bug_tracker_by_name`].
+///
+/// `remote_bug` is the bug number or identifier in the remote tracker (e.g. `"1150409"`).
+///
+/// Returns the newly created [`BugWatch`].
+pub async fn add_bug_watch(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    bug_tracker_url: &str,
+    remote_bug: &str,
+) -> Result<BugWatch> {
+    use std::collections::HashMap;
+    let clean_remote = remote_bug.trim().trim_start_matches('#');
+    let mut params = HashMap::new();
+    params.insert("ws.op", "addWatch");
+    params.insert("bug_tracker", bug_tracker_url);
+    params.insert("remote_bug", clean_remote);
+    let location = client
+        .post_created_location(&format!("/bugs/{bug_id}"), &params)
+        .await?;
+    client.get_url(&location).await
+}
+
+/// Fetch all bug watches associated with a bug.
+pub async fn get_bug_watches(client: &LaunchpadClient, bug_id: u64) -> Result<Vec<BugWatch>> {
+    let url = client.url(&format!("/bugs/{bug_id}/bug_watches"));
+    Collection::fetch_all(client, &url).await
+}
+
+/// Fetch a single bug watch by its API URL.
+pub async fn get_bug_watch(client: &LaunchpadClient, watch_url: &str) -> Result<BugWatch> {
+    client.get_url(watch_url).await
+}
+
+/// Link a bug task to a bug watch identified by its API self-link.
+///
+/// `task_url` must be the API self-link of the bug task.
+/// `watch_url` must be the API self-link of the bug watch (e.g.
+/// `"https://api.launchpad.net/devel/bugs/12345/+watch/67890"`).
+///
+/// Setting the bug watch makes the task follow the remote bug's status.
+/// Returns the updated [`BugTask`].
+pub async fn set_bug_watch(
+    client: &LaunchpadClient,
+    task_url: &str,
+    watch_url: &str,
+) -> Result<BugTask> {
+    use std::collections::HashMap;
+    let mut params = HashMap::new();
+    params.insert("bug_watch_link", watch_url);
+    client.patch_url(task_url, &params).await
+}
+
+/// Unlink a bug watch from a bug task.
+///
+/// `task_url` must be the API self-link of the bug task.
+///
+/// Returns the updated [`BugTask`].
+pub async fn unset_bug_watch(client: &LaunchpadClient, task_url: &str) -> Result<BugTask> {
+    let body = serde_json::json!({ "bug_watch_link": null });
+    client.patch_url_with_value(task_url, &body).await
+}
+
+/// Link a bug task to a remote bug on an external bug tracker.
+///
+/// This performs the three steps required by Launchpad:
+/// 1. Look up the remote bug tracker by name using [`get_bug_tracker_by_name`].
+/// 2. Find an existing watch for that tracker and remote bug or create one via [`add_bug_watch`].
+/// 3. Link the bug task to the bug watch via [`set_bug_watch`].
+///
+/// Returns the updated [`BugTask`] and the associated [`BugWatch`].
+pub async fn link_bug_task_remote(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    task_url: &str,
+    bug_tracker: &str,
+    remote_bug: &str,
+) -> Result<(BugTask, BugWatch)> {
+    let clean_remote_bug = remote_bug.trim().trim_start_matches('#');
+    let tracker = if bug_tracker.starts_with("http://") || bug_tracker.starts_with("https://") {
+        get_bug_tracker(client, bug_tracker).await?
+    } else {
+        get_bug_tracker_by_name(client, bug_tracker).await?
+    };
+
+    let tracker_url = tracker.self_link.as_deref().ok_or_else(|| {
+        LpError::NotFound(format!("Bug tracker '{bug_tracker}' has no self_link."))
+    })?;
+
+    // Check if an existing watch on this bug already matches the tracker and remote bug.
+    let existing_watches = get_bug_watches(client, bug_id).await?;
+    let watch = if let Some(found) = existing_watches.into_iter().find(|w| {
+        let matches_tracker = w
+            .bug_tracker_link
+            .as_deref()
+            .map(|link| link.trim_end_matches('/') == tracker_url.trim_end_matches('/'))
+            .unwrap_or(false);
+        let matches_bug = w
+            .remote_bug
+            .as_deref()
+            .map(|b| b.trim_start_matches('#') == clean_remote_bug)
+            .unwrap_or(false);
+        matches_tracker && matches_bug
+    }) {
+        found
+    } else {
+        add_bug_watch(client, bug_id, tracker_url, clean_remote_bug).await?
+    };
+
+    let watch_url = watch
+        .self_link
+        .as_deref()
+        .ok_or_else(|| LpError::NotFound("Bug watch has no self_link.".to_string()))?;
+
+    let updated_task = set_bug_watch(client, task_url, watch_url).await?;
+    Ok((updated_task, watch))
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -766,5 +1086,65 @@ mod tests {
         assert!(params.status.is_none());
         assert!(params.importance.is_none());
         assert!(params.limit.is_none());
+    }
+
+    #[test]
+    fn bug_tracker_deserialise() {
+        let json = r#"{
+            "self_link": "https://api.launchpad.net/devel/bugs/bugtrackers/debbugs",
+            "name": "debbugs",
+            "title": "Debian Bug tracker",
+            "summary": "Bug tracker for debian project.",
+            "base_url": "https://bugs.debian.org/",
+            "bug_tracker_type": "Debbugs",
+            "web_link": "https://bugs.launchpad.net/bugs/bugtrackers/debbugs"
+        }"#;
+        let tracker: BugTracker = serde_json::from_str(json).unwrap();
+        assert_eq!(tracker.name.as_deref(), Some("debbugs"));
+        assert_eq!(tracker.title.as_deref(), Some("Debian Bug tracker"));
+        assert_eq!(tracker.bug_tracker_type.as_deref(), Some("Debbugs"));
+        assert_eq!(
+            tracker.base_url.as_deref(),
+            Some("https://bugs.debian.org/")
+        );
+    }
+
+    #[test]
+    fn bug_watch_deserialise() {
+        let json = r#"{
+            "self_link": "https://api.launchpad.net/devel/bugs/2120577/+watch/166955",
+            "bug_link": "https://api.launchpad.net/devel/bugs/2120577",
+            "bug_tracker_link": "https://api.launchpad.net/devel/bugs/bugtrackers/debbugs",
+            "remote_bug": "1150409",
+            "title": "Debian Bug tracker #1150409",
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1150409",
+            "web_link": "https://bugs.launchpad.net/bugs/2120577/+watch/166955",
+            "remote_status": "open wishlist patch",
+            "remote_importance": "UNKNOWN"
+        }"#;
+        let watch: BugWatch = serde_json::from_str(json).unwrap();
+        assert_eq!(watch.remote_bug.as_deref(), Some("1150409"));
+        assert_eq!(watch.id(), Some("166955"));
+        assert_eq!(watch.remote_status.as_deref(), Some("open wishlist patch"));
+    }
+
+    #[test]
+    fn bug_task_deserialise_with_watch() {
+        let json = r#"{
+            "self_link": "https://api.launchpad.net/devel/debian/+source/arctica-greeter/+bug/2120577",
+            "bug_link": "https://api.launchpad.net/devel/bugs/2120577",
+            "title": "Bug #2120577 in arctica-greeter (Debian)",
+            "status": "New",
+            "importance": "Unknown",
+            "bug_target_display_name": "arctica-greeter (Debian)",
+            "target_link": "https://api.launchpad.net/devel/debian/+source/arctica-greeter",
+            "bug_watch_link": "https://api.launchpad.net/devel/bugs/2120577/+watch/166955"
+        }"#;
+        let task: BugTask = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            task.bug_watch_link.as_deref(),
+            Some("https://api.launchpad.net/devel/bugs/2120577/+watch/166955")
+        );
+        assert_eq!(task.bug_watch_id(), Some("166955"));
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! Parse command-line arguments with `clap` and dispatch to the `lpcli` library.
 
-use clap::{ArgGroup, Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 
@@ -103,6 +103,103 @@ enum Command {
 // ---------------------------------------------------------------------------
 // Bug sub-commands
 // ---------------------------------------------------------------------------
+
+/// Bug task statuses accepted on the command line.
+///
+/// CLI values are kebab-case (e.g. `in-progress`, `wont-fix`); the `Display`
+/// implementation converts them to Launchpad's canonical form (e.g.
+/// `In Progress`, `Won't Fix`) for API calls and user-facing output.
+#[derive(Clone, Debug, Copy, ValueEnum)]
+enum BugTaskStatus {
+    New,
+    Confirmed,
+    Triaged,
+    InProgress,
+    FixCommitted,
+    FixReleased,
+    Invalid,
+    WontFix,
+    Opinion,
+    Expired,
+}
+
+impl std::fmt::Display for BugTaskStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::New => write!(f, "New"),
+            Self::Confirmed => write!(f, "Confirmed"),
+            Self::Triaged => write!(f, "Triaged"),
+            Self::InProgress => write!(f, "In Progress"),
+            Self::FixCommitted => write!(f, "Fix Committed"),
+            Self::FixReleased => write!(f, "Fix Released"),
+            Self::Invalid => write!(f, "Invalid"),
+            Self::WontFix => write!(f, "Won't Fix"),
+            Self::Opinion => write!(f, "Opinion"),
+            Self::Expired => write!(f, "Expired"),
+        }
+    }
+}
+
+impl From<BugTaskStatus> for bugs::BugTaskStatus {
+    fn from(status: BugTaskStatus) -> Self {
+        match status {
+            BugTaskStatus::New => Self::New,
+            BugTaskStatus::Confirmed => Self::Confirmed,
+            BugTaskStatus::Triaged => Self::Triaged,
+            BugTaskStatus::InProgress => Self::InProgress,
+            BugTaskStatus::FixCommitted => Self::FixCommitted,
+            BugTaskStatus::FixReleased => Self::FixReleased,
+            BugTaskStatus::Invalid => Self::Invalid,
+            BugTaskStatus::WontFix => Self::WontFix,
+            BugTaskStatus::Opinion => Self::Opinion,
+            BugTaskStatus::Expired => Self::Expired,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Copy, ValueEnum)]
+enum BugTaskImportance {
+    Undecided,
+    Wishlist,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl std::fmt::Display for BugTaskImportance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Undecided => write!(f, "Undecided"),
+            Self::Wishlist => write!(f, "Wishlist"),
+            Self::Low => write!(f, "Low"),
+            Self::Medium => write!(f, "Medium"),
+            Self::High => write!(f, "High"),
+            Self::Critical => write!(f, "Critical"),
+        }
+    }
+}
+
+impl From<BugTaskImportance> for bugs::BugImportance {
+    fn from(importance: BugTaskImportance) -> Self {
+        match importance {
+            BugTaskImportance::Undecided => Self::Undecided,
+            BugTaskImportance::Wishlist => Self::Wishlist,
+            BugTaskImportance::Low => Self::Low,
+            BugTaskImportance::Medium => Self::Medium,
+            BugTaskImportance::High => Self::High,
+            BugTaskImportance::Critical => Self::Critical,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct TaskLinkSelector {
+    target: Option<String>,
+    package: Option<String>,
+    series: Option<String>,
+    task_url: Option<String>,
+}
 
 #[derive(Debug, Subcommand)]
 enum BugCommand {
@@ -253,9 +350,9 @@ enum BugCommand {
         /// --many-series, and --all-series.
         #[arg(long)]
         no_series: bool,
-        /// New status (e.g. "Confirmed", "Fix Released", "In Progress").
+        /// New status (e.g. "confirmed", "fix-released", "in-progress").
         #[arg(short, long)]
-        status: String,
+        status: BugTaskStatus,
     },
     /// Change the importance of a bug task.
     #[command(
@@ -301,9 +398,9 @@ enum BugCommand {
         /// --many-series, and --all-series.
         #[arg(long)]
         no_series: bool,
-        /// New importance (e.g. "Critical", "High", "Medium", "Low").
+        /// New importance (e.g. "critical", "high", "medium", "low").
         #[arg(short, long)]
-        importance: String,
+        importance: BugTaskImportance,
     },
     /// Assign a bug task to a Launchpad user.
     #[command(
@@ -406,15 +503,21 @@ enum BugCommand {
         /// Mutually exclusive with --series.
         #[arg(long)]
         many_series: Option<String>,
-        /// Task importance (e.g. "Undecided", "Critical", "High", "Medium", "Low").
+        /// Task importance (e.g. "undecided", "critical", "high", "medium", "low").
         #[arg(long)]
-        importance: Option<String>,
-        /// Task status (e.g. "New", "Confirmed", "In Progress").
+        importance: Option<BugTaskImportance>,
+        /// Task status (e.g. "new", "confirmed", "in-progress").
         #[arg(long)]
-        status: Option<String>,
+        status: Option<BugTaskStatus>,
         /// Launchpad username to assign (without ~).
         #[arg(long)]
         assignee: Option<String>,
+        /// Remote bug tracker name from 'lpcli bug remote-bug-trackers'.
+        #[arg(long, visible_alias = "tracker", requires = "remote_bug")]
+        bug_tracker: Option<String>,
+        /// Remote bug ID or number in the tracker (e.g. "1150409") to link this task to.
+        #[arg(long, visible_alias = "remote", requires = "bug_tracker")]
+        remote_bug: Option<String>,
     },
     /// Delete bug tasks from a bug matching the given target and optional series.
     #[command(
@@ -480,6 +583,65 @@ enum BugCommand {
         /// Mutually exclusive with --remove-tag and --remove-many-tags.
         #[arg(long)]
         remove_all_tags: bool,
+    },
+    /// Link a bug task to a remote bug (e.g. in Debian or an upstream bug tracker).
+    #[command(alias = "link-task")]
+    LinkRemote {
+        /// The Launchpad bug number.
+        #[arg(short, long)]
+        bug_id: u64,
+        /// Remote bug tracker name from 'lpcli bug remote-bug-trackers'.
+        #[arg(short = 'g', long, visible_alias = "tracker")]
+        bug_tracker: String,
+        /// Remote bug ID or number in the tracker (e.g. "1150409").
+        #[arg(short = 'r', long, visible_alias = "remote")]
+        remote_bug: String,
+        /// Project or distribution name to match (e.g. "debian", "ubuntu").
+        #[arg(short, long)]
+        target: Option<String>,
+        /// Source package name to match (e.g. "arctica-greeter").
+        #[arg(short, long)]
+        package: Option<String>,
+        /// Ubuntu series to match (e.g. "noble").
+        #[arg(short, long)]
+        series: Option<String>,
+        /// Direct API URL of the bug task to link (bypasses target/package matching).
+        #[arg(short = 'u', long)]
+        task_url: Option<String>,
+    },
+    /// Unlink a bug task from its remote bug watch.
+    #[command(alias = "unlink-task", alias = "unlink-bug")]
+    UnlinkRemote {
+        /// The Launchpad bug number.
+        #[arg(short, long)]
+        bug_id: u64,
+        /// Project or distribution name to match (e.g. "debian", "ubuntu").
+        #[arg(short, long)]
+        target: Option<String>,
+        /// Source package name to match (e.g. "arctica-greeter").
+        #[arg(short, long)]
+        package: Option<String>,
+        /// Ubuntu series to match (e.g. "noble").
+        #[arg(short, long)]
+        series: Option<String>,
+        /// Direct API URL of the bug task to unlink.
+        #[arg(short = 'u', long)]
+        task_url: Option<String>,
+    },
+    /// List bug watches (links to remote bugs) for a bug.
+    Watches {
+        /// The Launchpad bug number.
+        #[arg(short, long)]
+        bug_id: u64,
+    },
+    /// List remote bug trackers registered in Launchpad.
+    RemoteBugTrackers {
+        /// Maximum number of remote bug trackers to return.
+        #[arg(short, long, value_parser = parse_positive_limit)]
+        limit: Option<usize>,
+        /// Case-insensitive substring to match against tracker metadata.
+        #[arg(short, long)]
+        search: Option<String>,
     },
 }
 
@@ -1224,11 +1386,34 @@ fn print_bug_tasks(tasks: &[bugs::BugTask]) {
         });
     }
 
-    let mut table = build_table(vec!["Target", "Series", "Status", "Importance", "Assignee"]);
+    let has_any_watch = tasks.iter().any(|t| t.bug_watch_link.is_some());
+    let header = if has_any_watch {
+        vec![
+            "Target",
+            "Series",
+            "Status",
+            "Importance",
+            "Assignee",
+            "Watch",
+        ]
+    } else {
+        vec!["Target", "Series", "Status", "Importance", "Assignee"]
+    };
+    let mut table = build_table(header);
     for (target_name, tasks_for_target) in &by_target {
         for pt in tasks_for_target {
             let display_target = match &pt.series {
-                None => target_name.clone(),
+                None => {
+                    if let Some(disp) = pt.task.bug_target_display_name.as_deref() {
+                        if disp.contains('(') {
+                            disp.to_string()
+                        } else {
+                            target_name.clone()
+                        }
+                    } else {
+                        target_name.clone()
+                    }
+                }
                 Some(_) => format!("    {target_name}"),
             };
             let series_str = pt.series.as_deref().unwrap_or("").to_string();
@@ -1242,13 +1427,22 @@ fn print_bug_tasks(tasks: &[bugs::BugTask]) {
                         .map(|seg| seg.trim_start_matches('~').to_string())
                 })
                 .unwrap_or_else(|| "—".to_string());
-            table.add_row(vec![
+            let mut row = vec![
                 display_target,
                 series_str,
                 pt.task.status.as_deref().unwrap_or("—").to_string(),
                 pt.task.importance.as_deref().unwrap_or("—").to_string(),
                 assignee_str,
-            ]);
+            ];
+            if has_any_watch {
+                let watch_str = pt
+                    .task
+                    .bug_watch_id()
+                    .map(|id| format!("#{id}"))
+                    .unwrap_or_else(|| "—".to_string());
+                row.push(watch_str);
+            }
+            table.add_row(row);
         }
     }
     println!("{table}");
@@ -1299,7 +1493,11 @@ fn print_bug_attachments(attachments: &[bugs::BugAttachment], download_urls: &[S
 }
 
 async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
-    let client = authenticated_client()?;
+    let client = if matches!(&cmd, BugCommand::RemoteBugTrackers { .. }) {
+        LaunchpadClient::new(None).with_max_retries(2)
+    } else {
+        authenticated_client()?
+    };
 
     match cmd {
         BugCommand::Show { bug_id } => {
@@ -1528,7 +1726,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 let task_url = task.self_link.as_deref().ok_or_else(|| {
                     lpcli::error::LpError::Other("Bug task has no self_link".into())
                 })?;
-                bugs::set_bug_status(&client, task_url, &status).await?;
+                bugs::set_bug_status(&client, task_url, &bugs::BugTaskStatus::from(status)).await?;
             }
             println!(
                 "{} Status updated to '{}' for {} task(s) on bug #{bug_id}.",
@@ -1557,7 +1755,8 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 let task_url = task.self_link.as_deref().ok_or_else(|| {
                     lpcli::error::LpError::Other("Bug task has no self_link".into())
                 })?;
-                bugs::set_bug_importance(&client, task_url, &importance).await?;
+                bugs::set_bug_importance(&client, task_url, &bugs::BugImportance::from(importance))
+                    .await?;
             }
             println!(
                 "{} Importance updated to '{}' for {} task(s) on bug #{bug_id}.",
@@ -1659,6 +1858,8 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             importance,
             status,
             assignee,
+            bug_tracker,
+            remote_bug,
         } => {
             // Build the list of target URLs to add tasks for.  When no series
             // is supplied we add a single task directly against the base target
@@ -1698,6 +1899,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             };
 
             let mut created = 0usize;
+            let mut remote_link_failures = Vec::new();
             for (series_name, target_url) in &targets {
                 let task = match bugs::add_bug_task(&client, bug_id, target_url).await {
                     Ok(t) => t,
@@ -1719,13 +1921,26 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                             "!".yellow().bold(),
                             series_name,
                         );
+                        if let (Some(tracker_name), Some(remote_id)) = (&bug_tracker, &remote_bug) {
+                            remote_link_failures.push(remote_link_failure(
+                                series_name,
+                                tracker_name,
+                                remote_id,
+                                "new task has no self_link",
+                            ));
+                        }
                         created += 1;
                         continue;
                     }
                 };
 
                 if let Some(imp) = &importance
-                    && let Err(e) = bugs::set_bug_importance(&client, &task_url, imp).await
+                    && let Err(e) = bugs::set_bug_importance(
+                        &client,
+                        &task_url,
+                        &bugs::BugImportance::from(*imp),
+                    )
+                    .await
                 {
                     eprintln!(
                         "{} Failed to set importance on task for '{}': {e}",
@@ -1734,7 +1949,9 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                     );
                 }
                 if let Some(st) = &status
-                    && let Err(e) = bugs::set_bug_status(&client, &task_url, st).await
+                    && let Err(e) =
+                        bugs::set_bug_status(&client, &task_url, &bugs::BugTaskStatus::from(*st))
+                            .await
                 {
                     eprintln!(
                         "{} Failed to set status on task for '{}': {e}",
@@ -1760,6 +1977,51 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                     .as_deref()
                     .unwrap_or(series_name.as_str());
                 println!("{} Bug task added: {}", "✓".green().bold(), display_name,);
+
+                if let (Some(tracker_name), Some(remote_id)) = (&bug_tracker, &remote_bug) {
+                    let link_result = bugs::link_bug_task_remote(
+                        &client,
+                        bug_id,
+                        &task_url,
+                        tracker_name,
+                        remote_id,
+                    )
+                    .await;
+                    match link_result {
+                        Ok((_, watch)) => {
+                            let watch_id = watch
+                                .self_link
+                                .as_deref()
+                                .and_then(|u| u.rsplit('/').next())
+                                .unwrap_or(remote_id);
+                            let watch_title = watch.title.as_deref().unwrap_or(watch_id);
+                            println!(
+                                "{} Bug task linked to remote bug: {}",
+                                "✓".green().bold(),
+                                watch_title,
+                            );
+                            if let Some(url) = &watch.url {
+                                println!("  Remote URL: {url}");
+                            }
+                        }
+                        Err(e) => {
+                            remote_link_failures.push(remote_link_failure(
+                                series_name,
+                                tracker_name,
+                                remote_id,
+                                &e.to_string(),
+                            ));
+                            eprintln!(
+                                "{} Failed to link task for '{}' to remote bug '{}' on tracker '{}': {e}",
+                                "!".yellow().bold(),
+                                series_name,
+                                remote_id,
+                                tracker_name,
+                            );
+                        }
+                    }
+                }
+
                 created += 1;
             }
 
@@ -1767,6 +2029,10 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 return Err(lpcli::error::LpError::Other(format!(
                     "No bug tasks were created on bug #{bug_id}."
                 )));
+            }
+
+            if let Some(error) = remote_link_failure_error(bug_id, &remote_link_failures) {
+                return Err(error);
             }
         }
 
@@ -1887,8 +2153,171 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 );
             }
         }
+
+        BugCommand::LinkRemote {
+            bug_id,
+            bug_tracker,
+            remote_bug,
+            target,
+            package,
+            series,
+            task_url,
+        } => {
+            let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
+            let selector = TaskLinkSelector {
+                target: target.clone(),
+                package: package.clone(),
+                series: series.clone(),
+                task_url: task_url.clone(),
+            };
+            let task = find_task_to_link(&tasks, bug_id, &selector)?;
+            let effective_task_url = task.self_link.as_deref().ok_or_else(|| {
+                lpcli::error::LpError::NotFound(format!(
+                    "Selected bug task has no self_link on bug #{bug_id}."
+                ))
+            })?;
+            let display_name = task
+                .bug_target_display_name
+                .as_deref()
+                .unwrap_or(effective_task_url);
+
+            let (_updated_task, watch) = bugs::link_bug_task_remote(
+                &client,
+                bug_id,
+                effective_task_url,
+                &bug_tracker,
+                &remote_bug,
+            )
+            .await?;
+
+            let watch_id = watch
+                .self_link
+                .as_deref()
+                .and_then(|u| u.rsplit('/').next())
+                .unwrap_or(&remote_bug);
+            let watch_title = watch.title.as_deref().unwrap_or(watch_id);
+
+            println!(
+                "{} Linked task '{}' to remote bug: {}",
+                "✓".green().bold(),
+                display_name,
+                watch_title,
+            );
+            if let Some(url) = &watch.url {
+                println!("  URL: {url}");
+            }
+        }
+
+        BugCommand::UnlinkRemote {
+            bug_id,
+            target,
+            package,
+            series,
+            task_url,
+        } => {
+            let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
+            let selector = TaskLinkSelector {
+                target: target.clone(),
+                package: package.clone(),
+                series: series.clone(),
+                task_url: task_url.clone(),
+            };
+            let task = find_task_to_link(&tasks, bug_id, &selector)?;
+            let effective_task_url = task.self_link.as_deref().ok_or_else(|| {
+                lpcli::error::LpError::NotFound(format!(
+                    "Selected bug task has no self_link on bug #{bug_id}."
+                ))
+            })?;
+            let display_name = task
+                .bug_target_display_name
+                .as_deref()
+                .unwrap_or(effective_task_url);
+
+            bugs::unset_bug_watch(&client, effective_task_url).await?;
+
+            println!(
+                "{} Unlinked remote bug watch from task '{}'.",
+                "✓".green().bold(),
+                display_name,
+            );
+        }
+
+        BugCommand::Watches { bug_id } => {
+            let watches = bugs::get_bug_watches(&client, bug_id).await?;
+            if watches.is_empty() {
+                println!("No bug watches found for bug #{bug_id}.");
+                return Ok(());
+            }
+            let mut table = build_table(vec!["Watch ID", "Tracker", "Remote Bug", "Status", "URL"]);
+            for w in &watches {
+                let watch_id = w
+                    .self_link
+                    .as_deref()
+                    .and_then(|u| u.rsplit('/').next())
+                    .unwrap_or("—");
+                let tracker = w
+                    .bug_tracker_link
+                    .as_deref()
+                    .and_then(|u| u.rsplit('/').next())
+                    .unwrap_or("—");
+                let remote_bug = w.remote_bug.as_deref().unwrap_or("—");
+                let status = w.remote_status.as_deref().unwrap_or("—");
+                let url = w.url.as_deref().unwrap_or("—");
+                table.add_row(vec![
+                    watch_id.to_string(),
+                    tracker.to_string(),
+                    remote_bug.to_string(),
+                    status.to_string(),
+                    url.to_string(),
+                ]);
+            }
+            println!("{}", "Bug Watches".bold());
+            println!("{table}");
+            println!("{} bug watch(es).", watches.len());
+        }
+
+        BugCommand::RemoteBugTrackers { limit, search } => {
+            let trackers = bugs::search_bug_trackers(&client, search.as_deref(), limit).await?;
+            if trackers.is_empty() {
+                if search.is_some() {
+                    println!("No remote bug trackers matched the search.");
+                } else {
+                    println!("No remote bug trackers found.");
+                }
+                return Ok(());
+            }
+
+            let mut table = build_table(vec!["Name", "Title", "Type", "Base URL"]);
+            for tracker in &trackers {
+                table.add_row(vec![
+                    tracker.name.as_deref().unwrap_or("—").to_string(),
+                    tracker.title.as_deref().unwrap_or("—").to_string(),
+                    tracker
+                        .bug_tracker_type
+                        .as_deref()
+                        .unwrap_or("—")
+                        .to_string(),
+                    tracker.base_url.as_deref().unwrap_or("—").to_string(),
+                ]);
+            }
+            println!("{table}");
+            println!(
+                "{} remote bug tracker(s). Use the Name value with --bug-tracker.",
+                trackers.len()
+            );
+        }
     }
     Ok(())
+}
+
+fn parse_positive_limit(value: &str) -> Result<usize, String> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| "limit must be a positive number".to_string())?;
+    if limit == 0 {
+        return Err("limit must be a positive number".to_string());
+    }
+    Ok(limit)
 }
 
 // ---------------------------------------------------------------------------
@@ -4122,6 +4551,162 @@ fn collect_matching_tasks<'a>(
     Ok(matched)
 }
 
+/// Find a single bug task from a list of tasks matching the given criteria.
+///
+/// If `task_url` is provided, matches directly by `self_link`.
+/// Otherwise, filters by `target` (matching package name, distro in URL, or display name),
+/// `package`, and `series`.
+///
+/// If multiple tasks match and `series` was not specified, prefers series-less tasks
+/// (e.g. distribution-level or upstream tasks).
+fn find_task_to_link<'a>(
+    tasks: &'a [bugs::BugTask],
+    bug_id: u64,
+    selector: &TaskLinkSelector,
+) -> lpcli::error::Result<&'a bugs::BugTask> {
+    if tasks.is_empty() {
+        return Err(lpcli::error::LpError::NotFound(format!(
+            "Bug #{bug_id} has no bug tasks."
+        )));
+    }
+
+    if let Some(url) = selector.task_url.as_deref() {
+        return tasks
+            .iter()
+            .find(|t| t.self_link.as_deref() == Some(url))
+            .ok_or_else(|| {
+                lpcli::error::LpError::NotFound(format!(
+                    "No task with self_link '{url}' found on bug #{bug_id}."
+                ))
+            });
+    }
+
+    // Filter tasks based on target, package, and series.
+    let mut candidates: Vec<&bugs::BugTask> = tasks
+        .iter()
+        .filter(|t| {
+            let target_link = t.target_link.as_deref().unwrap_or("");
+            let (task_target, task_series) = bugs::parse_target_link(target_link);
+            let display_name = t.bug_target_display_name.as_deref().unwrap_or("");
+
+            // Series check
+            if let Some(ser) = selector.series.as_deref() {
+                let matches_series = task_series
+                    .as_deref()
+                    .map(|ts| ts.eq_ignore_ascii_case(ser))
+                    .unwrap_or(false);
+                if !matches_series {
+                    return false;
+                }
+            }
+
+            // Package check
+            if let Some(pkg) = selector.package.as_deref() {
+                let matches_pkg = task_target.eq_ignore_ascii_case(pkg)
+                    || target_link
+                        .to_ascii_lowercase()
+                        .contains(&format!("/+source/{}", pkg.to_ascii_lowercase()));
+                if !matches_pkg {
+                    return false;
+                }
+            }
+
+            // Target check: matches target name, distro in target_link, or substring in display_name.
+            if let Some(tgt) = selector.target.as_deref() {
+                let tgt_lower = tgt.to_ascii_lowercase();
+                let matches_target = task_target.eq_ignore_ascii_case(tgt)
+                    || target_link
+                        .to_ascii_lowercase()
+                        .starts_with(&format!("https://api.launchpad.net/devel/{tgt_lower}"))
+                    || target_link
+                        .to_ascii_lowercase()
+                        .starts_with(&format!("/{tgt_lower}"))
+                    || target_link
+                        .to_ascii_lowercase()
+                        .contains(&format!("/{tgt_lower}/"))
+                    || display_name.to_ascii_lowercase().contains(&tgt_lower);
+                if !matches_target {
+                    return false;
+                }
+            }
+
+            true
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        let available: Vec<String> = tasks
+            .iter()
+            .filter_map(|t| {
+                t.bug_target_display_name
+                    .as_deref()
+                    .or(t.target_link.as_deref())
+            })
+            .map(|s| s.to_string())
+            .collect();
+        return Err(lpcli::error::LpError::NotFound(format!(
+            "No task matching criteria on bug #{bug_id}. Available tasks: {}.",
+            if available.is_empty() {
+                "none".to_string()
+            } else {
+                available.join(", ")
+            }
+        )));
+    }
+
+    // If no series was specified and multiple candidates matched, prefer series-less tasks
+    // (e.g. the distro-level /debian/+source/pkg or upstream task).
+    if selector.series.is_none() && candidates.len() > 1 {
+        let series_less: Vec<&bugs::BugTask> = candidates
+            .iter()
+            .copied()
+            .filter(|t| {
+                let (_, s) = bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
+                s.is_none()
+            })
+            .collect();
+        if series_less.len() == 1 {
+            return Ok(series_less[0]);
+        } else if !series_less.is_empty() {
+            candidates = series_less;
+        }
+    }
+
+    if candidates.len() == 1 {
+        Ok(candidates[0])
+    } else {
+        let names: Vec<String> = candidates
+            .iter()
+            .filter_map(|t| {
+                t.bug_target_display_name
+                    .as_deref()
+                    .or(t.target_link.as_deref())
+            })
+            .map(|s| s.to_string())
+            .collect();
+        Err(lpcli::error::LpError::Other(format!(
+            "Multiple matching tasks on bug #{bug_id}: {}. Please specify --target, --package, or --series to disambiguate.",
+            names.join(", ")
+        )))
+    }
+}
+
+fn remote_link_failure(series: &str, tracker: &str, remote_bug: &str, reason: &str) -> String {
+    format!("series '{series}', tracker '{tracker}', remote bug '{remote_bug}': {reason}")
+}
+
+fn remote_link_failure_error(bug_id: u64, failures: &[String]) -> Option<lpcli::error::LpError> {
+    if failures.is_empty() {
+        return None;
+    }
+
+    Some(lpcli::error::LpError::Other(format!(
+        "Failed to link remote bugs for one or more tasks on bug #{bug_id}; \
+         task creation may already have succeeded: {}",
+        failures.join("; ")
+    )))
+}
+
 /// Truncate a string to at most `max` characters, appending `…` if truncated.
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -4202,1062 +4787,5 @@ fn apply_tag_additions(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // -----------------------------------------------------------------------
-    // Helpers shared by multiple tests
-    // -----------------------------------------------------------------------
-
-    /// Build a minimal `BugTask` whose only meaningful field is `target_link`.
-    fn make_task(target_link: &str) -> bugs::BugTask {
-        bugs::BugTask {
-            self_link: Some(format!(
-                "https://api.launchpad.net/devel{target_link}/+bugtask"
-            )),
-            bug_link: Some("https://api.launchpad.net/devel/bugs/1".to_string()),
-            title: Some("Test bug".to_string()),
-            status: Some("New".to_string()),
-            importance: Some("Undecided".to_string()),
-            assignee_link: None,
-            date_created: None,
-            bug_target_display_name: None,
-            target_link: Some(format!("https://api.launchpad.net/devel{target_link}")),
-        }
-    }
-
-    /// A representative set of tasks covering several targets, series, and
-    /// also series-less rows (distribution-level and upstream project tasks).
-    fn sample_tasks() -> Vec<bugs::BugTask> {
-        vec![
-            // rust-alacritty: noble and jammy only
-            make_task("/ubuntu/noble/+source/rust-alacritty"),
-            make_task("/ubuntu/jammy/+source/rust-alacritty"),
-            // rust-eza: noble, jammy, and focal
-            make_task("/ubuntu/noble/+source/rust-eza"),
-            make_task("/ubuntu/jammy/+source/rust-eza"),
-            make_task("/ubuntu/focal/+source/rust-eza"),
-            // Series-less rows — included when SeriesFilter::All is used
-            make_task("/ubuntu/+source/rust-alacritty"),
-            make_task("/rust-alacritty"),
-        ]
-    }
-
-    /// Extract the target_link strings from a slice of task references so that
-    /// test assertions stay readable.
-    fn target_links<'a>(tasks: &'a [&'a bugs::BugTask]) -> Vec<&'a str> {
-        tasks
-            .iter()
-            .filter_map(|t| t.target_link.as_deref())
-            .collect()
-    }
-
-    // -----------------------------------------------------------------------
-    // parse_comma_separated
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_comma_separated_single() {
-        assert_eq!(parse_comma_separated("noble"), vec!["noble"]);
-    }
-
-    #[test]
-    fn parse_comma_separated_two() {
-        assert_eq!(
-            parse_comma_separated("noble, jammy"),
-            vec!["noble", "jammy"]
-        );
-    }
-
-    #[test]
-    fn parse_comma_separated_trims_whitespace() {
-        assert_eq!(
-            parse_comma_separated("  noble  ,  jammy  "),
-            vec!["noble", "jammy"]
-        );
-    }
-
-    #[test]
-    fn parse_comma_separated_ignores_empty_segments() {
-        assert_eq!(
-            parse_comma_separated(",noble,,jammy,"),
-            vec!["noble", "jammy"]
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // TargetFilter::from_args
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn target_filter_from_all_targets_flag() {
-        let f = TargetFilter::from_args(None, None, true);
-        assert_eq!(f, TargetFilter::All);
-    }
-
-    #[test]
-    fn target_filter_from_many_targets() {
-        let f = TargetFilter::from_args(None, Some("rust-alacritty, rust-eza".into()), false);
-        assert_eq!(
-            f,
-            TargetFilter::Many(vec!["rust-alacritty".into(), "rust-eza".into()])
-        );
-    }
-
-    #[test]
-    fn target_filter_from_single_target() {
-        let f = TargetFilter::from_args(Some("rust-alacritty".into()), None, false);
-        assert_eq!(f, TargetFilter::One("rust-alacritty".into()));
-    }
-
-    // -----------------------------------------------------------------------
-    // SeriesFilter::from_args
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn series_filter_from_all_series_flag() {
-        let f = SeriesFilter::from_args(None, None, true, false);
-        assert_eq!(f, SeriesFilter::All);
-    }
-
-    #[test]
-    fn series_filter_from_many_series() {
-        let f = SeriesFilter::from_args(None, Some("noble, jammy".into()), false, false);
-        assert_eq!(f, SeriesFilter::Many(vec!["noble".into(), "jammy".into()]));
-    }
-
-    #[test]
-    fn series_filter_from_single_series() {
-        let f = SeriesFilter::from_args(Some("noble".into()), None, false, false);
-        assert_eq!(f, SeriesFilter::One("noble".into()));
-    }
-
-    #[test]
-    fn series_filter_from_no_series_flag() {
-        let f = SeriesFilter::from_args(None, None, false, true);
-        assert_eq!(f, SeriesFilter::NoSeries);
-    }
-
-    // -----------------------------------------------------------------------
-    // collect_matching_tasks — successful combinations
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn collect_one_target_one_series() {
-        let tasks = sample_tasks();
-        let result = collect_matching_tasks(
-            &tasks,
-            1,
-            &TargetFilter::One("rust-alacritty".into()),
-            &SeriesFilter::One("noble".into()),
-        )
-        .unwrap();
-        assert_eq!(result.len(), 1);
-        assert!(target_links(&result)[0].contains("noble/+source/rust-alacritty"));
-    }
-
-    #[test]
-    fn collect_one_target_one_series_case_insensitive() {
-        let tasks = sample_tasks();
-        let result = collect_matching_tasks(
-            &tasks,
-            1,
-            &TargetFilter::One("Rust-Alacritty".into()),
-            &SeriesFilter::One("Noble".into()),
-        )
-        .unwrap();
-        assert_eq!(result.len(), 1);
-    }
-
-    #[test]
-    fn collect_one_target_many_series() {
-        let tasks = sample_tasks();
-        let result = collect_matching_tasks(
-            &tasks,
-            1,
-            &TargetFilter::One("rust-alacritty".into()),
-            &SeriesFilter::Many(vec!["noble".into(), "jammy".into()]),
-        )
-        .unwrap();
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
-    fn collect_many_targets_one_series() {
-        let tasks = sample_tasks();
-        let result = collect_matching_tasks(
-            &tasks,
-            1,
-            &TargetFilter::Many(vec!["rust-alacritty".into(), "rust-eza".into()]),
-            &SeriesFilter::One("noble".into()),
-        )
-        .unwrap();
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
-    fn collect_many_targets_many_series() {
-        let tasks = sample_tasks();
-        // rust-alacritty × {noble, jammy} + rust-eza × {noble, jammy} = 4
-        let result = collect_matching_tasks(
-            &tasks,
-            1,
-            &TargetFilter::Many(vec!["rust-alacritty".into(), "rust-eza".into()]),
-            &SeriesFilter::Many(vec!["noble".into(), "jammy".into()]),
-        )
-        .unwrap();
-        assert_eq!(result.len(), 4);
-    }
-
-    #[test]
-    fn collect_all_targets_one_series() {
-        let tasks = sample_tasks();
-        // noble has rust-alacritty and rust-eza → 2 tasks
-        let result = collect_matching_tasks(
-            &tasks,
-            1,
-            &TargetFilter::All,
-            &SeriesFilter::One("noble".into()),
-        )
-        .unwrap();
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
-    fn collect_one_target_all_series() {
-        let tasks = sample_tasks();
-        // rust-alacritty: noble, jammy (series-specific) + ubuntu/+source (series-less)
-        // + /rust-alacritty (project task, also series-less) = 4
-        let result = collect_matching_tasks(
-            &tasks,
-            1,
-            &TargetFilter::One("rust-alacritty".into()),
-            &SeriesFilter::All,
-        )
-        .unwrap();
-        assert_eq!(result.len(), 4);
-        let links = target_links(&result);
-        assert!(links.iter().any(|l| l.contains("noble")));
-        assert!(links.iter().any(|l| l.contains("jammy")));
-        assert!(
-            links
-                .iter()
-                .any(|l| l.contains("/ubuntu/+source/rust-alacritty"))
-        );
-        assert!(links.iter().any(|l| l.ends_with("/rust-alacritty")));
-    }
-
-    #[test]
-    fn collect_all_targets_many_series() {
-        let tasks = sample_tasks();
-        // noble + jammy: rust-alacritty × 2 + rust-eza × 2 = 4
-        let result = collect_matching_tasks(
-            &tasks,
-            1,
-            &TargetFilter::All,
-            &SeriesFilter::Many(vec!["noble".into(), "jammy".into()]),
-        )
-        .unwrap();
-        assert_eq!(result.len(), 4);
-    }
-
-    #[test]
-    fn collect_all_targets_all_series() {
-        let tasks = sample_tasks();
-        // Series-specific: noble/alacritty, jammy/alacritty, noble/eza, jammy/eza, focal/eza = 5
-        // Series-less: ubuntu/+source/rust-alacritty, /rust-alacritty = 2
-        // Total = 7
-        let result =
-            collect_matching_tasks(&tasks, 1, &TargetFilter::All, &SeriesFilter::All).unwrap();
-        assert_eq!(result.len(), 7);
-    }
-
-    #[test]
-    fn collect_many_targets_all_series() {
-        let tasks = sample_tasks();
-        // rust-eza: noble, jammy, focal = 3 (no series-less row)
-        // rust-alacritty: noble, jammy = 2 + ubuntu/+source (series-less) + /rust-alacritty = 4
-        // Total = 7
-        let result = collect_matching_tasks(
-            &tasks,
-            1,
-            &TargetFilter::Many(vec!["rust-alacritty".into(), "rust-eza".into()]),
-            &SeriesFilter::All,
-        )
-        .unwrap();
-        assert_eq!(result.len(), 7);
-    }
-
-    // -----------------------------------------------------------------------
-    // collect_matching_tasks — error cases
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn collect_invalid_single_target_returns_error() {
-        let tasks = sample_tasks();
-        let err = collect_matching_tasks(
-            &tasks,
-            42,
-            &TargetFilter::One("nonexistent-pkg".into()),
-            &SeriesFilter::One("noble".into()),
-        )
-        .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("nonexistent-pkg"), "msg: {msg}");
-        assert!(msg.contains("42"), "msg: {msg}");
-        assert!(
-            msg.contains("rust-alacritty") || msg.contains("rust-eza"),
-            "msg: {msg}"
-        );
-    }
-
-    #[test]
-    fn collect_invalid_one_of_many_targets_returns_error() {
-        let tasks = sample_tasks();
-        let err = collect_matching_tasks(
-            &tasks,
-            42,
-            &TargetFilter::Many(vec!["rust-alacritty".into(), "ghost-pkg".into()]),
-            &SeriesFilter::One("noble".into()),
-        )
-        .unwrap_err();
-        let msg = err.to_string();
-        // The missing target must be named in the error.
-        assert!(msg.contains("ghost-pkg"), "msg: {msg}");
-        // The valid targets must appear in the 'Available targets' list.
-        assert!(msg.contains("rust-alacritty"), "msg: {msg}");
-    }
-
-    #[test]
-    fn collect_all_of_many_targets_invalid_returns_error() {
-        let tasks = sample_tasks();
-        let err = collect_matching_tasks(
-            &tasks,
-            42,
-            &TargetFilter::Many(vec!["ghost-a".into(), "ghost-b".into()]),
-            &SeriesFilter::One("noble".into()),
-        )
-        .unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("ghost-a") && msg.contains("ghost-b"),
-            "msg: {msg}"
-        );
-    }
-
-    #[test]
-    fn collect_invalid_single_series_returns_error() {
-        let tasks = sample_tasks();
-        let err = collect_matching_tasks(
-            &tasks,
-            42,
-            &TargetFilter::One("rust-alacritty".into()),
-            &SeriesFilter::One("groovy".into()),
-        )
-        .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("groovy"), "msg: {msg}");
-        assert!(msg.contains("noble") || msg.contains("jammy"), "msg: {msg}");
-    }
-
-    #[test]
-    fn collect_invalid_one_of_many_series_returns_error() {
-        let tasks = sample_tasks();
-        let err = collect_matching_tasks(
-            &tasks,
-            42,
-            &TargetFilter::One("rust-alacritty".into()),
-            &SeriesFilter::Many(vec!["noble".into(), "eoan".into()]),
-        )
-        .unwrap_err();
-        let msg = err.to_string();
-        // The missing series must be named in the error.
-        assert!(msg.contains("eoan"), "msg: {msg}");
-        // The valid series must appear in the 'Available series' list.
-        assert!(msg.contains("noble"), "msg: {msg}");
-    }
-
-    #[test]
-    fn collect_valid_target_and_series_but_no_intersection_returns_error() {
-        // rust-alacritty has no focal task; rust-eza has focal.
-        let tasks = sample_tasks();
-        let err = collect_matching_tasks(
-            &tasks,
-            42,
-            &TargetFilter::One("rust-alacritty".into()),
-            &SeriesFilter::One("focal".into()),
-        )
-        .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("No tasks found"), "msg: {msg}");
-    }
-
-    #[test]
-    fn collect_one_target_no_series() {
-        let tasks = sample_tasks();
-        // rust-alacritty series-less rows: /ubuntu/+source/rust-alacritty, /rust-alacritty = 2
-        let result = collect_matching_tasks(
-            &tasks,
-            1,
-            &TargetFilter::One("rust-alacritty".into()),
-            &SeriesFilter::NoSeries,
-        )
-        .unwrap();
-        assert_eq!(result.len(), 2);
-        for link in target_links(&result) {
-            assert!(
-                !link.contains("/noble/") && !link.contains("/jammy/") && !link.contains("/focal/"),
-                "expected no series in link: {link}"
-            );
-        }
-    }
-
-    #[test]
-    fn collect_all_targets_no_series() {
-        let tasks = sample_tasks();
-        // Only series-less tasks in sample_tasks: /ubuntu/+source/rust-alacritty, /rust-alacritty = 2
-        let result =
-            collect_matching_tasks(&tasks, 1, &TargetFilter::All, &SeriesFilter::NoSeries).unwrap();
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
-    fn collect_series_less_tasks_included_by_all_series() {
-        // SeriesFilter::All includes both series-specific and series-less tasks.
-        let tasks = vec![
-            make_task("/ubuntu/+source/rust-alacritty"),
-            make_task("/rust-alacritty"),
-            make_task("/ubuntu/noble/+source/rust-alacritty"),
-        ];
-        let result =
-            collect_matching_tasks(&tasks, 1, &TargetFilter::All, &SeriesFilter::All).unwrap();
-        assert_eq!(result.len(), 3);
-        let links = target_links(&result);
-        assert!(links.iter().any(|l| l.contains("noble")));
-        assert!(
-            links
-                .iter()
-                .any(|l| l.contains("/ubuntu/+source/rust-alacritty"))
-        );
-        assert!(links.iter().any(|l| l.ends_with("/rust-alacritty")));
-    }
-
-    #[test]
-    fn collect_empty_tasks_list_returns_error() {
-        let tasks: Vec<bugs::BugTask> = vec![];
-        let err = collect_matching_tasks(
-            &tasks,
-            1,
-            &TargetFilter::One("rust-alacritty".into()),
-            &SeriesFilter::One("noble".into()),
-        )
-        .unwrap_err();
-        // With no tasks the target validation fires first.
-        assert!(err.to_string().contains("rust-alacritty"));
-    }
-
-    // -----------------------------------------------------------------------
-    // truncate / build_table (pre-existing)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn truncate_short_string_unchanged() {
-        assert_eq!(truncate("hello", 10), "hello");
-    }
-
-    #[test]
-    fn truncate_long_string_adds_ellipsis() {
-        let s = truncate("abcdefghij", 5);
-        assert!(s.ends_with('…'));
-        assert!(s.chars().count() <= 5);
-    }
-
-    #[test]
-    fn truncate_exact_length_unchanged() {
-        assert_eq!(truncate("hello", 5), "hello");
-    }
-
-    #[test]
-    fn build_table_smoke() {
-        let table = build_table(vec!["Col A", "Col B"]);
-        let rendered = table.to_string();
-        assert!(rendered.contains("Col A"));
-        assert!(rendered.contains("Col B"));
-    }
-
-    // -----------------------------------------------------------------------
-    // parse_tags_from_vec
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_tags_from_vec_space_separated() {
-        let args = vec!["homestar".into(), "cheat".into(), "strongbad".into()];
-        assert_eq!(
-            parse_tags_from_vec(&args),
-            vec!["homestar", "cheat", "strongbad"]
-        );
-    }
-
-    #[test]
-    fn parse_tags_from_vec_single_comma_separated_string() {
-        let args = vec!["homestar, cheat, strongbad".into()];
-        assert_eq!(
-            parse_tags_from_vec(&args),
-            vec!["homestar", "cheat", "strongbad"]
-        );
-    }
-
-    #[test]
-    fn parse_tags_from_vec_shell_split_trailing_commas() {
-        // Simulates what the shell hands to the process when the user types:
-        //   --add-many-tags homestar, cheat, strongbad
-        let args = vec!["homestar,".into(), "cheat,".into(), "strongbad".into()];
-        assert_eq!(
-            parse_tags_from_vec(&args),
-            vec!["homestar", "cheat", "strongbad"]
-        );
-    }
-
-    #[test]
-    fn parse_tags_from_vec_filters_empty_segments() {
-        let args = vec![",,,".into(), "  ".into(), "  java  ".into()];
-        assert_eq!(parse_tags_from_vec(&args), vec!["java"]);
-    }
-
-    // -----------------------------------------------------------------------
-    // apply_tag_removals
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn apply_tag_removals_single_tag() {
-        let current = vec!["apple".into(), "banana".into(), "pear".into()];
-        let result = apply_tag_removals(current, Some("pear".into()), None, false);
-        assert_eq!(result, vec!["apple", "banana"]);
-    }
-
-    #[test]
-    fn apply_tag_removals_many_tags_space_separated() {
-        let current = vec!["lettuce".into(), "tomato".into(), "cucumber".into()];
-        let result = apply_tag_removals(
-            current,
-            None,
-            Some(vec!["lettuce".into(), "tomato".into()]),
-            false,
-        );
-        assert_eq!(result, vec!["cucumber"]);
-    }
-
-    #[test]
-    fn apply_tag_removals_many_tags_comma_separated_string() {
-        let current = vec!["lettuce".into(), "tomato".into(), "cucumber".into()];
-        let result = apply_tag_removals(current, None, Some(vec!["lettuce, tomato".into()]), false);
-        assert_eq!(result, vec!["cucumber"]);
-    }
-
-    #[test]
-    fn apply_tag_removals_all_tags() {
-        let current = vec!["spam".into(), "eggs".into(), "sausage".into()];
-        let result = apply_tag_removals(current, None, None, true);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn apply_tag_removals_all_tags_ignores_other_flags() {
-        // remove_all_tags takes precedence over the specific remove flags.
-        let current = vec!["spam".into(), "eggs".into()];
-        let result = apply_tag_removals(
-            current,
-            Some("spam".into()),
-            Some(vec!["eggs".into()]),
-            true,
-        );
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn apply_tag_removals_no_flags_returns_unchanged() {
-        let current = vec!["alpha".into(), "beta".into()];
-        let result = apply_tag_removals(current.clone(), None, None, false);
-        assert_eq!(result, current);
-    }
-
-    #[test]
-    fn apply_tag_removals_case_insensitive() {
-        let current = vec!["Apple".into(), "Banana".into()];
-        let result = apply_tag_removals(current, Some("APPLE".into()), None, false);
-        assert_eq!(result, vec!["Banana"]);
-    }
-
-    #[test]
-    fn apply_tag_removals_nonexistent_tag_leaves_list_unchanged() {
-        let current = vec!["alpha".into(), "beta".into()];
-        let result = apply_tag_removals(current.clone(), Some("gamma".into()), None, false);
-        assert_eq!(result, current);
-    }
-
-    // -----------------------------------------------------------------------
-    // apply_tag_additions
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn apply_tag_additions_single_tag() {
-        let current = vec!["existing".into()];
-        let result = apply_tag_additions(current, Some("java".into()), None);
-        assert_eq!(result, vec!["existing", "java"]);
-    }
-
-    #[test]
-    fn apply_tag_additions_many_tags_space_separated() {
-        let current: Vec<String> = vec![];
-        let result = apply_tag_additions(
-            current,
-            None,
-            Some(vec!["homestar".into(), "cheat".into(), "strongbad".into()]),
-        );
-        assert_eq!(result, vec!["homestar", "cheat", "strongbad"]);
-    }
-
-    #[test]
-    fn apply_tag_additions_many_tags_comma_separated_string() {
-        let current: Vec<String> = vec![];
-        let result = apply_tag_additions(
-            current,
-            None,
-            Some(vec!["homestar, cheat, strongbad".into()]),
-        );
-        assert_eq!(result, vec!["homestar", "cheat", "strongbad"]);
-    }
-
-    #[test]
-    fn apply_tag_additions_no_flags_returns_unchanged() {
-        let current = vec!["alpha".into(), "beta".into()];
-        let result = apply_tag_additions(current.clone(), None, None);
-        assert_eq!(result, current);
-    }
-
-    #[test]
-    fn apply_tag_additions_skips_duplicates() {
-        let current = vec!["java".into(), "python".into()];
-        let result = apply_tag_additions(current, Some("java".into()), None);
-        // "java" must not appear twice.
-        assert_eq!(result, vec!["java", "python"]);
-    }
-
-    #[test]
-    fn apply_tag_additions_case_insensitive_duplicate_check() {
-        let current = vec!["Java".into()];
-        let result = apply_tag_additions(current, Some("JAVA".into()), None);
-        // Case-insensitive match: "JAVA" is already present as "Java".
-        assert_eq!(result, vec!["Java"]);
-    }
-
-    // -----------------------------------------------------------------------
-    // remove + add combined
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn remove_all_then_add_many() {
-        // Bug has: baseball, football, basketball
-        // --remove-all-tags --add-many-tags "cricket, badminton"
-        let current = vec!["baseball".into(), "football".into(), "basketball".into()];
-        let after_remove = apply_tag_removals(current, None, None, true);
-        let final_tags =
-            apply_tag_additions(after_remove, None, Some(vec!["cricket, badminton".into()]));
-        assert_eq!(final_tags, vec!["cricket", "badminton"]);
-    }
-
-    #[test]
-    fn remove_one_then_add_one() {
-        let current = vec!["apple".into(), "banana".into(), "pear".into()];
-        let after_remove = apply_tag_removals(current, Some("pear".into()), None, false);
-        let final_tags = apply_tag_additions(after_remove, Some("mango".into()), None);
-        assert_eq!(final_tags, vec!["apple", "banana", "mango"]);
-    }
-
-    #[test]
-    fn remove_many_then_add_single() {
-        let current = vec!["lettuce".into(), "tomato".into(), "cucumber".into()];
-        let after_remove = apply_tag_removals(
-            current,
-            None,
-            Some(vec!["lettuce".into(), "tomato".into()]),
-            false,
-        );
-        let final_tags = apply_tag_additions(after_remove, Some("spinach".into()), None);
-        assert_eq!(final_tags, vec!["cucumber", "spinach"]);
-    }
-
-    // -----------------------------------------------------------------------
-    // CLI argument parsing — Tag subcommand
-    // -----------------------------------------------------------------------
-
-    /// Helper: parse a `BugCommand::Tag` from CLI tokens and return the variant.
-    fn parse_tag_cmd(args: &[&str]) -> BugCommand {
-        let full: Vec<&str> = std::iter::once("lpcli")
-            .chain(std::iter::once("bug"))
-            .chain(std::iter::once("tag"))
-            .chain(args.iter().copied())
-            .collect();
-        let cli = Cli::try_parse_from(full).expect("CLI parsing failed");
-        match cli.command {
-            Command::Bug(cmd) => cmd,
-            _ => panic!("Expected Bug command"),
-        }
-    }
-
-    #[test]
-    fn cli_tag_add_tag_single() {
-        let cmd = parse_tag_cmd(&["--bug-id", "42", "--add-tag", "java"]);
-        let BugCommand::Tag {
-            bug_id,
-            add_tag,
-            add_many_tags,
-            remove_tag,
-            remove_many_tags,
-            remove_all_tags,
-        } = cmd
-        else {
-            panic!("Expected Tag variant");
-        };
-        assert_eq!(bug_id, 42);
-        assert_eq!(add_tag, Some("java".to_string()));
-        assert!(add_many_tags.is_none());
-        assert!(remove_tag.is_none());
-        assert!(remove_many_tags.is_none());
-        assert!(!remove_all_tags);
-    }
-
-    #[test]
-    fn cli_tag_add_many_tags_space_separated() {
-        let cmd = parse_tag_cmd(&[
-            "--bug-id",
-            "42",
-            "--add-many-tags",
-            "homestar",
-            "cheat",
-            "strongbad",
-        ]);
-        let BugCommand::Tag { add_many_tags, .. } = cmd else {
-            panic!()
-        };
-        let tags = parse_tags_from_vec(&add_many_tags.unwrap());
-        assert_eq!(tags, vec!["homestar", "cheat", "strongbad"]);
-    }
-
-    #[test]
-    fn cli_tag_add_many_tags_comma_separated() {
-        let cmd = parse_tag_cmd(&[
-            "--bug-id",
-            "42",
-            "--add-many-tags",
-            "homestar, cheat, strongbad",
-        ]);
-        let BugCommand::Tag { add_many_tags, .. } = cmd else {
-            panic!()
-        };
-        let tags = parse_tags_from_vec(&add_many_tags.unwrap());
-        assert_eq!(tags, vec!["homestar", "cheat", "strongbad"]);
-    }
-
-    #[test]
-    fn cli_tag_remove_tag_single() {
-        let cmd = parse_tag_cmd(&["--bug-id", "99", "--remove-tag", "pear"]);
-        let BugCommand::Tag {
-            remove_tag,
-            remove_all_tags,
-            ..
-        } = cmd
-        else {
-            panic!()
-        };
-        assert_eq!(remove_tag, Some("pear".to_string()));
-        assert!(!remove_all_tags);
-    }
-
-    #[test]
-    fn cli_tag_remove_many_tags() {
-        let cmd = parse_tag_cmd(&["--bug-id", "99", "--remove-many-tags", "lettuce", "tomato"]);
-        let BugCommand::Tag {
-            remove_many_tags, ..
-        } = cmd
-        else {
-            panic!()
-        };
-        let tags = parse_tags_from_vec(&remove_many_tags.unwrap());
-        assert_eq!(tags, vec!["lettuce", "tomato"]);
-    }
-
-    #[test]
-    fn cli_tag_remove_all_tags() {
-        let cmd = parse_tag_cmd(&["--bug-id", "7", "--remove-all-tags"]);
-        let BugCommand::Tag {
-            remove_all_tags,
-            remove_tag,
-            remove_many_tags,
-            ..
-        } = cmd
-        else {
-            panic!()
-        };
-        assert!(remove_all_tags);
-        assert!(remove_tag.is_none());
-        assert!(remove_many_tags.is_none());
-    }
-
-    #[test]
-    fn cli_tag_remove_all_and_add_many() {
-        let cmd = parse_tag_cmd(&[
-            "--bug-id",
-            "1",
-            "--remove-all-tags",
-            "--add-many-tags",
-            "cricket",
-            "badminton",
-        ]);
-        let BugCommand::Tag {
-            remove_all_tags,
-            add_many_tags,
-            add_tag,
-            ..
-        } = cmd
-        else {
-            panic!()
-        };
-        assert!(remove_all_tags);
-        assert!(add_tag.is_none());
-        let tags = parse_tags_from_vec(&add_many_tags.unwrap());
-        assert_eq!(tags, vec!["cricket", "badminton"]);
-    }
-
-    #[test]
-    fn cli_tag_add_tag_and_remove_tag_together() {
-        let cmd = parse_tag_cmd(&["--bug-id", "1", "--remove-tag", "old", "--add-tag", "new"]);
-        let BugCommand::Tag {
-            remove_tag,
-            add_tag,
-            ..
-        } = cmd
-        else {
-            panic!()
-        };
-        assert_eq!(remove_tag, Some("old".to_string()));
-        assert_eq!(add_tag, Some("new".to_string()));
-    }
-
-    #[test]
-    fn cli_tag_add_tag_and_add_many_tags_mutually_exclusive() {
-        let full = [
-            "lpcli",
-            "bug",
-            "tag",
-            "--bug-id",
-            "1",
-            "--add-tag",
-            "java",
-            "--add-many-tags",
-            "python",
-        ];
-        assert!(
-            Cli::try_parse_from(full).is_err(),
-            "--add-tag and --add-many-tags must be mutually exclusive"
-        );
-    }
-
-    #[test]
-    fn cli_tag_remove_tag_and_remove_many_tags_mutually_exclusive() {
-        let full = [
-            "lpcli",
-            "bug",
-            "tag",
-            "--bug-id",
-            "1",
-            "--remove-tag",
-            "apple",
-            "--remove-many-tags",
-            "banana",
-        ];
-        assert!(
-            Cli::try_parse_from(full).is_err(),
-            "--remove-tag and --remove-many-tags must be mutually exclusive"
-        );
-    }
-
-    #[test]
-    fn cli_tag_remove_tag_and_remove_all_tags_mutually_exclusive() {
-        let full = [
-            "lpcli",
-            "bug",
-            "tag",
-            "--bug-id",
-            "1",
-            "--remove-tag",
-            "apple",
-            "--remove-all-tags",
-        ];
-        assert!(
-            Cli::try_parse_from(full).is_err(),
-            "--remove-tag and --remove-all-tags must be mutually exclusive"
-        );
-    }
-
-    #[test]
-    fn cli_tag_remove_many_tags_and_remove_all_tags_mutually_exclusive() {
-        let full = [
-            "lpcli",
-            "bug",
-            "tag",
-            "--bug-id",
-            "1",
-            "--remove-many-tags",
-            "apple",
-            "--remove-all-tags",
-        ];
-        assert!(
-            Cli::try_parse_from(full).is_err(),
-            "--remove-many-tags and --remove-all-tags must be mutually exclusive"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // CLI argument parsing — Create subcommand
-    // -----------------------------------------------------------------------
-
-    /// Helper: parse a `BugCommand::Create` from CLI tokens and return the variant.
-    fn parse_create_cmd(args: &[&str]) -> BugCommand {
-        let full: Vec<&str> = std::iter::once("lpcli")
-            .chain(std::iter::once("bug"))
-            .chain(std::iter::once("create"))
-            .chain(args.iter().copied())
-            .collect();
-        let cli = Cli::try_parse_from(full).expect("CLI parsing failed");
-        match cli.command {
-            Command::Bug(cmd) => cmd,
-            _ => panic!("Expected Bug command"),
-        }
-    }
-
-    #[test]
-    fn cli_create_bug_basic() {
-        let cmd = parse_create_cmd(&[
-            "--target",
-            "ubuntu",
-            "--package",
-            "curl",
-            "--title",
-            "crash on boot",
-            "--description",
-            "detailed description",
-        ]);
-        let BugCommand::Create {
-            target,
-            package,
-            title,
-            description,
-            attachment_file,
-            attachment_url,
-            attachment_description,
-            attachment_type,
-        } = cmd
-        else {
-            panic!("Expected Create variant");
-        };
-        assert_eq!(target, "ubuntu");
-        assert_eq!(package, Some("curl".to_string()));
-        assert_eq!(title, "crash on boot");
-        assert_eq!(description, "detailed description");
-        assert!(attachment_file.is_none());
-        assert!(attachment_url.is_none());
-        assert!(attachment_description.is_none());
-        assert!(attachment_type.is_none());
-    }
-
-    #[test]
-    fn cli_create_bug_with_attachment_file() {
-        let cmd = parse_create_cmd(&[
-            "-t",
-            "launchpad",
-            "-T",
-            "new bug",
-            "-d",
-            "some issue",
-            "-f",
-            "/tmp/patch.diff",
-            "--attachment-description",
-            "fix for crash",
-            "-a",
-            "Patch",
-        ]);
-        let BugCommand::Create {
-            target,
-            package,
-            title,
-            description,
-            attachment_file,
-            attachment_url,
-            attachment_description,
-            attachment_type,
-        } = cmd
-        else {
-            panic!("Expected Create variant");
-        };
-        assert_eq!(target, "launchpad");
-        assert!(package.is_none());
-        assert_eq!(title, "new bug");
-        assert_eq!(description, "some issue");
-        assert_eq!(attachment_file, Some("/tmp/patch.diff".to_string()));
-        assert!(attachment_url.is_none());
-        assert_eq!(attachment_description, Some("fix for crash".to_string()));
-        assert_eq!(attachment_type, Some("Patch".to_string()));
-    }
-
-    #[test]
-    fn cli_create_bug_with_attachment_url() {
-        let cmd = parse_create_cmd(&[
-            "-T",
-            "new bug",
-            "-d",
-            "some issue",
-            "-u",
-            "https://example.com/log.txt",
-        ]);
-        let BugCommand::Create {
-            target,
-            package,
-            title,
-            description,
-            attachment_file,
-            attachment_url,
-            attachment_description,
-            attachment_type,
-        } = cmd
-        else {
-            panic!("Expected Create variant");
-        };
-        assert_eq!(target, "ubuntu"); // default value
-        assert!(package.is_none());
-        assert_eq!(title, "new bug");
-        assert_eq!(description, "some issue");
-        assert!(attachment_file.is_none());
-        assert_eq!(
-            attachment_url,
-            Some("https://example.com/log.txt".to_string())
-        );
-        assert!(attachment_description.is_none());
-        assert!(attachment_type.is_none());
-    }
-
-    #[test]
-    fn format_size_standalone_bytes() {
-        assert_eq!(format_size(0), "0 B");
-        assert_eq!(format_size(512), "512 B");
-        assert_eq!(format_size(1023), "1023 B");
-    }
-
-    #[test]
-    fn format_size_binary_prefixes() {
-        assert_eq!(format_size(1_024), "1.0 KiB");
-        assert_eq!(format_size(1_536), "1.5 KiB");
-        assert_eq!(format_size(1_048_576), "1.0 MiB");
-        assert_eq!(format_size(1_073_741_824), "1.0 GiB");
-    }
-}
+#[path = "lpcli/tests.rs"]
+mod tests;

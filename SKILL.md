@@ -69,20 +69,24 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 | Add a comment | `lpcli bug comment --bug-id 123456 --message "Reproduced on noble."` |
 | List comments | `lpcli bug comments --bug-id 123456` |
 | File a new bug | `lpcli bug create --target ubuntu --package curl --title "title" --description "desc"` |
-| Set bug task status | `lpcli bug set-status --bug-id 123456 --target curl --series noble --status "In Progress"` |
-| Set status on multiple series | `lpcli bug set-status --bug-id 123456 --target curl --many-series "noble, jammy" --status "Fix Released"` |
-| Set status on all series | `lpcli bug set-status --bug-id 123456 --target curl --all-series --status "Fix Released"` |
-| Set status on multiple targets | `lpcli bug set-status --bug-id 123456 --many-targets "rust-alacritty, rust-eza" --all-series --status "Fix Released"` |
-| Set status on all targets | `lpcli bug set-status --bug-id 123456 --all-targets --all-series --status "Fix Released"` |
-| Set status on series-less tasks | `lpcli bug set-status --bug-id 123456 --target curl --no-series --status "Fix Released"` |
-| Set importance | `lpcli bug set-importance --bug-id 123456 --target curl --series noble --importance "High"` |
-| Set importance on all targets | `lpcli bug set-importance --bug-id 123456 --all-targets --all-series --importance "Critical"` |
+| Set bug task status | `lpcli bug set-status --bug-id 123456 --target curl --series noble --status in-progress` |
+| Set status on multiple series | `lpcli bug set-status --bug-id 123456 --target curl --many-series "noble, jammy" --status fix-released` |
+| Set status on all series | `lpcli bug set-status --bug-id 123456 --target curl --all-series --status fix-released` |
+| Set status on multiple targets | `lpcli bug set-status --bug-id 123456 --many-targets "rust-alacritty, rust-eza" --all-series --status fix-released` |
+| Set status on all targets | `lpcli bug set-status --bug-id 123456 --all-targets --all-series --status fix-released` |
+| Set status on series-less tasks | `lpcli bug set-status --bug-id 123456 --target curl --no-series --status fix-released` |
+| Set importance | `lpcli bug set-importance --bug-id 123456 --target curl --series noble --importance high` |
+| Set importance on all targets | `lpcli bug set-importance --bug-id 123456 --all-targets --all-series --importance critical` |
 | Assign a bug task | `lpcli bug set-assignee --bug-id 123456 --target curl --series noble --name jdoe` |
 | Assign on all targets | `lpcli bug set-assignee --bug-id 123456 --all-targets --all-series --name jdoe` |
 | Subscribe a person | `lpcli bug subscribe --bug-id 123456 --name jdoe` |
 | Unsubscribe a person | `lpcli bug unsubscribe --bug-id 123456 --name jdoe` |
 | List subscribers | `lpcli bug subscriptions --bug-id 123456` |
-| Add a bug task | `lpcli bug add-task --bug-id 123456 --target ubuntu --package curl --series noble --status "New" --importance "Undecided"` |
+| Add a bug task | `lpcli bug add-task --bug-id 123456 --target ubuntu --package curl --series noble --status new --importance undecided` |
+| Add a bug task with remote bug link | `lpcli bug add-task --bug-id 123456 --target debian --package curl --bug-tracker debbugs --remote-bug 654321` |
+| Link bug task to remote bug | `lpcli bug link-remote --bug-id 123456 --target debian --bug-tracker debbugs --remote-bug 654321` |
+| Unlink remote bug watch from task | `lpcli bug unlink-remote --bug-id 123456 --target debian` |
+| List bug watches | `lpcli bug watches --bug-id 123456` |
 | Delete a bug task | `lpcli bug delete-task --bug-id 123456 --target ubuntu --package curl --series noble` |
 | Add a tag | `lpcli bug tag --bug-id 123456 --add-tag regression` |
 | Add multiple tags | `lpcli bug tag --bug-id 123456 --add-many-tags "regression, oem, sru"` |
@@ -235,10 +239,25 @@ lpcli bug search --target ubuntu --package rustc-1.97
 lpcli bug show --bug-id 123456
 lpcli bug tasks --bug-id 123456
 lpcli bug set-status --bug-id 123456 --target curl \
-    --series noble --status "Triaged"
+    --series noble --status triaged
 lpcli bug set-importance --bug-id 123456 --target curl \
-    --series noble --importance "High"
+    --series noble --importance high
 lpcli bug comment --bug-id 123456 --message "Triaged as High for Noble."
+```
+
+### Forward a bug to Debian or upstream
+
+```bash
+# Add a Debian task and link it to the Debian BTS bug in one step
+lpcli bug add-task --bug-id 123456 --target debian --package curl \
+    --bug-tracker debbugs --remote-bug 654321
+
+# Or link an existing task to the remote bug
+lpcli bug link-remote --bug-id 123456 --target debian --package curl \
+    --bug-tracker debbugs --remote-bug 654321
+
+# Check bug watches on the bug
+lpcli bug watches --bug-id 123456
 ```
 
 ### Find packages in a series
