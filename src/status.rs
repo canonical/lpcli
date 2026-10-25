@@ -133,7 +133,7 @@ pub async fn check_server() -> ServerStatus {
 ///   been revoked), returns `AuthStatus { logged_in: true, username: None }`
 ///   to indicate that local credentials are present but unverified.
 pub async fn check_auth() -> AuthStatus {
-    // 1. Try to load credentials from disk.
+    // 1. Try to load credentials from the OS keyring or fallback file.
     let creds = match auth::load_credentials() {
         Ok(c) => c,
         Err(LpError::NotAuthenticated) | Err(LpError::Config(_)) => {

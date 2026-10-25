@@ -5,10 +5,14 @@
 //! * Obtaining a request token from Launchpad.
 //! * Directing the user to authorise the token via their browser.
 //! * Exchanging the authorised request token for an access token.
-//! * Persisting access tokens to a credentials file in the user's config directory.
+//! * Persisting access tokens to the operating system keyring, with a
+//!   plaintext file fallback when no keyring is available.
 //! * Signing outgoing HTTP requests with the stored access token.
 //!
-//! The credential file is stored at `~/.config/lpcli/credentials.toml`.
+//! Credentials are stored in the operating system keyring by default
+//! (Secret Service on Linux, Keychain on macOS, Credential Manager on
+//! Windows).  If the keyring is unavailable or cannot be used, lpcli falls
+//! back to `~/.config/lpcli/credentials.toml`.
 //!
 //! # Launchpad OAuth endpoints
 //!
@@ -18,7 +22,7 @@
 //! | Authorise | `https://launchpad.net/+authorize-token` |
 //! | Access token | `https://launchpad.net/+access-token` |
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -35,12 +39,22 @@ const LAUNCHPAD_ACCESS_TOKEN_URL: &str = "https://launchpad.net/+access-token";
 /// Application name presented to Launchpad during OAuth negotiation.
 pub const CONSUMER_KEY: &str = "lpcli";
 
+/// Service name used for the lpcli entry in the operating system keyring.
+const KEYRING_SERVICE: &str = "lpcli";
+
+/// Account name used for the lpcli entry in the operating system keyring.
+const KEYRING_USER: &str = "launchpad";
+
 // ---------------------------------------------------------------------------
 // Credential types
 // ---------------------------------------------------------------------------
 
 /// An OAuth 1.0a access token and its associated secret.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The [`std::fmt::Debug`] implementation is redacted so that accidental
+/// `{:?}` formatting (debug logs, panic messages, error output) can never
+/// expose the token or its secret.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessToken {
     /// The OAuth access token string.
     pub token: String,
@@ -48,13 +62,34 @@ pub struct AccessToken {
     pub secret: String,
 }
 
+impl std::fmt::Debug for AccessToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccessToken")
+            .field("token", &"[redacted]")
+            .field("secret", &"[redacted]")
+            .finish()
+    }
+}
+
 /// The full set of credentials persisted on disk.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The [`std::fmt::Debug`] implementation is redacted so that accidental
+/// `{:?}` formatting can never expose the access token or its secret.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credentials {
     /// The OAuth consumer key (application identifier).
     pub consumer_key: String,
     /// The access token obtained after a successful login.
     pub access_token: AccessToken,
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("consumer_key", &self.consumer_key)
+            .field("access_token", &"[redacted]")
+            .finish()
+    }
 }
 
 impl Credentials {
@@ -78,7 +113,7 @@ impl Credentials {
 // Credential persistence
 // ---------------------------------------------------------------------------
 
-/// Returns the path to the credentials file.
+/// Returns the path to the fallback credentials file.
 ///
 /// Defaults to `~/.config/lpcli/credentials.toml`.
 pub fn credentials_path() -> Result<PathBuf> {
@@ -87,60 +122,183 @@ pub fn credentials_path() -> Result<PathBuf> {
     Ok(base.join("lpcli").join("credentials.toml"))
 }
 
-/// Load credentials from disk.
+/// Return the OS keyring entry used to store lpcli credentials.
+fn keyring_entry() -> keyring::Result<keyring::Entry> {
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+}
+
+/// Load credentials, preferring the OS keyring and falling back to the
+/// plaintext file when no usable keyring is available.
 ///
-/// Returns `Err(LpError::NotAuthenticated)` when no credential file exists.
+/// Returns `Err(LpError::NotAuthenticated)` when neither store contains
+/// credentials.
 pub fn load_credentials() -> Result<Credentials> {
+    if let Ok(Some(creds)) = load_from_keyring() {
+        // The keyring is authoritative; remove any stale plaintext copy.
+        if let Ok(path) = credentials_path() {
+            let _ = delete_credentials_file(&path);
+        }
+        return Ok(creds);
+    }
+
     let path = credentials_path()?;
     if !path.exists() {
         return Err(LpError::NotAuthenticated);
     }
-    let raw = std::fs::read_to_string(&path)?;
-    let creds: Credentials = toml::from_str(&raw)
-        .map_err(|e| LpError::Config(format!("Failed to parse credentials file: {e}")))?;
+
+    let creds = load_credentials_from_file(&path)?;
+
+    // Migrate legacy plaintext credentials into the keyring when possible.
+    // If the keyring is unavailable, the file remains the source of truth.
+    if let Ok(entry) = keyring_entry()
+        && let Ok(serialized) = serialize_credentials(&creds)
+        && entry.set_password(&serialized).is_ok()
+    {
+        let _ = std::fs::remove_file(&path);
+    }
+
     Ok(creds)
 }
 
-/// Persist credentials to disk.
+/// Load credentials from the OS keyring.
 ///
-/// Creates the parent directory if it does not already exist.
+/// Returns `Ok(None)` when the keyring is available but has no lpcli entry.
+fn load_from_keyring() -> Result<Option<Credentials>> {
+    let entry = keyring_entry().map_err(|e| LpError::Keyring(e.to_string()))?;
+    match entry.get_password() {
+        Ok(raw) => parse_credentials(&raw).map(Some),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(LpError::Keyring(e.to_string())),
+    }
+}
+
+/// Load credentials from the plaintext fallback file.
+fn load_credentials_from_file(path: &Path) -> Result<Credentials> {
+    let raw = std::fs::read_to_string(path)?;
+    parse_credentials(&raw)
+}
+
+/// Parse the TOML representation of credentials.
+///
+/// The `toml` crate's error `Display` embeds the offending line of the input,
+/// which for a credentials file may contain the OAuth token or secret.  Parse
+/// errors therefore report only the message and location, never file contents.
+fn parse_credentials(raw: &str) -> Result<Credentials> {
+    toml::from_str(raw).map_err(|e| {
+        let location = e
+            .span()
+            .and_then(|span| line_col(raw, span.start))
+            .map(|(line, column)| format!(" at line {line}, column {column}"))
+            .unwrap_or_default();
+        LpError::Config(format!(
+            "Failed to parse credentials{location}: {}",
+            e.message()
+        ))
+    })
+}
+
+/// Convert a byte offset into a 1-based `(line, column)` pair.
+fn line_col(input: &str, offset: usize) -> Option<(usize, usize)> {
+    let mut line = 1usize;
+    let mut column = 1usize;
+    for (idx, ch) in input.char_indices() {
+        if idx >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    Some((line, column))
+}
+
+/// Serialise credentials to the TOML representation used by both stores.
+fn serialize_credentials(creds: &Credentials) -> Result<String> {
+    toml::to_string_pretty(creds)
+        .map_err(|e| LpError::Config(format!("Failed to serialise credentials: {e}")))
+}
+
+/// Persist credentials, preferring the OS keyring and falling back to the
+/// plaintext file when no usable keyring is available.
 pub fn save_credentials(creds: &Credentials) -> Result<()> {
-    let path = credentials_path()?;
+    let serialized = serialize_credentials(creds)?;
+
+    // Prefer the OS keyring.
+    if let Ok(entry) = keyring_entry()
+        && entry.set_password(&serialized).is_ok()
+    {
+        // Remove any legacy plaintext copy so credentials are not duplicated.
+        if let Ok(path) = credentials_path() {
+            delete_credentials_file(&path)?;
+        }
+        return Ok(());
+    }
+
+    // Fall back to the plaintext file.
+    save_credentials_to_file(&serialized, &credentials_path()?)
+}
+
+/// Write the serialised credentials to the fallback file.
+fn save_credentials_to_file(serialized: &str, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let serialized = toml::to_string_pretty(creds)
-        .map_err(|e| LpError::Config(format!("Failed to serialise credentials: {e}")))?;
 
     #[cfg(unix)]
     {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
             .mode(0o600)
-            .open(&path)?;
+            .open(path)?;
         file.write_all(serialized.as_bytes())?;
+        // `mode` only applies when the file is created; tighten the
+        // permissions explicitly so a pre-existing file is never left
+        // world- or group-readable after a rewrite.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
 
     #[cfg(not(unix))]
     {
-        std::fs::write(&path, serialized)?;
+        std::fs::write(path, serialized)?;
     }
 
     Ok(())
 }
 
-/// Delete the credentials file, effectively logging the user out.
+/// Delete credentials from both the OS keyring and the fallback file.
 pub fn delete_credentials() -> Result<()> {
-    let path = credentials_path()?;
-    if path.exists() {
-        std::fs::remove_file(&path)?;
+    let keyring_result = delete_from_keyring();
+    let file_result = delete_credentials_file(&credentials_path()?);
+
+    match keyring_result {
+        Ok(())
+        | Err(keyring::Error::NoEntry)
+        | Err(keyring::Error::NoDefaultStore)
+        | Err(keyring::Error::NotSupportedByStore(_)) => file_result,
+        Err(e) => Err(LpError::Keyring(e.to_string())),
     }
-    Ok(())
+}
+
+/// Delete the lpcli entry from the OS keyring.
+fn delete_from_keyring() -> keyring::Result<()> {
+    keyring_entry()?.delete_credential()
+}
+
+/// Delete the fallback credentials file, treating a missing file as success.
+fn delete_credentials_file(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(LpError::Io(e)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -372,6 +530,98 @@ mod tests {
         let body = "oauth_token=abc123";
         let err = parse_oauth_response(body, "oauth_token_secret").unwrap_err();
         assert!(err.to_string().contains("oauth_token_secret"));
+    }
+
+    /// A malformed credentials file must never leak its contents (which
+    /// include the OAuth token and secret) through the error message.
+    #[test]
+    fn parse_credentials_error_does_not_leak_secrets() {
+        // Type mismatch: the `toml` error Display would embed the offending
+        // line, but the reported message must not.
+        let raw = "consumer_key = \"lpcli\"\n\n[access_token]\ntoken = \"SECRET-TOKEN\"\nsecret = 12345\n";
+        let err = parse_credentials(raw).unwrap_err().to_string();
+        assert!(!err.contains("SECRET-TOKEN"), "leaked via {err}");
+        assert!(err.contains("line 5"), "msg: {err}");
+
+        // Syntax error directly on the token line.
+        let raw = "consumer_key = \"lpcli\"\n\n[access_token]\ntoken = \"SECRET-TOKEN\nsecret = \"SECRET-SECRET\"\n";
+        let err = parse_credentials(raw).unwrap_err().to_string();
+        assert!(!err.contains("SECRET"), "leaked via {err}");
+        assert!(err.contains("line"), "msg: {err}");
+    }
+
+    /// `Debug` output for credential types must be redacted so that
+    /// accidental `{:?}` formatting can never expose the token or secret.
+    #[test]
+    fn credential_debug_output_is_redacted() {
+        let creds = Credentials::new("lpcli", "SECRET-TOKEN", "SECRET-SECRET");
+        let debug = format!("{creds:?}");
+        assert!(!debug.contains("SECRET"), "leaked via {debug}");
+        assert!(debug.contains("consumer_key"), "msg: {debug}");
+
+        let debug = format!("{:?}", creds.access_token);
+        assert!(!debug.contains("SECRET"), "leaked via {debug}");
+    }
+
+    #[test]
+    fn line_col_counts_lines_and_columns() {
+        assert_eq!(line_col("abc", 0), Some((1, 1)));
+        assert_eq!(line_col("abc", 2), Some((1, 3)));
+        assert_eq!(line_col("a\nbcd", 4), Some((2, 3)));
+        // Offsets past the end clamp to the input length.
+        assert_eq!(line_col("a\n", 99), Some((2, 1)));
+    }
+
+    #[test]
+    fn credentials_serialize_parse_roundtrip() {
+        let creds = Credentials::new("lpcli", "token", "secret");
+        let serialized = serialize_credentials(&creds).unwrap();
+        let parsed = parse_credentials(&serialized).unwrap();
+        assert_eq!(parsed, creds);
+    }
+
+    #[test]
+    fn save_and_load_credentials_file_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.toml");
+        let creds = Credentials::new("lpcli", "token", "secret");
+
+        let serialized = serialize_credentials(&creds).unwrap();
+        save_credentials_to_file(&serialized, &path).unwrap();
+
+        let loaded = load_credentials_from_file(&path).unwrap();
+        assert_eq!(loaded, creds);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_credentials_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.toml");
+        let creds = Credentials::new("lpcli", "token", "secret");
+        let serialized = serialize_credentials(&creds).unwrap();
+        save_credentials_to_file(&serialized, &path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn delete_credentials_file_missing_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.toml");
+        assert!(delete_credentials_file(&path).is_ok());
+    }
+
+    #[test]
+    fn delete_credentials_file_removes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.toml");
+        std::fs::write(&path, "test").unwrap();
+        assert!(delete_credentials_file(&path).is_ok());
+        assert!(!path.exists());
     }
 
     #[test]

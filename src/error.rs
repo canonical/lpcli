@@ -47,6 +47,10 @@ pub enum LpError {
     #[error("OAuth error: {0}")]
     OAuth(String),
 
+    /// An operating-system keyring error occurred.
+    #[error("Keyring error: {0}")]
+    Keyring(String),
+
     /// An I/O error (e.g. reading/writing the credential file).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -133,6 +137,12 @@ mod tests {
     fn oauth_error_display() {
         let err = LpError::OAuth("invalid token".to_string());
         assert!(err.to_string().contains("invalid token"));
+    }
+
+    #[test]
+    fn keyring_error_display() {
+        let err = LpError::Keyring("secret service unavailable".to_string());
+        assert!(err.to_string().contains("secret service unavailable"));
     }
 
     #[test]
