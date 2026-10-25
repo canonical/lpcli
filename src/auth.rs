@@ -123,8 +123,48 @@ pub fn credentials_path() -> Result<PathBuf> {
 }
 
 /// Return the OS keyring entry used to store lpcli credentials.
-fn keyring_entry() -> keyring::Result<keyring::Entry> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+///
+/// The platform-specific credential store is initialized lazily on first use.
+/// If the platform has no usable keyring, the initialization failure is
+/// reported as [`keyring_core::Error::NoDefaultStore`] so callers fall back to
+/// the plaintext file.
+fn keyring_entry() -> keyring_core::Result<keyring_core::Entry> {
+    static INIT: std::sync::OnceLock<std::result::Result<(), String>> = std::sync::OnceLock::new();
+
+    match INIT.get_or_init(init_keyring_store) {
+        Ok(()) => keyring_core::Entry::new(KEYRING_SERVICE, KEYRING_USER),
+        Err(_) => Err(keyring_core::Error::NoDefaultStore),
+    }
+}
+
+/// Initialize the platform-specific default credential store.
+fn init_keyring_store() -> std::result::Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let store = dbus_secret_service_keyring_store::Store::new().map_err(|e| e.to_string())?;
+        keyring_core::set_default_store(store);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let store =
+            apple_native_keyring_store::keychain::Store::new().map_err(|e| e.to_string())?;
+        keyring_core::set_default_store(store);
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let store = windows_native_keyring_store::Store::new().map_err(|e| e.to_string())?;
+        keyring_core::set_default_store(store);
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        Err("no OS keyring backend is available for this platform".to_string())
+    }
 }
 
 /// Load credentials, preferring the OS keyring and falling back to the
@@ -167,7 +207,7 @@ fn load_from_keyring() -> Result<Option<Credentials>> {
     let entry = keyring_entry().map_err(|e| LpError::Keyring(e.to_string()))?;
     match entry.get_password() {
         Ok(raw) => parse_credentials(&raw).map(Some),
-        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(keyring_core::Error::NoEntry) => Ok(None),
         Err(e) => Err(LpError::Keyring(e.to_string())),
     }
 }
@@ -280,15 +320,15 @@ pub fn delete_credentials() -> Result<()> {
 
     match keyring_result {
         Ok(())
-        | Err(keyring::Error::NoEntry)
-        | Err(keyring::Error::NoDefaultStore)
-        | Err(keyring::Error::NotSupportedByStore(_)) => file_result,
+        | Err(keyring_core::Error::NoEntry)
+        | Err(keyring_core::Error::NoDefaultStore)
+        | Err(keyring_core::Error::NotSupportedByStore(_)) => file_result,
         Err(e) => Err(LpError::Keyring(e.to_string())),
     }
 }
 
 /// Delete the lpcli entry from the OS keyring.
-fn delete_from_keyring() -> keyring::Result<()> {
+fn delete_from_keyring() -> keyring_core::Result<()> {
     keyring_entry()?.delete_credential()
 }
 

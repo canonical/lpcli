@@ -25,11 +25,13 @@ applications can build on the same type-safe API wrappers.
 
 ## Requirements
 
-- Rust 1.88+ (edition 2024)
+- Rust 1.93
 - Ubuntu Linux (or any Linux distribution with OpenSSL available)
-- A Secret Service provider (e.g. GNOME Keyring or KWallet) is recommended for
-  secure credential storage. Without one, lpcli falls back to
-  `~/.config/lpcli/credentials.toml`.
+- A Secret Service provider (e.g. GNOME Secret Service or KWallet) is
+  recommended for secure credential storage. On Linux the credentials backend
+  uses the D-Bus Secret Service API and vendors libdbus, so no system
+  `libdbus-1-dev` package is required. Without a usable Secret Service, lpcli
+  falls back to `~/.config/lpcli/credentials.toml`.
 
 ## Installation
 

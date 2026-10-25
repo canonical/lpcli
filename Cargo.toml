@@ -1,6 +1,6 @@
 [package]
 name = "lpcli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A command-line client for Launchpad.net"
 license = "GPL-3.0-or-later"
@@ -40,7 +40,7 @@ rand = "0.10"
 hex = "0.4"
 
 # OS keyring (Secret Service / Keychain / Credential Manager)
-keyring = "4"
+keyring-core = "1"
 
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
@@ -64,6 +64,18 @@ colored = "3"
 comfy-table = "8"
 indicatif = "0.18"
 unit-prefix = "0.5.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# D-Bus Secret Service backend.  This deliberately avoids the zbus-based
+# backend, whose zbus 5 dependency pulls in the unmaintained `zvariant`,
+# `zbus_names`, and `zvariant_derive` crates (RUSTSEC-2026-0370/0371/0372).
+dbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust", "vendored"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1"
 
 [dev-dependencies]
 tokio-test = "0.4"
