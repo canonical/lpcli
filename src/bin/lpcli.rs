@@ -2,9 +2,12 @@
 //!
 //! Parse command-line arguments with `clap` and dispatch to the `lpcli` library.
 
+use std::str::FromStr;
+
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
+use ubuntu_info_rust::{Architecture, Pocket, SeriesInfo};
 
 use lpcli::{
     access_tokens, auth,
@@ -18,6 +21,234 @@ use lpcli::{
     queue::{self, QueueSearchParams},
     snaps, specifications, status, translations, webhooks,
 };
+
+// ---------------------------------------------------------------------------
+// Ubuntu series and pocket argument parsing
+// ---------------------------------------------------------------------------
+
+/// Validate a comma-separated list of Ubuntu series arguments.
+fn validate_ubuntu_series_list(value: &str) -> Result<(), String> {
+    for part in value.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        validate_ubuntu_series(part)?;
+    }
+    Ok(())
+}
+
+/// Parse an Ubuntu archive pocket argument for clap.
+///
+/// Matching is case-insensitive so existing values such as `Release` and
+/// `Security` continue to work.
+fn parse_pocket(s: &str) -> Result<Pocket, String> {
+    Pocket::from_str(&s.trim().to_ascii_lowercase()).map_err(|_| {
+        let valid: Vec<&str> = Pocket::ALL.iter().map(|pocket| pocket.as_str()).collect();
+        format!(
+            "invalid Ubuntu archive pocket '{s}'; valid pockets are: {}",
+            valid.join(", ")
+        )
+    })
+}
+
+/// Return the Launchpad API spelling of a pocket (e.g. `Release`).
+fn pocket_launchpad_name(pocket: Pocket) -> &'static str {
+    match pocket {
+        Pocket::Release => "Release",
+        Pocket::Security => "Security",
+        Pocket::Updates => "Updates",
+        Pocket::Proposed => "Proposed",
+        Pocket::Backports => "Backports",
+    }
+}
+
+/// A package architecture accepted by the upload-queue commands.
+///
+/// In addition to the machine architectures defined by `ubuntu-info-rust`,
+/// Launchpad's upload queue uses the special values `source` and `all`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueueArch {
+    /// Source package files.
+    Source,
+    /// Architecture-independent binary packages.
+    All,
+    /// A machine architecture.
+    Arch(Architecture),
+}
+
+impl QueueArch {
+    /// Return the canonical identifier used by Launchpad.
+    fn as_str(self) -> &'static str {
+        match self {
+            QueueArch::Source => "source",
+            QueueArch::All => "all",
+            QueueArch::Arch(arch) => arch.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for QueueArch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for QueueArch {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let value = s.trim();
+        if value.eq_ignore_ascii_case("source") {
+            return Ok(QueueArch::Source);
+        }
+        if value.eq_ignore_ascii_case("all") {
+            return Ok(QueueArch::All);
+        }
+        Architecture::from_str(&value.to_ascii_lowercase())
+            .map(QueueArch::Arch)
+            .map_err(|_| invalid_arch_error(value))
+    }
+}
+
+/// Parse an upload-queue architecture argument for clap.
+fn parse_queue_arch(s: &str) -> Result<QueueArch, String> {
+    s.parse()
+}
+
+/// Build a helpful error message for an unknown architecture.
+fn invalid_arch_error(value: &str) -> String {
+    let mut valid: Vec<&str> = vec!["source", "all"];
+    valid.extend(Architecture::ALL.iter().map(|arch| arch.as_str()));
+    format!(
+        "invalid Ubuntu architecture '{value}'; valid architectures are: {}",
+        valid.join(", ")
+    )
+}
+
+/// Look up an Ubuntu series by short code name, full code name, or version.
+fn lookup_ubuntu_series(value: &str) -> Option<&'static SeriesInfo> {
+    let value = value.trim();
+    SeriesInfo::from_short_name(value)
+        .or_else(|| SeriesInfo::from_code_name(value))
+        .or_else(|| SeriesInfo::from_version(value))
+}
+
+/// Build a helpful error message for an unknown Ubuntu series.
+fn invalid_series_error(value: &str) -> String {
+    let valid: Vec<&str> = SeriesInfo::all()
+        .map(|series| series.code_name_short)
+        .collect();
+    format!(
+        "invalid Ubuntu series '{value}'; valid series are: {}",
+        valid.join(", ")
+    )
+}
+
+/// Validate an Ubuntu series argument.
+fn validate_ubuntu_series(value: &str) -> Result<(), String> {
+    lookup_ubuntu_series(value)
+        .map(|_| ())
+        .ok_or_else(|| invalid_series_error(value))
+}
+
+/// Validate a series argument when the target distribution is Ubuntu.
+fn validate_series_for_target(target: &str, series: Option<&str>) -> Result<(), String> {
+    if target.eq_ignore_ascii_case("ubuntu")
+        && let Some(series) = series
+    {
+        validate_ubuntu_series(series)?;
+    }
+    Ok(())
+}
+
+/// Validate a comma-separated series list when the target distribution is Ubuntu.
+fn validate_series_list_for_target(target: &str, series: Option<&str>) -> Result<(), String> {
+    if target.eq_ignore_ascii_case("ubuntu")
+        && let Some(series) = series
+    {
+        validate_ubuntu_series_list(series)?;
+    }
+    Ok(())
+}
+
+/// Validate a series filter for a bug task operation.
+///
+/// Bug tasks can target non-Ubuntu distributions, so series names are only
+/// validated when the target is explicitly `ubuntu`.
+fn validate_bug_series(
+    target: &str,
+    series: Option<&str>,
+    many_series: Option<&str>,
+) -> Result<(), String> {
+    validate_series_for_target(target, series)?;
+    validate_series_list_for_target(target, many_series)
+}
+
+/// Validate a series argument when the target distribution is Ubuntu.
+///
+/// Other Launchpad distributions use their own series names, so their series
+/// arguments are left untouched.
+fn validate_series_for_distro(distro: &str, series: &str) -> Result<(), String> {
+    if distro.eq_ignore_ascii_case("ubuntu") {
+        validate_ubuntu_series(series)?;
+    }
+    Ok(())
+}
+
+/// Validate an optional series argument when the target distribution is Ubuntu.
+fn validate_optional_series_for_distro(distro: &str, series: Option<&str>) -> Result<(), String> {
+    if let Some(series) = series {
+        validate_series_for_distro(distro, series)?;
+    }
+    Ok(())
+}
+
+/// Canonicalise a series argument to its short code name for Ubuntu.
+///
+/// Non-Ubuntu distributions keep the original value because their series names
+/// are not part of the Ubuntu series data.
+fn canonical_series<'a>(distro: &str, series: &'a str) -> &'a str {
+    if distro.eq_ignore_ascii_case("ubuntu")
+        && let Some(info) = lookup_ubuntu_series(series)
+    {
+        return info.code_name_short;
+    }
+    series
+}
+
+/// Canonicalise a comma-separated series list to short code names for Ubuntu.
+///
+/// Non-Ubuntu distributions keep the original value.
+fn canonical_series_list(distro: &str, series: &str) -> String {
+    if distro.eq_ignore_ascii_case("ubuntu") {
+        series
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(|part| canonical_series(distro, part))
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        series.to_string()
+    }
+}
+
+/// Canonicalise bug-task series arguments for the selected target.
+///
+/// Only Ubuntu targets are canonicalised; other distributions keep their
+/// series names unchanged.
+fn canonical_bug_series(
+    target: Option<&str>,
+    series: Option<String>,
+    many_series: Option<String>,
+) -> (Option<String>, Option<String>) {
+    let target = target.unwrap_or("");
+    (
+        series.map(|s| canonical_series(target, &s).to_string()),
+        many_series.map(|m| canonical_series_list(target, &m)),
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Top-level CLI structure
@@ -722,8 +953,8 @@ enum PackageCommand {
         #[arg(short, long)]
         version: Option<String>,
         /// Pocket (e.g. "Release", "Updates", "Security").
-        #[arg(short, long)]
-        pocket: Option<String>,
+        #[arg(short, long, value_parser = parse_pocket)]
+        pocket: Option<Pocket>,
         /// Distribution name (default: "ubuntu").
         #[arg(short, long, default_value = "ubuntu")]
         distro: String,
@@ -1110,8 +1341,8 @@ enum SnapCommand {
         #[arg(short, long)]
         name: String,
         /// Pocket (default: "Release").
-        #[arg(short, long, default_value = "Release")]
-        pocket: String,
+        #[arg(short, long, default_value = "Release", value_parser = parse_pocket)]
+        pocket: Pocket,
         /// Distribution to build against (default: "ubuntu").
         #[arg(short, long, default_value = "ubuntu")]
         distro: String,
@@ -1127,8 +1358,8 @@ enum QueueCommand {
     /// Search packages in build/upload queues for a distro series.
     Search {
         /// Filter by pocket: Release, Security, Updates, Proposed, or Backports.
-        #[arg(short, long)]
-        pocket: Option<String>,
+        #[arg(short, long, value_parser = parse_pocket)]
+        pocket: Option<Pocket>,
         /// Filter by upload status: New, Unapproved, Accepted, Done, or Rejected.
         #[arg(short, long, required = true)]
         status: Option<String>,
@@ -1167,8 +1398,8 @@ enum QueueCommand {
         #[arg(short, long)]
         status: String,
         /// Filter by architecture (e.g. "amd64", "arm64", "source").
-        #[arg(short, long)]
-        arch: String,
+        #[arg(short, long, value_parser = parse_queue_arch)]
+        arch: QueueArch,
         /// Distribution name (default: "ubuntu").
         #[arg(short, long, default_value = "ubuntu")]
         distro: String,
@@ -1191,8 +1422,8 @@ enum QueueCommand {
         #[arg(short, long)]
         status: String,
         /// Filter by architecture (e.g. "amd64", "arm64", "source").
-        #[arg(short, long)]
-        arch: String,
+        #[arg(short, long, value_parser = parse_queue_arch)]
+        arch: QueueArch,
         /// Distribution name (default: "ubuntu").
         #[arg(short, long, default_value = "ubuntu")]
         distro: String,
@@ -1212,8 +1443,8 @@ enum QueueCommand {
         #[arg(short, long, default_value = "New")]
         status: String,
         /// Filter by architecture (e.g. "amd64", "arm64", "source").
-        #[arg(short, long)]
-        arch: String,
+        #[arg(short, long, value_parser = parse_queue_arch)]
+        arch: QueueArch,
         /// Distribution name (default: "ubuntu").
         #[arg(short, long, default_value = "ubuntu")]
         distro: String,
@@ -1233,8 +1464,8 @@ enum QueueCommand {
         #[arg(short, long, default_value = "New")]
         status: String,
         /// Filter by architecture (e.g. "amd64", "arm64", "source").
-        #[arg(short, long)]
-        arch: String,
+        #[arg(short, long, value_parser = parse_queue_arch)]
+        arch: QueueArch,
         /// Rejection comment explaining why the package is being rejected.
         #[arg(short, long)]
         comment: Option<String>,
@@ -1309,8 +1540,68 @@ async fn main() {
     }
 }
 
+/// Validate Ubuntu-specific command-line values that depend on the selected
+/// distribution.
+///
+/// Series names are only validated when the target distribution is Ubuntu,
+/// because other Launchpad distributions use their own series names.
+fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
+    let result = match &cli.command {
+        Command::Bug(cmd) => match cmd {
+            BugCommand::AddTask {
+                target,
+                series,
+                many_series,
+                ..
+            }
+            | BugCommand::DeleteTask {
+                target,
+                series,
+                many_series,
+                ..
+            } => validate_bug_series(target, series.as_deref(), many_series.as_deref()),
+            BugCommand::LinkRemote { target, series, .. }
+            | BugCommand::UnlinkRemote { target, series, .. } => {
+                validate_series_for_target(target.as_deref().unwrap_or(""), series.as_deref())
+            }
+            _ => Ok(()),
+        },
+        Command::Package(cmd) => match cmd {
+            PackageCommand::Series { series, distro } => validate_series_for_distro(distro, series),
+            PackageCommand::Search { series, distro, .. } => {
+                validate_series_for_distro(distro, series)
+            }
+            PackageCommand::Download { series, distro, .. } => {
+                validate_series_for_distro(distro, series)
+            }
+            _ => Ok(()),
+        },
+        Command::Translation(cmd) => match cmd {
+            TranslationCommand::Queue { distro, series }
+            | TranslationCommand::Templates { distro, series } => {
+                validate_series_for_distro(distro, series)
+            }
+        },
+        Command::Queue(cmd) => match cmd {
+            QueueCommand::Search { distro, series, .. }
+            | QueueCommand::Download { distro, series, .. }
+            | QueueCommand::Info { distro, series, .. }
+            | QueueCommand::Accept { distro, series, .. }
+            | QueueCommand::Reject { distro, series, .. } => {
+                validate_optional_series_for_distro(distro, series.as_deref())
+            }
+        },
+        _ => Ok(()),
+    };
+
+    result.map_err(|msg| clap::Error::raw(clap::error::ErrorKind::InvalidValue, msg))
+}
+
 async fn run() -> lpcli::error::Result<()> {
     let cli = Cli::parse();
+    if let Err(e) = validate_cli(&cli) {
+        e.exit();
+    }
 
     match cli.command {
         Command::Status => handle_status().await?,
@@ -1718,6 +2009,8 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             no_series,
             status,
         } => {
+            let (series, many_series) =
+                canonical_bug_series(target.as_deref(), series, many_series);
             let target_filter = TargetFilter::from_args(target, many_targets, all_targets);
             let series_filter = SeriesFilter::from_args(series, many_series, all_series, no_series);
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
@@ -1747,6 +2040,8 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             no_series,
             importance,
         } => {
+            let (series, many_series) =
+                canonical_bug_series(target.as_deref(), series, many_series);
             let target_filter = TargetFilter::from_args(target, many_targets, all_targets);
             let series_filter = SeriesFilter::from_args(series, many_series, all_series, no_series);
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
@@ -1777,6 +2072,8 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             no_series,
             name,
         } => {
+            let (series, many_series) =
+                canonical_bug_series(target.as_deref(), series, many_series);
             let target_filter = TargetFilter::from_args(target, many_targets, all_targets);
             let series_filter = SeriesFilter::from_args(series, many_series, all_series, no_series);
             let assignee_url = client.url(&format!("/~{name}"));
@@ -1868,6 +2165,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 Base,
                 Series(Vec<String>),
             }
+            let (series, many_series) = canonical_bug_series(Some(&target), series, many_series);
             let task_target = match (series, many_series) {
                 (Some(s), _) => TaskTarget::Series(vec![s]),
                 (None, Some(many)) => TaskTarget::Series(parse_comma_separated(&many)),
@@ -2043,6 +2341,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             series,
             many_series,
         } => {
+            let (series, many_series) = canonical_bug_series(Some(&target), series, many_series);
             // The effective target name is the package name when a package is
             // provided, otherwise the distribution/project name — matching how
             // parse_target_link returns the package name (not the distro) for
@@ -2163,6 +2462,8 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             series,
             task_url,
         } => {
+            let series =
+                series.map(|s| canonical_series(target.as_deref().unwrap_or(""), &s).to_string());
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
             let selector = TaskLinkSelector {
                 target: target.clone(),
@@ -2215,6 +2516,8 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             series,
             task_url,
         } => {
+            let series =
+                series.map(|s| canonical_series(target.as_deref().unwrap_or(""), &s).to_string());
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
             let selector = TaskLinkSelector {
                 target: target.clone(),
@@ -2435,7 +2738,8 @@ async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
 
     match cmd {
         PackageCommand::Series { series, distro } => {
-            let s = packages::get_distro_series(&client, &distro, &series).await?;
+            let series_name = canonical_series(&distro, &series);
+            let s = packages::get_distro_series(&client, &distro, series_name).await?;
             println!("{}", s.display_name.as_deref().unwrap_or(&s.name).bold());
             if let Some(v) = &s.version {
                 println!("Version: {v}");
@@ -2470,16 +2774,17 @@ async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
             distro,
             limit,
         } => {
+            let series_name = canonical_series(&distro, &series);
             let params = SourceSearchParams {
                 source_name: name.as_deref(),
                 version: version.as_deref(),
-                pocket: pocket.as_deref(),
+                pocket: pocket.map(pocket_launchpad_name),
                 status: Some("Published"),
                 limit: Some(limit),
                 ..Default::default()
             };
             let pubs =
-                packages::search_published_sources(&client, &distro, &series, &params).await?;
+                packages::search_published_sources(&client, &distro, series_name, &params).await?;
             let mut table = build_table(vec!["Package", "Version", "Component", "Pocket"]);
             for p in &pubs {
                 table.add_row(vec![
@@ -2547,7 +2852,8 @@ async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
             distro,
             output,
         } => {
-            return handle_package_download(name, version, series, distro, output).await;
+            let series_name = canonical_series(&distro, &series).to_string();
+            return handle_package_download(name, version, series_name, distro, output).await;
         }
     }
     Ok(())
@@ -3208,8 +3514,9 @@ async fn handle_translation(cmd: TranslationCommand) -> lpcli::error::Result<()>
 
     match cmd {
         TranslationCommand::Queue { distro, series } => {
+            let series_name = canonical_series(&distro, &series);
             let entries =
-                translations::get_distro_series_import_queue(&client, &distro, &series).await?;
+                translations::get_distro_series_import_queue(&client, &distro, series_name).await?;
             let mut table = build_table(vec!["Path", "Status", "Date"]);
             for e in &entries {
                 let date = e
@@ -3227,8 +3534,9 @@ async fn handle_translation(cmd: TranslationCommand) -> lpcli::error::Result<()>
         }
 
         TranslationCommand::Templates { distro, series } => {
+            let series_name = canonical_series(&distro, &series);
             let templates =
-                translations::get_distro_series_templates(&client, &distro, &series).await?;
+                translations::get_distro_series_templates(&client, &distro, series_name).await?;
             let mut table = build_table(vec!["Name", "Path", "Priority", "Current"]);
             for t in &templates {
                 table.add_row(vec![
@@ -3313,8 +3621,14 @@ async fn handle_snap(cmd: SnapCommand) -> lpcli::error::Result<()> {
             distro,
         } => {
             let archive_url = client.url(&format!("/{distro}/+archive/primary"));
-            let req =
-                snaps::request_snap_builds(&client, &owner, &name, &archive_url, &pocket).await?;
+            let req = snaps::request_snap_builds(
+                &client,
+                &owner,
+                &name,
+                &archive_url,
+                pocket_launchpad_name(pocket),
+            )
+            .await?;
             println!("{} Build request submitted.", "✓".green().bold());
             if let Some(status) = &req.status {
                 println!("Status: {status}");
@@ -3549,7 +3863,7 @@ async fn handle_queue(cmd: QueueCommand) -> lpcli::error::Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_queue_search(
-    pocket: Option<String>,
+    pocket: Option<Pocket>,
     status: Option<String>,
     name: Option<String>,
     version: Option<String>,
@@ -3564,7 +3878,7 @@ async fn handle_queue_search(
     // Determine the series to query. If not provided, resolve the current
     // Ubuntu development series.
     let series_name = match series {
-        Some(s) => s,
+        Some(s) => canonical_series(&distro, &s).to_string(),
         None => queue::get_devel_series_name(&client, &distro).await?,
     };
 
@@ -3583,7 +3897,7 @@ async fn handle_queue_search(
     });
 
     let params = QueueSearchParams {
-        pocket: pocket.as_deref(),
+        pocket: pocket.map(pocket_launchpad_name),
         status: status.as_deref(),
         name: name.as_deref(),
         version: version.as_deref(),
@@ -3662,7 +3976,7 @@ async fn handle_queue_download(
     name: String,
     version: Option<String>,
     status: String,
-    arch: String,
+    arch: QueueArch,
     distro: String,
     series: Option<String>,
     output: String,
@@ -3671,7 +3985,7 @@ async fn handle_queue_download(
 
     // Resolve the series (default: current development series).
     let series_name = match series {
-        Some(s) => s,
+        Some(s) => canonical_series(&distro, &s).to_string(),
         None => queue::get_devel_series_name(&client, &distro).await?,
     };
 
@@ -3695,7 +4009,7 @@ async fn handle_queue_download(
             .as_deref()
             .unwrap_or("")
             .split(',')
-            .any(|a| a.trim().eq_ignore_ascii_case(&arch))
+            .any(|a| a.trim().eq_ignore_ascii_case(arch.as_str()))
     });
 
     let upload = upload.ok_or_else(|| {
@@ -3798,7 +4112,7 @@ async fn handle_queue_accept(
     name: String,
     version: Option<String>,
     status: String,
-    arch: String,
+    arch: QueueArch,
     distro: String,
     series: Option<String>,
 ) -> lpcli::error::Result<()> {
@@ -3806,7 +4120,7 @@ async fn handle_queue_accept(
 
     // Resolve the series (default: current development series).
     let series_name = match series {
-        Some(s) => s,
+        Some(s) => canonical_series(&distro, &s).to_string(),
         None => queue::get_devel_series_name(&client, &distro).await?,
     };
 
@@ -3830,7 +4144,7 @@ async fn handle_queue_accept(
                 .as_deref()
                 .unwrap_or("")
                 .split(',')
-                .any(|a| a.trim().eq_ignore_ascii_case(&arch))
+                .any(|a| a.trim().eq_ignore_ascii_case(arch.as_str()))
         })
         .collect();
 
@@ -3917,7 +4231,7 @@ async fn handle_queue_reject(
     name: String,
     version: Option<String>,
     status: String,
-    arch: String,
+    arch: QueueArch,
     comment: Option<String>,
     distro: String,
     series: Option<String>,
@@ -3926,7 +4240,7 @@ async fn handle_queue_reject(
 
     // Resolve the series (default: current development series).
     let series_name = match series {
-        Some(s) => s,
+        Some(s) => canonical_series(&distro, &s).to_string(),
         None => queue::get_devel_series_name(&client, &distro).await?,
     };
 
@@ -3950,7 +4264,7 @@ async fn handle_queue_reject(
                 .as_deref()
                 .unwrap_or("")
                 .split(',')
-                .any(|a| a.trim().eq_ignore_ascii_case(&arch))
+                .any(|a| a.trim().eq_ignore_ascii_case(arch.as_str()))
         })
         .collect();
 
@@ -4039,7 +4353,7 @@ async fn handle_queue_info(
     name: String,
     version: Option<String>,
     status: String,
-    arch: String,
+    arch: QueueArch,
     distro: String,
     series: Option<String>,
 ) -> lpcli::error::Result<()> {
@@ -4047,7 +4361,7 @@ async fn handle_queue_info(
 
     // Resolve the series (default: current development series).
     let series_name = match series {
-        Some(s) => s,
+        Some(s) => canonical_series(&distro, &s).to_string(),
         None => queue::get_devel_series_name(&client, &distro).await?,
     };
 
@@ -4070,7 +4384,7 @@ async fn handle_queue_info(
             .as_deref()
             .unwrap_or("")
             .split(',')
-            .any(|a| a.trim().eq_ignore_ascii_case(&arch))
+            .any(|a| a.trim().eq_ignore_ascii_case(arch.as_str()))
     });
 
     let upload = upload.ok_or_else(|| {
