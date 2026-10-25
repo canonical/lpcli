@@ -15,7 +15,8 @@ applications can build on the same type-safe API wrappers.
   specs (blueprints), questions, webhooks, translations, snap recipes, package
   upload queues, and access tokens.
 - **OAuth 1.0a authentication** — securely log in once; credentials are stored in
-  `~/.config/lpcli/credentials.toml`.
+  the operating system keyring (Secret Service, Keychain, or Credential Manager),
+  with a plaintext file fallback when no keyring is available.
 - **Rich terminal output** — coloured text and formatted tables via
   [`colored`](https://crates.io/crates/colored) and
   [`comfy-table`](https://crates.io/crates/comfy-table).
@@ -24,8 +25,13 @@ applications can build on the same type-safe API wrappers.
 
 ## Requirements
 
-- Rust 1.88+ (edition 2024)
+- Rust 1.93
 - Ubuntu Linux (or any Linux distribution with OpenSSL available)
+- A Secret Service provider (e.g. GNOME Secret Service or KWallet) is
+  recommended for secure credential storage. On Linux the credentials backend
+  uses the D-Bus Secret Service API and vendors libdbus, so no system
+  `libdbus-1-dev` package is required. Without a usable Secret Service, lpcli
+  falls back to `~/.config/lpcli/credentials.toml`.
 
 ## Installation
 
@@ -54,8 +60,9 @@ lpcli login
 ```
 
 This starts the OAuth flow. Your browser will be opened to the Launchpad authorisation
-page. After granting access, your credentials are saved to
-`~/.config/lpcli/credentials.toml` for future use.
+page. After granting access, your credentials are saved to the operating system
+keyring for future use. If no keyring is available, lpcli falls back to
+`~/.config/lpcli/credentials.toml`.
 
 To verify authentication and check connectivity:
 
