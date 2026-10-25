@@ -85,6 +85,361 @@ fn parse_comma_separated_ignores_empty_segments() {
 }
 
 // -----------------------------------------------------------------------
+// Ubuntu series and pocket parsing
+// -----------------------------------------------------------------------
+
+#[test]
+fn validate_ubuntu_series_accepts_code_name_and_version() {
+    assert!(validate_ubuntu_series("noble").is_ok());
+    assert!(validate_ubuntu_series("Noble Numbat").is_ok());
+    assert!(validate_ubuntu_series("24.04").is_ok());
+    assert!(validate_ubuntu_series("devel").is_ok());
+}
+
+#[test]
+fn validate_ubuntu_series_rejects_unknown_series() {
+    let err = validate_ubuntu_series("not-a-series").unwrap_err();
+    assert!(err.contains("not-a-series"), "err: {err}");
+    assert!(err.contains("noble"), "err: {err}");
+}
+
+#[test]
+fn validate_ubuntu_series_list_trims_and_skips_empty_entries() {
+    assert!(validate_ubuntu_series_list("  noble  ,, jammy , ").is_ok());
+    assert!(validate_ubuntu_series_list("Noble Numbat, 24.04").is_ok());
+    assert!(validate_ubuntu_series_list("noble, not-a-series").is_err());
+}
+
+#[test]
+fn pocket_parser_is_case_insensitive() {
+    assert_eq!(parse_pocket("Security").unwrap(), Pocket::Security);
+    assert_eq!(parse_pocket("security").unwrap(), Pocket::Security);
+    assert_eq!(parse_pocket("SECURITY").unwrap(), Pocket::Security);
+}
+
+#[test]
+fn pocket_parser_rejects_invalid_pocket() {
+    let err = parse_pocket("testing").unwrap_err();
+    assert!(err.contains("testing"), "err: {err}");
+    assert!(err.contains("release"), "err: {err}");
+}
+
+#[test]
+fn pocket_launchpad_names_are_capitalised() {
+    assert_eq!(pocket_launchpad_name(Pocket::Release), "Release");
+    assert_eq!(pocket_launchpad_name(Pocket::Security), "Security");
+    assert_eq!(pocket_launchpad_name(Pocket::Updates), "Updates");
+    assert_eq!(pocket_launchpad_name(Pocket::Proposed), "Proposed");
+    assert_eq!(pocket_launchpad_name(Pocket::Backports), "Backports");
+}
+
+#[test]
+fn queue_arch_parser_accepts_architectures() {
+    assert_eq!(
+        parse_queue_arch("amd64").unwrap(),
+        QueueArch::Arch(Architecture::Amd64)
+    );
+    assert_eq!(
+        parse_queue_arch("ARM64").unwrap(),
+        QueueArch::Arch(Architecture::Arm64)
+    );
+    assert_eq!(
+        parse_queue_arch("riscv64").unwrap(),
+        QueueArch::Arch(Architecture::Riscv64)
+    );
+}
+
+#[test]
+fn queue_arch_parser_accepts_special_values() {
+    assert_eq!(parse_queue_arch("source").unwrap(), QueueArch::Source);
+    assert_eq!(parse_queue_arch("SOURCE").unwrap(), QueueArch::Source);
+    assert_eq!(parse_queue_arch("all").unwrap(), QueueArch::All);
+    assert_eq!(parse_queue_arch("ALL").unwrap(), QueueArch::All);
+}
+
+#[test]
+fn queue_arch_parser_rejects_unknown_arch() {
+    let err = parse_queue_arch("not-an-arch").unwrap_err();
+    assert!(err.contains("not-an-arch"), "err: {err}");
+    assert!(err.contains("amd64"), "err: {err}");
+    assert!(err.contains("source"), "err: {err}");
+}
+
+#[test]
+fn queue_arch_display_is_canonical() {
+    assert_eq!(QueueArch::Source.to_string(), "source");
+    assert_eq!(QueueArch::All.to_string(), "all");
+    assert_eq!(QueueArch::Arch(Architecture::Amd64).to_string(), "amd64");
+}
+
+#[test]
+fn cli_rejects_invalid_arch() {
+    let result = Cli::try_parse_from([
+        "lpcli",
+        "queue",
+        "download",
+        "--name",
+        "curl",
+        "--status",
+        "New",
+        "--arch",
+        "not-an-arch",
+    ]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn cli_accepts_valid_arch() {
+    let cli = Cli::try_parse_from([
+        "lpcli", "queue", "download", "--name", "curl", "--status", "New", "--arch", "amd64",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Queue(QueueCommand::Download { arch, .. }) => {
+            assert_eq!(arch, QueueArch::Arch(Architecture::Amd64));
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
+fn canonical_series_uses_short_name_for_ubuntu() {
+    assert_eq!(canonical_series("ubuntu", "Noble Numbat"), "noble");
+    assert_eq!(canonical_series("Ubuntu", "24.04"), "noble");
+}
+
+#[test]
+fn canonical_series_preserves_non_ubuntu_series() {
+    assert_eq!(canonical_series("debian", "bookworm"), "bookworm");
+    assert_eq!(canonical_series("debian", "Noble Numbat"), "Noble Numbat");
+}
+
+#[test]
+fn canonical_series_list_normalises_ubuntu_series() {
+    assert_eq!(
+        canonical_series_list("ubuntu", "  Noble  ,, jammy , "),
+        "noble, jammy"
+    );
+    assert_eq!(
+        canonical_series_list("debian", "  bookworm  ,, trixie , "),
+        "  bookworm  ,, trixie , "
+    );
+}
+
+#[test]
+fn canonical_bug_series_normalises_ubuntu_target() {
+    let (series, many) = canonical_bug_series(
+        Some("ubuntu"),
+        Some("Noble".to_string()),
+        Some("  Noble  ,, jammy , ".to_string()),
+    );
+    assert_eq!(series.as_deref(), Some("noble"));
+    assert_eq!(many.as_deref(), Some("noble, jammy"));
+}
+
+#[test]
+fn canonical_bug_series_preserves_non_ubuntu_target() {
+    let (series, many) = canonical_bug_series(
+        Some("debian"),
+        Some("Bookworm".to_string()),
+        Some("  bookworm  ,, trixie , ".to_string()),
+    );
+    assert_eq!(series.as_deref(), Some("Bookworm"));
+    assert_eq!(many.as_deref(), Some("  bookworm  ,, trixie , "));
+}
+
+#[test]
+fn validate_series_for_distro_rejects_invalid_ubuntu_series() {
+    assert!(validate_series_for_distro("ubuntu", "not-a-series").is_err());
+    assert!(validate_series_for_distro("debian", "not-a-series").is_ok());
+}
+
+#[test]
+fn cli_rejects_invalid_pocket() {
+    let result = Cli::try_parse_from([
+        "lpcli", "package", "search", "--series", "noble", "--pocket", "testing",
+    ]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn cli_accepts_case_insensitive_pocket() {
+    let cli = Cli::try_parse_from([
+        "lpcli", "package", "search", "--series", "noble", "--pocket", "Release",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Package(PackageCommand::Search { pocket, .. }) => {
+            assert_eq!(pocket, Some(Pocket::Release));
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
+fn validate_cli_rejects_invalid_ubuntu_series_for_package() {
+    let cli =
+        Cli::try_parse_from(["lpcli", "package", "series", "--series", "not-a-series"]).unwrap();
+    assert!(validate_cli(&cli).is_err());
+}
+
+#[test]
+fn validate_cli_allows_non_ubuntu_series_for_package() {
+    let cli = Cli::try_parse_from([
+        "lpcli", "package", "series", "--series", "bookworm", "--distro", "debian",
+    ])
+    .unwrap();
+    assert!(validate_cli(&cli).is_ok());
+}
+
+#[test]
+fn validate_cli_rejects_invalid_ubuntu_series_for_queue() {
+    let cli = Cli::try_parse_from([
+        "lpcli",
+        "queue",
+        "search",
+        "--status",
+        "New",
+        "--series",
+        "not-a-series",
+    ])
+    .unwrap();
+    assert!(validate_cli(&cli).is_err());
+}
+
+#[test]
+fn validate_cli_allows_non_ubuntu_series_for_queue() {
+    let cli = Cli::try_parse_from([
+        "lpcli", "queue", "search", "--status", "New", "--series", "bookworm", "--distro", "debian",
+    ])
+    .unwrap();
+    assert!(validate_cli(&cli).is_ok());
+}
+
+#[test]
+fn validate_cli_rejects_invalid_ubuntu_series_for_add_task() {
+    let cli = Cli::try_parse_from([
+        "lpcli",
+        "bug",
+        "add-task",
+        "--bug-id",
+        "1",
+        "--series",
+        "not-a-series",
+    ])
+    .unwrap();
+    assert!(validate_cli(&cli).is_err());
+}
+
+#[test]
+fn validate_cli_allows_full_series_names_for_add_task() {
+    let cli = Cli::try_parse_from([
+        "lpcli",
+        "bug",
+        "add-task",
+        "--bug-id",
+        "1",
+        "--series",
+        "Noble Numbat",
+    ])
+    .unwrap();
+    assert!(validate_cli(&cli).is_ok());
+}
+
+#[test]
+fn validate_cli_allows_non_ubuntu_series_for_add_task() {
+    let cli = Cli::try_parse_from([
+        "lpcli", "bug", "add-task", "--bug-id", "1", "--target", "debian", "--series", "bookworm",
+    ])
+    .unwrap();
+    assert!(validate_cli(&cli).is_ok());
+}
+
+#[test]
+fn validate_cli_rejects_invalid_ubuntu_series_for_link_remote() {
+    let cli = Cli::try_parse_from([
+        "lpcli",
+        "bug",
+        "link-remote",
+        "--bug-id",
+        "1",
+        "--bug-tracker",
+        "debbugs",
+        "--remote-bug",
+        "1",
+        "--target",
+        "ubuntu",
+        "--series",
+        "not-a-series",
+    ])
+    .unwrap();
+    assert!(validate_cli(&cli).is_err());
+}
+
+#[test]
+fn validate_cli_allows_full_series_names_for_link_remote() {
+    let cli = Cli::try_parse_from([
+        "lpcli",
+        "bug",
+        "link-remote",
+        "--bug-id",
+        "1",
+        "--bug-tracker",
+        "debbugs",
+        "--remote-bug",
+        "1",
+        "--target",
+        "ubuntu",
+        "--series",
+        "Noble Numbat",
+    ])
+    .unwrap();
+    assert!(validate_cli(&cli).is_ok());
+}
+
+#[test]
+fn validate_cli_allows_non_ubuntu_series_for_link_remote() {
+    let cli = Cli::try_parse_from([
+        "lpcli",
+        "bug",
+        "link-remote",
+        "--bug-id",
+        "1",
+        "--bug-tracker",
+        "debbugs",
+        "--remote-bug",
+        "1",
+        "--target",
+        "debian",
+        "--series",
+        "bookworm",
+    ])
+    .unwrap();
+    assert!(validate_cli(&cli).is_ok());
+}
+
+#[test]
+fn validate_cli_does_not_validate_ambiguous_bug_series() {
+    // The target is a package name, so the series could belong to any
+    // distribution. Validation is intentionally skipped here.
+    let cli = Cli::try_parse_from([
+        "lpcli",
+        "bug",
+        "set-status",
+        "--bug-id",
+        "1",
+        "--target",
+        "curl",
+        "--series",
+        "bookworm",
+        "--status",
+        "new",
+    ])
+    .unwrap();
+    assert!(validate_cli(&cli).is_ok());
+}
+
+// -----------------------------------------------------------------------
 // TargetFilter::from_args
 // -----------------------------------------------------------------------
 
