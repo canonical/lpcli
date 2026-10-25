@@ -56,6 +56,9 @@ percent-encoding = "2"
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
+# Ubuntu distribution information (series, pockets, components, architectures)
+ubuntu-info-rust = "0.3"
+
 # MIME type detection for file uploads
 mime_guess = "2"
 
