@@ -1,6 +1,6 @@
 [package]
 name = "lpcli"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "A command-line client for Launchpad.net"
 license = "GPL-3.0-or-later"
