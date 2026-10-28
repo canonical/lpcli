@@ -2,7 +2,9 @@
 //!
 //! [`LaunchpadClient`] wraps a [`reqwest::Client`] and is responsible for:
 //!
-//! * Attaching OAuth 1.0a `Authorization` headers to every authenticated request.
+//! * Attaching OAuth 1.0a `Authorization` headers to every authenticated request,
+//!   using either stored credentials or short-lived access tokens minted from a
+//!   hardware-bound grant (see [`crate::hardware_tokens`]).
 //! * Sending GET and POST requests to the Launchpad REST API.
 //! * Deserialising JSON responses into domain types.
 //! * Translating HTTP errors into [`LpError`] values.
@@ -21,9 +23,11 @@
 //! ```
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::auth::{self, Credentials};
 use crate::error::{LpError, Result};
+use crate::hardware_tokens::HardwareTokenSession;
 use reqwest::{StatusCode, header::LOCATION};
 use serde::de::DeserializeOwned;
 
@@ -43,6 +47,9 @@ pub const API_BASE: &str = "https://api.launchpad.net/devel";
 pub struct LaunchpadClient {
     http: reqwest::Client,
     credentials: Option<Credentials>,
+    /// A hardware-bound session; when set it signs requests instead of
+    /// `credentials`.
+    hardware: Option<Arc<HardwareTokenSession>>,
     /// Override the API base URL (useful in tests).
     base_url: String,
     /// Maximum number of retry attempts for 429 and 5xx responses.
@@ -65,10 +72,30 @@ impl LaunchpadClient {
                 .build()
                 .expect("Failed to build HTTP client"),
             credentials,
+            hardware: None,
             base_url: API_BASE.to_string(),
             max_retries: 0,
             initial_retry_delay_ms: 1_000,
         }
+    }
+
+    /// Create a client that signs requests with short-lived access tokens
+    /// minted from a hardware-bound grant.
+    ///
+    /// The first signed request mints a token, which needs a touch of the
+    /// security key; later requests reuse it until shortly before it
+    /// expires.  Requests to hosts other than the API host are sent without
+    /// an `Authorization` header.
+    pub fn with_hardware_token(session: Arc<HardwareTokenSession>) -> Self {
+        Self {
+            hardware: Some(session),
+            ..Self::new(None)
+        }
+    }
+
+    /// Whether this client signs requests with a hardware-bound session.
+    pub fn is_hardware_bound(&self) -> bool {
+        self.hardware.is_some()
     }
 
     /// Override the base URL (used in integration tests with a mock server).
@@ -116,11 +143,22 @@ impl LaunchpadClient {
     }
 
     /// Perform an authenticated GET request against an absolute URL.
+    ///
+    /// With a hardware-bound session, a request rejected because its access
+    /// token expired or was revoked is retried once with a new token.  Only
+    /// safe (GET) requests are retried, since repeating others could
+    /// duplicate their effects.
     pub async fn get_url<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
+        match self.get_url_once(url).await {
+            Err(e) if self.hardware_token_rejected(&e) => self.get_url_once(url).await,
+            result => result,
+        }
+    }
+
+    async fn get_url_once<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
         let mut req = self.http.get(url).header("Accept", "application/json");
 
-        if let Some(creds) = &self.credentials {
-            let auth_header = auth::build_auth_header(creds)?;
+        if let Some(auth_header) = self.authorization(url).await? {
             req = req.header("Authorization", auth_header);
         }
 
@@ -195,8 +233,7 @@ impl LaunchpadClient {
             .header("Accept", "application/json")
             .form(params);
 
-        if let Some(creds) = &self.credentials {
-            let auth_header = auth::build_auth_header(creds)?;
+        if let Some(auth_header) = self.authorization(url).await? {
             req = req.header("Authorization", auth_header);
         }
 
@@ -222,8 +259,7 @@ impl LaunchpadClient {
             .header("Accept", "application/json")
             .json(params);
 
-        if let Some(creds) = &self.credentials {
-            let auth_header = auth::build_auth_header(creds)?;
+        if let Some(auth_header) = self.authorization(url).await? {
             req = req.header("Authorization", auth_header);
         }
 
@@ -249,8 +285,7 @@ impl LaunchpadClient {
             .header("Accept", "application/json")
             .json(body);
 
-        if let Some(creds) = &self.credentials {
-            let auth_header = auth::build_auth_header(creds)?;
+        if let Some(auth_header) = self.authorization(url).await? {
             req = req.header("Authorization", auth_header);
         }
 
@@ -272,8 +307,7 @@ impl LaunchpadClient {
             .header("Accept", "application/json")
             .form(params);
 
-        if let Some(creds) = &self.credentials {
-            let auth_header = auth::build_auth_header(creds)?;
+        if let Some(auth_header) = self.authorization(&url).await? {
             req = req.header("Authorization", auth_header);
         }
 
@@ -290,8 +324,7 @@ impl LaunchpadClient {
             .header("Accept", "application/json")
             .form(params);
 
-        if let Some(creds) = &self.credentials {
-            let auth_header = auth::build_auth_header(creds)?;
+        if let Some(auth_header) = self.authorization(url).await? {
             req = req.header("Authorization", auth_header);
         }
 
@@ -326,8 +359,7 @@ impl LaunchpadClient {
             .header("Accept", "application/json")
             .form(params);
 
-        if let Some(creds) = &self.credentials {
-            let auth_header = auth::build_auth_header(creds)?;
+        if let Some(auth_header) = self.authorization(url).await? {
             req = req.header("Authorization", auth_header);
         }
 
@@ -339,8 +371,7 @@ impl LaunchpadClient {
     pub async fn delete_url_ok(&self, url: &str) -> Result<()> {
         let mut req = self.http.delete(url).header("Accept", "application/json");
 
-        if let Some(creds) = &self.credentials {
-            let auth_header = auth::build_auth_header(creds)?;
+        if let Some(auth_header) = self.authorization(url).await? {
             req = req.header("Authorization", auth_header);
         }
 
@@ -374,8 +405,7 @@ impl LaunchpadClient {
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body);
 
-        if let Some(creds) = &self.credentials {
-            let auth_header = auth::build_auth_header(creds)?;
+        if let Some(auth_header) = self.authorization(url).await? {
             req = req.header("Authorization", auth_header);
         }
 
@@ -410,8 +440,7 @@ impl LaunchpadClient {
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body);
 
-        if let Some(creds) = &self.credentials {
-            let auth_header = auth::build_auth_header(creds)?;
+        if let Some(auth_header) = self.authorization(url).await? {
             req = req.header("Authorization", auth_header);
         }
 
@@ -434,13 +463,78 @@ impl LaunchpadClient {
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body);
 
-        if let Some(creds) = &self.credentials {
-            let auth_header = auth::build_auth_header(creds)?;
+        if let Some(auth_header) = self.authorization(url).await? {
             req = req.header("Authorization", auth_header);
         }
 
         let resp = self.send_with_retry(req).await?;
         self.handle_created_location(resp).await
+    }
+
+    /// Perform an authenticated form POST with repeatable keys and return
+    /// the raw response, optionally sending a `Cookie` header.
+    ///
+    /// Used for multi-step operations whose server-side state lives in a
+    /// session cookie, such as WebAuthn registration.
+    pub(crate) async fn post_pairs_url_raw(
+        &self,
+        url: &str,
+        params: &[(&str, &str)],
+        cookie: Option<&str>,
+    ) -> Result<reqwest::Response> {
+        let mut req = self
+            .http
+            .post(url)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(encode_pairs(params));
+        if let Some(cookie) = cookie {
+            req = req.header(reqwest::header::COOKIE, cookie);
+        }
+        if let Some(auth_header) = self.authorization(url).await? {
+            req = req.header("Authorization", auth_header);
+        }
+        Ok(req.send().await?)
+    }
+
+    // -----------------------------------------------------------------------
+    // Request signing
+    // -----------------------------------------------------------------------
+
+    /// Return the `Authorization` header value for a request to `url`, if
+    /// the request should be signed.
+    ///
+    /// Hardware-bound tokens are only sent to the API host, and are minted
+    /// on demand.  Stored credentials are sent with every request, as before.
+    async fn authorization(&self, url: &str) -> Result<Option<String>> {
+        if let Some(session) = &self.hardware {
+            if !same_origin(url, &self.base_url) {
+                return Ok(None);
+            }
+            let creds = session.access_credentials().await?;
+            return auth::build_auth_header(&creds).map(Some);
+        }
+        self.credentials
+            .as_ref()
+            .map(auth::build_auth_header)
+            .transpose()
+    }
+
+    /// Discard a hardware-bound access token that Launchpad no longer
+    /// accepts, so the next request mints a new one.
+    async fn note_unauthorized(&self, body: &str) {
+        if let Some(session) = &self.hardware
+            && is_rejected_token_message(body)
+        {
+            session.invalidate().await;
+        }
+    }
+
+    /// Whether `error` reports a rejected hardware-bound access token.
+    fn hardware_token_rejected(&self, error: &LpError) -> bool {
+        self.hardware.is_some()
+            && matches!(error, LpError::Api { status: 401, message }
+                if is_rejected_token_message(message))
     }
 
     // -----------------------------------------------------------------------
@@ -510,7 +604,10 @@ impl LaunchpadClient {
     // Response handling
     // -----------------------------------------------------------------------
 
-    async fn handle_response<T: DeserializeOwned>(&self, resp: reqwest::Response) -> Result<T> {
+    pub(crate) async fn handle_response<T: DeserializeOwned>(
+        &self,
+        resp: reqwest::Response,
+    ) -> Result<T> {
         let status = resp.status();
         if status == StatusCode::UNAUTHORIZED {
             // Read the response body so the exact Launchpad error message is
@@ -519,6 +616,7 @@ impl LaunchpadClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "(could not read response body)".to_string());
+            self.note_unauthorized(&body).await;
             return Err(LpError::Api {
                 status: 401,
                 message: body,
@@ -584,6 +682,7 @@ impl LaunchpadClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "(could not read response body)".to_string());
+            self.note_unauthorized(&body).await;
             return Err(LpError::Api {
                 status: 401,
                 message: body,
@@ -639,13 +738,14 @@ impl LaunchpadClient {
 
     /// Like [`handle_response_ok`] but returns the `Location` header value on
     /// success.
-    async fn handle_created_location(&self, resp: reqwest::Response) -> Result<String> {
+    pub(crate) async fn handle_created_location(&self, resp: reqwest::Response) -> Result<String> {
         let status = resp.status();
         if status == StatusCode::UNAUTHORIZED {
             let body = resp
                 .text()
                 .await
                 .unwrap_or_else(|_| "(could not read response body)".to_string());
+            self.note_unauthorized(&body).await;
             return Err(LpError::Api {
                 status: 401,
                 message: body,
@@ -730,8 +830,7 @@ impl LaunchpadClient {
 
         let mut req = download_client.get(url);
 
-        if let Some(creds) = &self.credentials {
-            let auth_header = auth::build_auth_header(creds)?;
+        if let Some(auth_header) = self.authorization(url).await? {
             req = req.header("Authorization", auth_header);
         }
 
@@ -824,8 +923,7 @@ impl LaunchpadClient {
 
         let mut req = download_client.get(url);
 
-        if let Some(creds) = &self.credentials {
-            let auth_header = auth::build_auth_header(creds)?;
+        if let Some(auth_header) = self.authorization(url).await? {
             req = req.header("Authorization", auth_header);
         }
 
@@ -900,15 +998,7 @@ impl LaunchpadClient {
     /// Use this for Launchpad custom GET methods that return a JSON list of
     /// strings (e.g. `sourceFileUrls`, `binaryFileUrls`).
     pub async fn get_url_string_list(&self, url: &str) -> Result<Vec<String>> {
-        let mut req = self.http.get(url).header("Accept", "application/json");
-
-        if let Some(creds) = &self.credentials {
-            let auth_header = auth::build_auth_header(creds)?;
-            req = req.header("Authorization", auth_header);
-        }
-
-        let resp = self.send_with_retry(req).await?;
-        self.handle_response(resp).await
+        self.get_url(url).await
     }
 
     /// Perform an authenticated multipart POST and return the `Location`
@@ -928,8 +1018,7 @@ impl LaunchpadClient {
             .header("Accept", "application/json")
             .multipart(form);
 
-        if let Some(creds) = &self.credentials {
-            let auth_header = auth::build_auth_header(creds)?;
+        if let Some(auth_header) = self.authorization(&url).await? {
             req = req.header("Authorization", auth_header);
         }
 
@@ -954,8 +1043,7 @@ impl LaunchpadClient {
             .get(url)
             .header("Accept", "application/json");
 
-        if let Some(creds) = &self.credentials {
-            let auth_header = auth::build_auth_header(creds)?;
+        if let Some(auth_header) = self.authorization(url).await? {
             req = req.header("Authorization", auth_header);
         }
 
@@ -984,6 +1072,24 @@ impl LaunchpadClient {
 /// dependency on `url::form_urlencoded`.
 pub fn urlenc(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+/// Whether a 401 response body says that the access token itself was
+/// rejected (as opposed to, say, a missing permission).
+fn is_rejected_token_message(body: &str) -> bool {
+    body.starts_with("Expired token") || body.starts_with("Unknown access token")
+}
+
+/// Whether `url` has the same scheme, host and port as `base`.
+fn same_origin(url: &str, base: &str) -> bool {
+    match (url::Url::parse(url), url::Url::parse(base)) {
+        (Ok(a), Ok(b)) => {
+            a.scheme() == b.scheme()
+                && a.host_str() == b.host_str()
+                && a.port_or_known_default() == b.port_or_known_default()
+        }
+        _ => false,
+    }
 }
 
 /// Encode a slice of key-value tuples as URL form-encoded data, allowing
@@ -1088,6 +1194,25 @@ mod tests {
     fn anonymous_client_has_no_credentials() {
         let client = LaunchpadClient::new(None);
         assert!(client.credentials.is_none());
+    }
+
+    #[test]
+    fn same_origin_compares_scheme_host_and_port() {
+        let base = "https://api.launchpad.net/devel";
+        assert!(same_origin("https://api.launchpad.net/devel/~me", base));
+        assert!(same_origin("https://api.launchpad.net:443/devel", base));
+        assert!(!same_origin("https://launchpadlibrarian.net/1/file", base));
+        assert!(!same_origin("http://api.launchpad.net/devel", base));
+        assert!(!same_origin("not a url", base));
+    }
+
+    #[test]
+    fn rejected_token_messages() {
+        assert!(is_rejected_token_message("Expired token (abc)"));
+        assert!(is_rejected_token_message("Unknown access token (abc)."));
+        assert!(!is_rejected_token_message(
+            "Unauthorized: missing permission"
+        ));
     }
 
     /// Verify that an authenticated client stores its credentials.

@@ -44,6 +44,11 @@ run the search and report the count.
   [lpcli repo](https://github.com/canonical/lpcli)).
 - Most **read** operations work **anonymously** (no login needed).
 - **Write** operations require `lpcli login` first.
+- If the user logged in with a **hardware-bound token** (`lpcli hardware-token
+  issue` or `lpcli login --hardware-token`), each authenticated `lpcli`
+  invocation needs a touch of their USB security key (and possibly its PIN).
+  Tell the user before running authenticated commands, and prefer anonymous
+  read commands where possible. `lpcli status` shows which login is in use.
 
 ## CLI Reference
 

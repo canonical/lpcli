@@ -76,6 +76,30 @@ pub enum LpError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    /// A FIDO2 security-key operation failed (no key found, USB permissions,
+    /// wrong PIN, unsupported key, and so on).
+    #[error("Security key error: {0}")]
+    HardwareKey(String),
+
+    /// The user or the security key cancelled the operation.
+    #[error("Security-key operation cancelled.")]
+    HardwareKeyCancelled,
+
+    /// The security key timed out waiting for the user (for example, no touch).
+    #[error("Security-key operation timed out.")]
+    HardwareKeyTimeout,
+
+    /// A hardware-bound grant or access token could not be issued, stored or
+    /// minted.
+    #[error("Hardware-bound token error: {0}")]
+    HardwareToken(String),
+
+    /// Launchpad rejected the hardware-bound refresh grant during the token
+    /// exchange (HTTP 401, 403 or 410): it was revoked, expired, or is bound
+    /// to a different security key.
+    #[error("Launchpad rejected the hardware-bound grant; check the grant and security key.")]
+    HardwareTokenGrantRejected,
+
     /// Any other error with an arbitrary message.
     #[error("{0}")]
     Other(String),
@@ -143,6 +167,25 @@ mod tests {
     fn keyring_error_display() {
         let err = LpError::Keyring("secret service unavailable".to_string());
         assert!(err.to_string().contains("secret service unavailable"));
+    }
+
+    #[test]
+    fn hardware_errors_display() {
+        assert!(
+            LpError::HardwareKey("No USB FIDO2 security key found.".to_string())
+                .to_string()
+                .contains("No USB FIDO2 security key found.")
+        );
+        assert!(
+            LpError::HardwareKeyTimeout
+                .to_string()
+                .contains("timed out")
+        );
+        assert!(
+            LpError::HardwareTokenGrantRejected
+                .to_string()
+                .contains("rejected")
+        );
     }
 
     #[test]

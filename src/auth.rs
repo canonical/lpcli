@@ -117,22 +117,32 @@ impl Credentials {
 ///
 /// Defaults to `~/.config/lpcli/credentials.toml`.
 pub fn credentials_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("credentials.toml"))
+}
+
+/// Returns the lpcli configuration directory (`~/.config/lpcli`).
+pub(crate) fn config_dir() -> Result<PathBuf> {
     let base = dirs::config_dir()
         .ok_or_else(|| LpError::Config("Cannot determine config directory".to_string()))?;
-    Ok(base.join("lpcli").join("credentials.toml"))
+    Ok(base.join("lpcli"))
 }
 
 /// Return the OS keyring entry used to store lpcli credentials.
+fn keyring_entry() -> keyring_core::Result<keyring_core::Entry> {
+    keyring_entry_for(KEYRING_USER)
+}
+
+/// Return the lpcli OS keyring entry for `user`.
 ///
 /// The platform-specific credential store is initialized lazily on first use.
 /// If the platform has no usable keyring, the initialization failure is
 /// reported as [`keyring_core::Error::NoDefaultStore`] so callers fall back to
-/// the plaintext file.
-fn keyring_entry() -> keyring_core::Result<keyring_core::Entry> {
+/// a file.
+pub(crate) fn keyring_entry_for(user: &str) -> keyring_core::Result<keyring_core::Entry> {
     static INIT: std::sync::OnceLock<std::result::Result<(), String>> = std::sync::OnceLock::new();
 
     match INIT.get_or_init(init_keyring_store) {
-        Ok(()) => keyring_core::Entry::new(KEYRING_SERVICE, KEYRING_USER),
+        Ok(()) => keyring_core::Entry::new(KEYRING_SERVICE, user),
         Err(_) => Err(keyring_core::Error::NoDefaultStore),
     }
 }

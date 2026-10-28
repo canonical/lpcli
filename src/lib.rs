@@ -8,6 +8,8 @@
 //! | Module | Description |
 //! |--------|-------------|
 //! | [`auth`] | OAuth 1.0a authentication and credential management |
+//! | [`hardware_tokens`] | Hardware-bound OAuth tokens backed by a FIDO2 security key |
+//! | [`hardware_key`] | USB FIDO2 security-key (CTAP2) support |
 //! | [`client`] | Low-level HTTP client for the Launchpad API |
 //! | [`bugs`] | Bug tracking operations |
 //! | [`people`] | Person and team queries |
@@ -38,6 +40,8 @@ pub mod cves;
 pub mod download;
 pub mod error;
 pub mod git;
+pub mod hardware_key;
+pub mod hardware_tokens;
 pub mod packages;
 pub mod people;
 pub mod projects;

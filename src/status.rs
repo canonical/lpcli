@@ -2,7 +2,7 @@
 //!
 //! Provides lightweight checks to verify:
 //!
-//! * Whether the user has stored OAuth credentials on disk.
+//! * Whether the user has stored OAuth credentials or a hardware-bound grant.
 //! * Whether the Launchpad REST API is reachable and returning valid responses.
 //!
 //! These checks are intentionally separate from the other domain modules so
@@ -28,6 +28,7 @@ use serde::Deserialize;
 use crate::auth;
 use crate::client::LaunchpadClient;
 use crate::error::LpError;
+use crate::hardware_tokens::GrantStore;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -56,6 +57,10 @@ pub struct AuthStatus {
     /// authenticated API call; `None` when not logged in or when the server
     /// is unreachable.
     pub username: Option<String>,
+    /// The account of a stored hardware-bound grant.  When set, the grant is
+    /// used for authenticated requests.  It is not verified with Launchpad,
+    /// because minting a token would need a touch of the security key.
+    pub hardware_account: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -124,8 +129,10 @@ pub async fn check_server() -> ServerStatus {
 ///
 /// Behaviour:
 ///
+/// * If a hardware-bound grant is stored, returns `logged_in: true` with
+///   `hardware_account` set, without contacting Launchpad.
 /// * If no credential file exists, returns
-///   `AuthStatus { logged_in: false, username: None }`.
+///   `AuthStatus { logged_in: false, username: None, .. }`.
 /// * If credentials exist and the server is reachable, an authenticated
 ///   request is made to the API root to obtain the Launchpad username from
 ///   the `me_link` field.
@@ -133,24 +140,36 @@ pub async fn check_server() -> ServerStatus {
 ///   been revoked), returns `AuthStatus { logged_in: true, username: None }`
 ///   to indicate that local credentials are present but unverified.
 pub async fn check_auth() -> AuthStatus {
-    // 1. Try to load credentials from the OS keyring or fallback file.
+    // 1. A stored hardware-bound grant takes precedence over classic
+    //    credentials, matching how lpcli chooses credentials for requests.
+    if let Ok(Some(credentials)) = GrantStore::from_env().load() {
+        return AuthStatus {
+            logged_in: true,
+            username: None,
+            hardware_account: Some(credentials.grant().account().to_string()),
+        };
+    }
+
+    // 2. Try to load credentials from the OS keyring or fallback file.
     let creds = match auth::load_credentials() {
         Ok(c) => c,
         Err(LpError::NotAuthenticated) | Err(LpError::Config(_)) => {
             return AuthStatus {
                 logged_in: false,
                 username: None,
+                hardware_account: None,
             };
         }
         Err(_) => {
             return AuthStatus {
                 logged_in: false,
                 username: None,
+                hardware_account: None,
             };
         }
     };
 
-    // 2. Credentials are present; make an authenticated request to the API
+    // 3. Credentials are present; make an authenticated request to the API
     //    root to obtain the `me_link` and extract the Launchpad username.
     let client = LaunchpadClient::new(Some(creds));
     let username = match client.get::<ApiRoot>("").await {
@@ -176,5 +195,6 @@ pub async fn check_auth() -> AuthStatus {
     AuthStatus {
         logged_in: true,
         username,
+        hardware_account: None,
     }
 }

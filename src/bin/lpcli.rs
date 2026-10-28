@@ -3,6 +3,7 @@
 //! Parse command-line arguments with `clap` and dispatch to the `lpcli` library.
 
 use std::str::FromStr;
+use std::sync::Arc;
 
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
@@ -15,6 +16,11 @@ use lpcli::{
     client::LaunchpadClient,
     cves::{self, CveSearchParams},
     download, git,
+    hardware_key::{Authenticator, UsbAuthenticator},
+    hardware_tokens::{
+        self, GrantStore, HardwareLogin, HardwareLoginOutcome, HardwareTokenGrant,
+        IssueGrantRequest, OAuthPermission, RegisteredAuthenticator, StoredIn,
+    },
     packages::{self, SourceSearchParams},
     people, projects,
     questions::{self, QuestionSearchParams},
@@ -273,10 +279,14 @@ enum Command {
     Status,
 
     /// Authenticate with Launchpad (OAuth login).
-    Login,
+    Login(LoginArgs),
 
     /// Log out from Launchpad and remove stored credentials.
-    Logout,
+    Logout(LogoutArgs),
+
+    /// Manage FIDO2 security keys and hardware-bound API tokens.
+    #[command(subcommand)]
+    HardwareToken(HardwareTokenCommand),
 
     /// Query and manage Launchpad bugs.
     #[command(subcommand)]
@@ -1479,6 +1489,153 @@ enum QueueCommand {
 }
 
 // ---------------------------------------------------------------------------
+// Login, logout and hardware-token sub-commands
+// ---------------------------------------------------------------------------
+
+/// Environment variable holding the secret of a grant imported with
+/// `lpcli login --hardware-token --grant-token`.
+const GRANT_SECRET_ENV: &str = "LPCLI_HARDWARE_GRANT_SECRET";
+
+#[derive(Debug, clap::Args)]
+struct LoginArgs {
+    /// Log in with a hardware-bound grant, which needs a USB FIDO2 security
+    /// key, instead of the browser OAuth flow.  Without --grant-token, the
+    /// stored grant is used.
+    #[arg(long)]
+    hardware_token: bool,
+
+    /// Import a newly issued grant by its oauth_token.  The secret is read
+    /// from LPCLI_HARDWARE_GRANT_SECRET or prompted for.
+    #[arg(long, value_name = "TOKEN", requires_all = ["hardware_token", "account"])]
+    grant_token: Option<String>,
+
+    /// The Launchpad account that owns the grant.
+    #[arg(long, value_name = "NAME", requires = "hardware_token")]
+    account: Option<String>,
+
+    /// The OAuth consumer key the grant was issued for [default: lpcli-hardware].
+    #[arg(long, value_name = "KEY", requires = "hardware_token")]
+    consumer: Option<String>,
+
+    /// Restrict the grant to one security key by its base64url WebAuthn
+    /// credential ID.
+    #[arg(long, value_name = "ID", requires = "hardware_token")]
+    credential_id: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+struct LogoutArgs {
+    /// Only remove the classic OAuth credentials (e.g. the bootstrap token
+    /// used to register a key and issue a grant).
+    #[arg(long, conflicts_with = "hardware_token")]
+    classic: bool,
+
+    /// Only remove the stored hardware-bound grant.  It remains valid on
+    /// Launchpad; use `lpcli hardware-token revoke` to revoke it.
+    #[arg(long)]
+    hardware_token: bool,
+}
+
+/// OAuth permission levels for hardware-bound grants.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PermissionArg {
+    /// Read public data.
+    ReadNonPrivate,
+    /// Read and change public data.
+    ChangeNonPrivate,
+    /// Read all data, including private data.
+    ReadAnything,
+    /// Read and change all data, including private data.
+    ChangeAnything,
+}
+
+impl From<PermissionArg> for OAuthPermission {
+    fn from(arg: PermissionArg) -> Self {
+        match arg {
+            PermissionArg::ReadNonPrivate => Self::ReadNonPrivate,
+            PermissionArg::ChangeNonPrivate => Self::ChangeNonPrivate,
+            PermissionArg::ReadAnything => Self::ReadAnything,
+            PermissionArg::ChangeAnything => Self::ChangeAnything,
+        }
+    }
+}
+
+/// Parse an expiry given as `YYYY-MM-DD` (midnight UTC) or RFC 3339.
+fn parse_expiry(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    if let Ok(date) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Ok(date.with_timezone(&chrono::Utc));
+    }
+    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|date| date.and_utc())
+        .ok_or_else(|| format!("invalid date '{value}'; use YYYY-MM-DD or RFC 3339"))
+}
+
+#[derive(Debug, Subcommand)]
+enum HardwareTokenCommand {
+    /// List the security keys registered with your account.
+    Keys,
+
+    /// Register a USB FIDO2 security key with your account (touch the key
+    /// when prompted).
+    Register {
+        /// A name to help tell your registered keys apart.
+        name: String,
+    },
+
+    /// Revoke a registered security key.  Its grants can no longer mint
+    /// access tokens.
+    RevokeKey {
+        /// The key's ID or name (see `lpcli hardware-token keys`).
+        key: String,
+    },
+
+    /// Issue a grant bound to a registered security key and log in with it.
+    Issue {
+        /// The security key's ID or name (see `lpcli hardware-token keys`).
+        #[arg(short, long)]
+        key: String,
+
+        /// The grant's permission.  It cannot exceed the permission of the
+        /// credentials used to issue it.
+        #[arg(short, long, value_enum, default_value_t = PermissionArg::ChangeAnything)]
+        permission: PermissionArg,
+
+        /// Restrict the grant to a project or distribution, or to
+        /// `distribution/sourcepackagename`.
+        #[arg(long)]
+        context: Option<String>,
+
+        /// When the grant expires (YYYY-MM-DD or RFC 3339).  Launchpad
+        /// defaults to, and limits grants to, 365 days.
+        #[arg(long, value_parser = parse_expiry)]
+        expires: Option<chrono::DateTime<chrono::Utc>>,
+
+        /// The OAuth consumer key that will use the grant.
+        #[arg(long, default_value = hardware_tokens::HARDWARE_CONSUMER_KEY)]
+        consumer: String,
+
+        /// Print the grant as JSON (as accepted by launchpadlib's
+        /// login_with_hardware_token) instead of logging in with it.  The
+        /// output contains the grant secret, which is shown only once.
+        #[arg(long)]
+        print: bool,
+    },
+
+    /// Show the stored hardware-bound grant (never its secret).
+    Show,
+
+    /// Revoke a hardware-bound grant on Launchpad (by default the stored
+    /// one) and remove the stored copy.
+    Revoke {
+        /// The token key of the grant to revoke; defaults to the stored grant.
+        #[arg(long)]
+        token: Option<String>,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // AccessToken sub-commands
 // ---------------------------------------------------------------------------
 
@@ -1606,7 +1763,9 @@ async fn run() -> lpcli::error::Result<()> {
     match cli.command {
         Command::Status => handle_status().await?,
 
-        Command::Login => {
+        Command::Login(args) if args.hardware_token => handle_hardware_login(args).await?,
+
+        Command::Login(_) => {
             println!("{}", "Logging in to Launchpad...".bold());
             let creds = auth::login().await?;
             println!(
@@ -1614,11 +1773,27 @@ async fn run() -> lpcli::error::Result<()> {
                 "✓".green().bold(),
                 creds.access_token.token
             );
+            if matches!(GrantStore::from_env().load(), Ok(Some(_))) {
+                println!(
+                    "{} A hardware-bound grant is also stored and takes precedence; run {} \
+                     to use these credentials instead.",
+                    "!".yellow().bold(),
+                    "`lpcli logout --hardware-token`".bold()
+                );
+            }
         }
 
-        Command::Logout => {
-            auth::logout()?;
+        Command::Logout(args) => {
+            if !args.hardware_token {
+                auth::logout()?;
+            }
+            if !args.classic {
+                GrantStore::from_env().delete()?;
+                println!("Removed any stored hardware-bound grant.");
+            }
         }
+
+        Command::HardwareToken(cmd) => handle_hardware_token(cmd).await?,
 
         Command::Bug(cmd) => handle_bug(cmd).await?,
         Command::Person(cmd) => handle_person(cmd).await?,
@@ -3742,6 +3917,283 @@ async fn handle_access_token(cmd: AccessTokenCommand) -> lpcli::error::Result<()
 }
 
 // ---------------------------------------------------------------------------
+// Hardware-bound token handlers
+// ---------------------------------------------------------------------------
+
+/// `lpcli login --hardware-token`: import a grant or use the stored one.
+async fn handle_hardware_login(args: LoginArgs) -> lpcli::error::Result<()> {
+    let mut login = HardwareLogin::new();
+    if let Some(token) = args.grant_token {
+        let account = args.account.as_deref().ok_or_else(|| {
+            lpcli::error::LpError::HardwareToken(
+                "--account is required to import a grant.".to_string(),
+            )
+        })?;
+        let secret = read_grant_secret()?;
+        login = login.grant(HardwareTokenGrant::new(token, secret.as_str(), account)?);
+    }
+    if let Some(account) = args.account {
+        login = login.account(account);
+    }
+    if let Some(consumer) = args.consumer {
+        login = login.consumer(consumer);
+    }
+    if let Some(credential_id) = args.credential_id {
+        login = login.credential_id(credential_id);
+    }
+
+    println!(
+        "{}",
+        "Logging in to Launchpad with a hardware-bound grant...".bold()
+    );
+    let outcome = hardware_tokens::login_with_hardware_token(login, usb_authenticator()).await?;
+    print_hardware_login(&outcome);
+    Ok(())
+}
+
+/// Read the secret of a grant being imported, without echoing it.
+fn read_grant_secret() -> lpcli::error::Result<zeroize::Zeroizing<String>> {
+    if let Some(secret) = std::env::var_os(GRANT_SECRET_ENV) {
+        return secret
+            .into_string()
+            .map(zeroize::Zeroizing::new)
+            .map_err(|_| {
+                lpcli::error::LpError::HardwareToken(format!(
+                    "{GRANT_SECRET_ENV} is not valid UTF-8."
+                ))
+            });
+    }
+    let secret = zeroize::Zeroizing::new(rpassword::prompt_password(
+        "Grant secret (oauth_token_secret): ",
+    )?);
+    Ok(secret)
+}
+
+fn print_hardware_login(outcome: &HardwareLoginOutcome) {
+    println!(
+        "{} Logged in as {} with a hardware-bound grant.",
+        "✓".green().bold(),
+        format!("~{}", outcome.account).cyan().bold()
+    );
+    match &outcome.stored_in {
+        Some(StoredIn::Memory) => println!(
+            "{} Running under sudo, so the grant was kept in memory only. Set {} to store it \
+             in a file.",
+            "!".yellow().bold(),
+            hardware_tokens::CREDENTIALS_FILE_ENV
+        ),
+        Some(location) => println!("  Grant stored in {location}."),
+        None => println!("  Using the stored grant."),
+    }
+}
+
+/// Find an active registered security key by its ID or name.
+async fn find_registered_key(
+    client: &LaunchpadClient,
+    key: &str,
+) -> lpcli::error::Result<RegisteredAuthenticator> {
+    let mut matches: Vec<RegisteredAuthenticator> =
+        hardware_tokens::list_registered_authenticators(client)
+            .await?
+            .into_iter()
+            .filter(|a| a.is_active())
+            .filter(|a| {
+                a.id.is_some_and(|id| id.to_string() == key) || a.name.as_deref() == Some(key)
+            })
+            .collect();
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(lpcli::error::LpError::NotFound(format!(
+            "No active security key with ID or name '{key}'; see `lpcli hardware-token keys`."
+        ))),
+        _ => Err(lpcli::error::LpError::Other(format!(
+            "Several security keys are named '{key}'; use the key's ID instead."
+        ))),
+    }
+}
+
+fn key_label(key: &RegisteredAuthenticator) -> String {
+    let name = key.name.as_deref().unwrap_or("unnamed");
+    match key.id {
+        Some(id) => format!("'{name}' (ID {id})"),
+        None => format!("'{name}'"),
+    }
+}
+
+async fn handle_hardware_token(cmd: HardwareTokenCommand) -> lpcli::error::Result<()> {
+    match cmd {
+        HardwareTokenCommand::Show => {
+            let store = GrantStore::from_env();
+            let Some(credentials) = store.load()? else {
+                println!("No hardware-bound grant is stored.");
+                return Ok(());
+            };
+            let grant = credentials.grant();
+            println!("{}", "Hardware-bound grant".bold());
+            println!("{}", "─".repeat(40));
+            println!("Account:       ~{}", grant.account());
+            println!("Consumer:      {}", credentials.consumer());
+            println!("Token key:     {}", grant.token());
+            println!(
+                "Credential ID: {}",
+                grant.credential_id().unwrap_or("any registered key")
+            );
+            println!("Service root:  {}", credentials.service_root());
+            println!(
+                "Stored in:     {}",
+                match store {
+                    GrantStore::File(path) => path.display().to_string(),
+                    _ => "the system keyring (or ~/.config/lpcli/hardware-token.json)".to_string(),
+                }
+            );
+        }
+
+        HardwareTokenCommand::Keys => {
+            let client = authenticated_client()?;
+            let keys = hardware_tokens::list_registered_authenticators(&client).await?;
+            if keys.is_empty() {
+                println!(
+                    "No security keys are registered. Register one with {}.",
+                    "`lpcli hardware-token register <NAME>`".bold()
+                );
+                return Ok(());
+            }
+            let mut table = build_table(vec!["ID", "Name", "Registered", "Last Used", "Status"]);
+            let date = |d: Option<chrono::DateTime<chrono::Utc>>| {
+                d.map(|d| d.format("%Y-%m-%d").to_string())
+            };
+            for key in &keys {
+                table.add_row(vec![
+                    key.id.map(|id| id.to_string()).unwrap_or_default(),
+                    key.name.clone().unwrap_or_default(),
+                    date(key.date_created).unwrap_or_default(),
+                    date(key.date_last_used).unwrap_or_else(|| "never".to_string()),
+                    if key.is_active() { "active" } else { "revoked" }.to_string(),
+                ]);
+            }
+            println!("{table}");
+        }
+
+        HardwareTokenCommand::Register { name } => {
+            let client = authenticated_client()?;
+            println!("Registering a security key with Launchpad...");
+            let key =
+                hardware_tokens::register_hardware_key(&client, &name, usb_authenticator()).await?;
+            println!(
+                "{} Registered security key {}.",
+                "✓".green().bold(),
+                key_label(&key)
+            );
+            println!(
+                "  Issue a grant bound to it with {}.",
+                format!(
+                    "`lpcli hardware-token issue --key {}`",
+                    key.id.map(|id| id.to_string()).unwrap_or(name)
+                )
+                .bold()
+            );
+        }
+
+        HardwareTokenCommand::RevokeKey { key } => {
+            let client = authenticated_client()?;
+            let registered = find_registered_key(&client, &key).await?;
+            let link = registered.self_link.as_deref().ok_or_else(|| {
+                lpcli::error::LpError::Other("The security key has no self_link.".to_string())
+            })?;
+            hardware_tokens::revoke_registered_authenticator(&client, link).await?;
+            println!(
+                "{} Revoked security key {}.",
+                "✓".green().bold(),
+                key_label(&registered)
+            );
+        }
+
+        HardwareTokenCommand::Issue {
+            key,
+            permission,
+            context,
+            expires,
+            consumer,
+            print,
+        } => {
+            let client = authenticated_client()?;
+            let registered = find_registered_key(&client, &key).await?;
+            let request = IssueGrantRequest {
+                consumer_key: consumer.clone(),
+                authenticator_link: registered.self_link.clone().ok_or_else(|| {
+                    lpcli::error::LpError::Other("The security key has no self_link.".to_string())
+                })?,
+                permission: permission.into(),
+                context,
+                date_expires: expires,
+            };
+            let grant =
+                hardware_tokens::issue_hardware_bound_oauth_token(&client, &request).await?;
+
+            if print {
+                println!("{}", grant.to_issuance_json().as_str());
+                eprintln!(
+                    "{} This is the grant secret; it will not be shown again.",
+                    "!".yellow().bold()
+                );
+                return Ok(());
+            }
+
+            println!(
+                "{} Issued a hardware-bound grant bound to {}. Logging in with it...",
+                "✓".green().bold(),
+                key_label(&registered)
+            );
+            let account = grant.account().to_string();
+            let login = HardwareLogin::new().grant(grant).consumer(consumer);
+            let outcome =
+                hardware_tokens::login_with_hardware_token(login, usb_authenticator()).await?;
+            print_hardware_login(&outcome);
+
+            if !client.is_hardware_bound() {
+                println!();
+                println!("Now remove the classic bootstrap token, which does not need your key:");
+                println!(
+                    "  1. Revoke the \"{}\" authorization at https://launchpad.net/~{account}/+oauth-tokens",
+                    auth::CONSUMER_KEY
+                );
+                println!(
+                    "  2. Run {} to delete the local copy.",
+                    "`lpcli logout --classic`".bold()
+                );
+            }
+        }
+
+        HardwareTokenCommand::Revoke { token } => {
+            let store = GrantStore::from_env();
+            let stored = store.load()?;
+            let token_key = match (token, &stored) {
+                (Some(token), _) => token,
+                (None, Some(credentials)) => credentials.grant().token().to_string(),
+                (None, None) => {
+                    return Err(lpcli::error::LpError::HardwareToken(
+                        "No hardware-bound grant is stored; pass --token to revoke another grant."
+                            .to_string(),
+                    ));
+                }
+            };
+
+            let client = authenticated_client()?;
+            hardware_tokens::revoke_hardware_bound_oauth_token(&client, &token_key).await?;
+            println!(
+                "{} Revoked the hardware-bound grant on Launchpad.",
+                "✓".green().bold()
+            );
+            if stored.is_some_and(|credentials| credentials.grant().token() == token_key) {
+                store.delete()?;
+                println!("  Removed the stored copy.");
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Status handler
 // ---------------------------------------------------------------------------
 
@@ -3755,7 +4207,14 @@ async fn handle_status() -> lpcli::error::Result<()> {
     // Authentication section.
     println!("{}", "Authentication".bold());
     println!("{}", "─".repeat(40));
-    if auth.logged_in {
+    if let Some(account) = &auth.hardware_account {
+        println!(
+            "{} Hardware-bound grant stored for {}",
+            "✓".green().bold(),
+            format!("~{account}").cyan().bold()
+        );
+        println!("  Not verified with Launchpad, which would need a touch of your security key.");
+    } else if auth.logged_in {
         match &auth.username {
             Some(name) => println!("{} Logged in as {}", "✓".green().bold(), name.cyan().bold()),
             None => println!(
@@ -4646,12 +5105,33 @@ fn format_size(bytes: u64) -> String {
 
 /// Build an authenticated client from stored credentials.
 ///
+/// A stored hardware-bound grant takes precedence over classic OAuth
+/// credentials; the first signed request then needs a touch of the security
+/// key.
+///
 /// Returns `LpError::NotAuthenticated` if no credentials are found, or the
 /// underlying error (e.g. `LpError::Config`) if the file exists but cannot
 /// be read or parsed.
 fn authenticated_client() -> lpcli::error::Result<LaunchpadClient> {
+    let session = hardware_tokens::load_session(&GrantStore::from_env(), usb_authenticator())
+        .map_err(|e| match e {
+            lpcli::error::LpError::HardwareToken(message) => {
+                lpcli::error::LpError::HardwareToken(format!(
+                    "{message} Run `lpcli logout --hardware-token` to remove the stored grant."
+                ))
+            }
+            other => other,
+        })?;
+    if let Some(session) = session {
+        return Ok(LaunchpadClient::with_hardware_token(Arc::new(session)));
+    }
     let creds = auth::load_credentials()?;
     Ok(LaunchpadClient::new(Some(creds)))
+}
+
+/// The USB security key, prompting on the terminal.
+fn usb_authenticator() -> Arc<dyn Authenticator> {
+    Arc::new(UsbAuthenticator::default())
 }
 
 /// Build a [`comfy_table::Table`] with headers.
