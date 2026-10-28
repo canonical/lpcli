@@ -116,7 +116,7 @@ required. Hardware-bound tokens are currently supported on Linux only.
    `login_with_hardware_token` instead.
 
 3. Remove the classic bootstrap token, which does not need your key: revoke the
-   `lpcli` authorisation at `https://launchpad.net/~<you>/+oauth-tokens`, then
+   `lpcli` authorisation at `https://launchpad.net/people/+me/+oauth-tokens`, then
    run `lpcli logout --classic`. Grants use the separate `lpcli-hardware`
    consumer, so this does not affect them.
 
@@ -127,7 +127,7 @@ shortly before it expires. Access tokens are never stored.
 Other useful commands:
 
 ```bash
-lpcli hardware-token show            # show the stored grant (never its secret)
+lpcli hardware-token show            # show the stored grant's configuration (no credentials)
 lpcli hardware-token revoke          # revoke the stored grant and delete it
 lpcli hardware-token revoke-key 42   # revoke a registered key
 lpcli logout --hardware-token        # delete the stored grant only

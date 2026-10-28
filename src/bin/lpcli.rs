@@ -1496,6 +1496,9 @@ enum QueueCommand {
 /// `lpcli login --hardware-token --grant-token`.
 const GRANT_SECRET_ENV: &str = "LPCLI_HARDWARE_GRANT_SECRET";
 
+/// The logged-in user's "Authorized applications" page on Launchpad.
+const OAUTH_TOKENS_URL: &str = "https://launchpad.net/people/+me/+oauth-tokens";
+
 #[derive(Debug, clap::Args)]
 struct LoginArgs {
     /// Log in with a hardware-bound grant, which needs a USB FIDO2 security
@@ -1623,7 +1626,8 @@ enum HardwareTokenCommand {
         print: bool,
     },
 
-    /// Show the stored hardware-bound grant (never its secret).
+    /// Show the stored hardware-bound grant's configuration (never its
+    /// account, token key or secret).
     Show,
 
     /// Revoke a hardware-bound grant on Launchpad (by default the stored
@@ -4028,15 +4032,19 @@ async fn handle_hardware_token(cmd: HardwareTokenCommand) -> lpcli::error::Resul
                 println!("No hardware-bound grant is stored.");
                 return Ok(());
             };
-            let grant = credentials.grant();
+            // Only configuration is shown.  Values from the grant record that
+            // identify the account or form part of the credential (the account
+            // name and token key) are never written to output, which may be
+            // captured in logs.
             println!("{}", "Hardware-bound grant".bold());
             println!("{}", "─".repeat(40));
-            println!("Account:       ~{}", grant.account());
             println!("Consumer:      {}", credentials.consumer());
-            println!("Token key:     {}", grant.token());
             println!(
                 "Credential ID: {}",
-                grant.credential_id().unwrap_or("any registered key")
+                credentials
+                    .grant()
+                    .credential_id()
+                    .unwrap_or("any registered key")
             );
             println!("Service root:  {}", credentials.service_root());
             println!(
@@ -4144,7 +4152,6 @@ async fn handle_hardware_token(cmd: HardwareTokenCommand) -> lpcli::error::Resul
                 "✓".green().bold(),
                 key_label(&registered)
             );
-            let account = grant.account().to_string();
             let login = HardwareLogin::new().grant(grant).consumer(consumer);
             let outcome =
                 hardware_tokens::login_with_hardware_token(login, usb_authenticator()).await?;
@@ -4153,8 +4160,10 @@ async fn handle_hardware_token(cmd: HardwareTokenCommand) -> lpcli::error::Resul
             if !client.is_hardware_bound() {
                 println!();
                 println!("Now remove the classic bootstrap token, which does not need your key:");
+                // `+me` resolves to the logged-in user, so the account name is
+                // not needed in (or leaked through) this output.
                 println!(
-                    "  1. Revoke the \"{}\" authorization at https://launchpad.net/~{account}/+oauth-tokens",
+                    "  1. Revoke the \"{}\" authorization at {OAUTH_TOKENS_URL}",
                     auth::CONSUMER_KEY
                 );
                 println!(
