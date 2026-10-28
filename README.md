@@ -17,6 +17,8 @@ applications can build on the same type-safe API wrappers.
 - **OAuth 1.0a authentication** — securely log in once; credentials are stored in
   the operating system keyring (Secret Service, Keychain, or Credential Manager),
   with a plaintext file fallback when no keyring is available.
+- **Hardware-bound API tokens** — optionally bind your API access to a USB FIDO2
+  security key (e.g. a YubiKey), so stored credentials are useless without it.
 - **Rich terminal output** — coloured text and formatted tables via
   [`colored`](https://crates.io/crates/colored) and
   [`comfy-table`](https://crates.io/crates/comfy-table).
@@ -75,6 +77,75 @@ To remove your stored credentials:
 ```bash
 lpcli logout
 ```
+
+### Hardware-bound API tokens
+
+A classic login stores a long-lived OAuth access token: anything that can read
+your keyring or files can use it. A **hardware-bound** login stores a
+long-lived OAuth *refresh grant* instead, bound to a USB FIDO2 security key.
+Exchanging the grant for a short-lived access token requires the key, so a
+stolen grant is useless on its own. This works the same way as
+[launchpadlib's hardware-bound tokens](https://documentation.ubuntu.com/launchpad/user/how-to/launchpadlib/use-hardware-bound-api-tokens/).
+
+Requirements: a USB (HID) FIDO2 security key (NFC authenticators and platform
+passkeys are not supported) and read/write access to its `/dev/hidraw*` device,
+which most distributions grant through their FIDO udev rules. Root is not
+required. Hardware-bound tokens are currently supported on Linux only.
+
+1. Log in classically (the *bootstrap* login), then register your key. Touch
+   the key when prompted:
+
+   ```bash
+   lpcli login
+   lpcli hardware-token register "My YubiKey"
+   lpcli hardware-token keys            # list registered keys and their IDs
+   ```
+
+   You can also register a key on the Launchpad website.
+
+2. Issue a grant bound to the key. lpcli logs in with it straight away (touch
+   the key again) and stores it:
+
+   ```bash
+   lpcli hardware-token issue --key "My YubiKey" --permission change-anything
+   ```
+
+   Grants default to, and are limited to, 365 days (`--expires` sets an earlier
+   date) and cannot be broader than the bootstrap login's permission. Use
+   `--print` to output the grant as JSON for launchpadlib's
+   `login_with_hardware_token` instead.
+
+3. Remove the classic bootstrap token, which does not need your key: revoke the
+   `lpcli` authorisation at `https://launchpad.net/people/+me/+oauth-tokens`, then
+   run `lpcli logout --classic`. Grants use the separate `lpcli-hardware`
+   consumer, so this does not affect them.
+
+From then on, lpcli uses the stored grant for every authenticated command. Each
+invocation needs one touch to mint an access token, which is reused until
+shortly before it expires. Access tokens are never stored.
+
+Other useful commands:
+
+```bash
+lpcli hardware-token show            # show the stored grant's configuration (no credentials)
+lpcli hardware-token revoke          # revoke the stored grant and delete it
+lpcli hardware-token revoke-key 42   # revoke a registered key
+lpcli logout --hardware-token        # delete the stored grant only
+
+# Import a grant issued elsewhere (the secret is prompted for, or read from
+# LPCLI_HARDWARE_GRANT_SECRET):
+lpcli login --hardware-token --account <you> --grant-token <oauth_token>
+```
+
+The grant is stored in the system keyring, falling back to
+`~/.config/lpcli/hardware-token.json` (owner-only) when no keyring is
+available. Set `LP_HARDWARE_CREDENTIALS_FILE` to use a specific file; the format
+is the same as launchpadlib's, so both tools can share it. Under `sudo`, grants
+are kept in memory only unless `LP_HARDWARE_CREDENTIALS_FILE` is set.
+
+If a security key PIN is set, lpcli asks for it when Launchpad requests user
+verification. Keys with built-in verification (e.g. fingerprint) use that
+instead.
 
 ## Usage
 
@@ -546,6 +617,29 @@ All library functions return `lpcli::error::Result<T>`, which is an alias for
 | `LpError::Api` | Launchpad returned a non-success HTTP status |
 | `LpError::RateLimit` | Launchpad throttled the request (HTTP 429) |
 | `LpError::Timeout` | The request timed out |
+| `LpError::HardwareKey` | A security-key operation failed (no key, permissions, wrong PIN) |
+| `LpError::HardwareTokenGrantRejected` | Launchpad rejected a hardware-bound grant |
+
+### Hardware-bound usage
+
+```rust
+use std::sync::Arc;
+
+use lpcli::{client::LaunchpadClient, hardware_key::UsbAuthenticator, hardware_tokens};
+
+#[tokio::main]
+async fn main() -> lpcli::error::Result<()> {
+    // Load the grant stored by `lpcli hardware-token issue`.
+    let store = hardware_tokens::GrantStore::from_env();
+    let session = hardware_tokens::load_session(&store, Arc::new(UsbAuthenticator::default()))?
+        .ok_or(lpcli::error::LpError::NotAuthenticated)?;
+    // The first request mints an access token: touch the key when prompted.
+    let lp = LaunchpadClient::with_hardware_token(Arc::new(session));
+    let bug = lpcli::bugs::get_bug(&lp, 1).await?;
+    println!("Bug #{}: {}", bug.id, bug.title);
+    Ok(())
+}
+```
 
 ---
 
@@ -555,6 +649,8 @@ All library functions return `lpcli::error::Result<T>`, which is an alias for
 src/
   lib.rs            — Public library crate root; re-exports all modules
   auth.rs           — OAuth 1.0a login flow and credential persistence
+  hardware_tokens.rs — Hardware-bound OAuth grants, token minting and renewal
+  hardware_key.rs   — USB FIDO2 security keys (CTAP2 over Linux hidraw)
   client.rs         — Low-level HTTP client for the Launchpad REST API
   bugs.rs           — Bug tracking
   packages.rs       — Source packages, distro series, PPAs
