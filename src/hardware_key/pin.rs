@@ -17,8 +17,8 @@
 //!
 //! See section 6.5, "authenticatorClientPIN", of the CTAP 2.1 specification.
 
-use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::NoPadding};
-use hmac::{Hmac, Mac};
+use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::NoPadding};
+use hmac::{Hmac, KeyInit, Mac};
 use p256::elliptic_curve::sec1::{FromSec1Point, ToSec1Point};
 use p256::{FieldBytes, PublicKey, Sec1Point, SecretKey};
 use sha2::{Digest, Sha256};
@@ -99,7 +99,7 @@ impl PinProtocol {
         let mut buffer = plaintext.to_vec();
         Aes256CbcEnc::new_from_slices(key, &iv)
             .map_err(|_| crypto_error())?
-            .encrypt_padded_mut::<NoPadding>(&mut buffer, plaintext.len())
+            .encrypt_padded::<NoPadding>(&mut buffer, plaintext.len())
             .map_err(|_| crypto_error())?;
 
         Ok(match self {
@@ -128,7 +128,7 @@ impl PinProtocol {
         let mut buffer = Zeroizing::new(body.to_vec());
         Aes256CbcDec::new_from_slices(key, iv)
             .map_err(|_| crypto_error())?
-            .decrypt_padded_mut::<NoPadding>(&mut buffer)
+            .decrypt_padded::<NoPadding>(&mut buffer)
             .map_err(|_| crypto_error())?;
         Ok(buffer)
     }
