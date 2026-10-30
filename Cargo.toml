@@ -50,7 +50,7 @@ ciborium = "0.2"
 # which fixes RUSTSEC-2026-0387.  Only ECDH is needed, so ECDSA/PEM are off.
 p256 = { version = "0.14", default-features = false, features = ["ecdh"] }
 aes = "0.8"
-cbc = "0.1"
+cbc = "0.2"
 hmac = "0.12"
 hkdf = "0.12"
 sha2 = "0.10"
