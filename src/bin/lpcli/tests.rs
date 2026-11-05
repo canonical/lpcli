@@ -125,6 +125,102 @@ fn pocket_parser_rejects_invalid_pocket() {
 }
 
 #[test]
+fn queue_status_parser_returns_launchpad_spelling() {
+    for (input, expected) in [
+        ("new", "New"),
+        ("unapproved", "Unapproved"),
+        ("accepted", "Accepted"),
+        ("done", "Done"),
+        ("rejected", "Rejected"),
+        ("New", "New"),
+        ("UNAPPROVED", "Unapproved"),
+        (" Done ", "Done"),
+    ] {
+        assert_eq!(
+            parse_queue_status(input).unwrap(),
+            expected,
+            "input: {input}"
+        );
+    }
+}
+
+#[test]
+fn queue_status_parser_rejects_unknown_status() {
+    let err = parse_queue_status("pending").unwrap_err();
+    assert!(err.contains("pending"), "err: {err}");
+    assert!(
+        err.contains("new, unapproved, accepted, done, rejected"),
+        "err: {err}"
+    );
+    assert!(parse_queue_status("").is_err());
+}
+
+#[test]
+fn cli_queue_search_accepts_lowercase_status() {
+    let cli = Cli::try_parse_from([
+        "lpcli", "queue", "search", "--pocket", "proposed", "--status", "new",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Queue(QueueCommand::Search { pocket, status, .. }) => {
+            assert_eq!(pocket, Some(Pocket::Proposed));
+            assert_eq!(status.as_deref(), Some("New"));
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
+fn cli_queue_commands_normalise_status() {
+    for subcommand in ["download", "info", "accept", "reject"] {
+        let cli = Cli::try_parse_from([
+            "lpcli",
+            "queue",
+            subcommand,
+            "--name",
+            "curl",
+            "--status",
+            "unapproved",
+            "--arch",
+            "source",
+        ])
+        .unwrap();
+        let status = match cli.command {
+            Command::Queue(
+                QueueCommand::Download { status, .. }
+                | QueueCommand::Info { status, .. }
+                | QueueCommand::Accept { status, .. }
+                | QueueCommand::Reject { status, .. },
+            ) => status,
+            other => panic!("unexpected command: {other:?}"),
+        };
+        assert_eq!(status, "Unapproved", "subcommand: {subcommand}");
+    }
+}
+
+#[test]
+fn cli_queue_accept_and_reject_default_to_new() {
+    for subcommand in ["accept", "reject"] {
+        let cli = Cli::try_parse_from([
+            "lpcli", "queue", subcommand, "--name", "curl", "--arch", "source",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Queue(
+                QueueCommand::Accept { status, .. } | QueueCommand::Reject { status, .. },
+            ) => assert_eq!(status, "New", "subcommand: {subcommand}"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn cli_queue_rejects_unknown_status() {
+    let result = Cli::try_parse_from(["lpcli", "queue", "search", "--status", "pending"]);
+    assert!(result.is_err());
+}
+
+#[test]
 fn pocket_launchpad_names_are_capitalised() {
     assert_eq!(pocket_launchpad_name(Pocket::Release), "Release");
     assert_eq!(pocket_launchpad_name(Pocket::Security), "Security");
