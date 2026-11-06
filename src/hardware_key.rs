@@ -182,6 +182,19 @@ pub trait Authenticator: Send + Sync {
 
 /// Hooks for prompting the user during a security-key ceremony.
 pub trait Interaction: Send + Sync {
+    /// Prepare to authenticate with an already-registered key, before USB
+    /// devices are enumerated. The default does not prompt.
+    fn prepare_assertion(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Prepare to register a new key, before USB devices are enumerated.
+    /// Interactive implementations can wait here for the user to swap keys
+    /// after authenticating with their existing one. The default does not prompt.
+    fn prepare_registration(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Ask the user to touch the key.  Called when the key reports that it
     /// is waiting for user presence.
     fn prompt_touch(&self);
@@ -205,6 +218,22 @@ pub trait Interaction: Send + Sync {
 pub struct ConsoleInteraction;
 
 impl Interaction for ConsoleInteraction {
+    fn prepare_assertion(&self) -> Result<()> {
+        eprintln!(
+            "Authentication: use the security key bound to your stored grant, not the new key."
+        );
+        Ok(())
+    }
+
+    fn prepare_registration(&self) -> Result<()> {
+        eprintln!("Registration: insert the NEW security key you want to register.");
+        eprintln!(
+            "You can now unplug the authentication key, or select the new key if both are connected."
+        );
+        eprintln!("Press Enter when the new key is connected...");
+        wait_for_registration_key(&mut std::io::stdin().lock())
+    }
+
     fn prompt_touch(&self) {
         eprintln!("Touch your security key to continue...");
     }
@@ -250,6 +279,14 @@ impl Interaction for ConsoleInteraction {
     }
 }
 
+fn wait_for_registration_key(input: &mut impl std::io::BufRead) -> Result<()> {
+    let mut line = String::new();
+    if input.read_line(&mut line)? == 0 {
+        return Err(LpError::HardwareKeyCancelled);
+    }
+    Ok(())
+}
+
 /// Never prompts: PIN requests and choices fail.  The key may still need a
 /// touch, which no software can bypass.
 #[derive(Debug, Clone, Copy, Default)]
@@ -281,7 +318,9 @@ impl Interaction for NonInteractive {
 ///
 /// Each ceremony opens the key, runs the CTAP2 command and closes the device
 /// again, even on failure.  When several keys are plugged in, the user is
-/// asked to choose one.
+/// asked to choose one. Authentication and registration have separate
+/// selections: the default console interaction pauses before registration
+/// so an authentication key can be swapped for the new key.
 #[derive(Clone)]
 pub struct UsbAuthenticator {
     interaction: Arc<dyn Interaction>,
@@ -309,6 +348,7 @@ impl UsbAuthenticator {
     #[cfg(target_os = "linux")]
     fn with_device<R>(
         &self,
+        purpose: &str,
         f: impl FnOnce(&mut ctap2::Session<'_, hidraw::HidrawDevice>) -> Result<R>,
     ) -> Result<R> {
         let devices = hidraw::list_fido_devices().map_err(hidraw::access_error)?;
@@ -321,7 +361,7 @@ impl UsbAuthenticator {
             1 => 0,
             _ => {
                 let labels: Vec<String> = devices.iter().map(|d| d.label()).collect();
-                let index = self.interaction.choose("security key", &labels)?;
+                let index = self.interaction.choose(purpose, &labels)?;
                 if index >= devices.len() {
                     return Err(LpError::HardwareKey(
                         "Invalid device selection.".to_string(),
@@ -341,6 +381,7 @@ impl UsbAuthenticator {
     #[cfg(not(target_os = "linux"))]
     fn with_device<R>(
         &self,
+        _purpose: &str,
         _f: impl FnOnce(&mut ctap2::Session<'_, ctaphid::Unsupported>) -> Result<R>,
     ) -> Result<R> {
         Err(LpError::HardwareKey(
@@ -351,11 +392,19 @@ impl UsbAuthenticator {
 
 impl Authenticator for UsbAuthenticator {
     fn get_assertion(&self, request: &AssertionRequest) -> Result<Assertion> {
-        self.with_device(|session| session.get_assertion(request))
+        #[cfg(target_os = "linux")]
+        self.interaction.prepare_assertion()?;
+        self.with_device("authentication security key", |session| {
+            session.get_assertion(request)
+        })
     }
 
     fn make_credential(&self, request: &RegistrationRequest) -> Result<Registration> {
-        self.with_device(|session| session.make_credential(request))
+        #[cfg(target_os = "linux")]
+        self.interaction.prepare_registration()?;
+        self.with_device("new security key", |session| {
+            session.make_credential(request)
+        })
     }
 }
 
@@ -380,8 +429,76 @@ mod tests {
         assert_eq!(UserVerification::from_webauthn("sometimes"), None);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cancelled_preparation_never_opens_a_device() {
+        struct CancelledInteraction;
+
+        impl Interaction for CancelledInteraction {
+            fn prepare_registration(&self) -> Result<()> {
+                Err(LpError::HardwareKeyCancelled)
+            }
+            fn prepare_assertion(&self) -> Result<()> {
+                Err(LpError::HardwareKeyCancelled)
+            }
+            fn prompt_touch(&self) {
+                panic!("must not start a ceremony");
+            }
+            fn prompt_uv(&self) {
+                panic!("must not start a ceremony");
+            }
+            fn request_pin(&self, _attempt: u32) -> Result<Zeroizing<String>> {
+                panic!("must not start a ceremony");
+            }
+            fn choose(&self, _kind: &str, _labels: &[String]) -> Result<usize> {
+                panic!("must not enumerate devices");
+            }
+        }
+
+        let authenticator = UsbAuthenticator::new(Arc::new(CancelledInteraction));
+        let registration = RegistrationRequest {
+            rp_id: "launchpad.net".into(),
+            rp_name: "Launchpad".into(),
+            user_id: b"user".to_vec(),
+            user_name: "user".into(),
+            user_display_name: "User".into(),
+            client_data_hash: [0; 32],
+            algorithms: vec![-7],
+            exclude_credentials: Vec::new(),
+            resident_key: ResidentKey::Discouraged,
+            user_verification: UserVerification::Preferred,
+            timeout: Duration::from_secs(1),
+        };
+        assert!(matches!(
+            authenticator.make_credential(&registration),
+            Err(LpError::HardwareKeyCancelled)
+        ));
+        let assertion = AssertionRequest {
+            rp_id: registration.rp_id,
+            client_data_hash: registration.client_data_hash,
+            allow_credentials: Vec::new(),
+            user_verification: registration.user_verification,
+            timeout: registration.timeout,
+        };
+        assert!(matches!(
+            authenticator.get_assertion(&assertion),
+            Err(LpError::HardwareKeyCancelled)
+        ));
+    }
+
+    #[test]
+    fn registration_preparation_requires_confirmation() {
+        assert!(wait_for_registration_key(&mut &b"\n"[..]).is_ok());
+        assert!(matches!(
+            wait_for_registration_key(&mut &b""[..]),
+            Err(LpError::HardwareKeyCancelled)
+        ));
+    }
+
     #[test]
     fn non_interactive_never_prompts() {
+        assert!(NonInteractive.prepare_assertion().is_ok());
+        assert!(NonInteractive.prepare_registration().is_ok());
         assert!(NonInteractive.request_pin(0).is_err());
         assert!(
             NonInteractive
