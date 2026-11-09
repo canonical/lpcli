@@ -87,7 +87,7 @@ async fn rate_limit_retry_after_header_is_captured() {
     let mock = server
         .mock("GET", "/bugs/1")
         .with_status(429)
-        .with_header("Retry-After", "42")
+        .with_header("Retry-After", "12")
         .expect(2) // initial + 1 retry
         .create_async()
         .await;
@@ -106,9 +106,9 @@ async fn rate_limit_retry_after_header_is_captured() {
         LpError::RateLimit {
             retry_after_secs: Some(secs),
         } => {
-            assert_eq!(secs, 42, "Retry-After header value must be surfaced");
+            assert_eq!(secs, 12, "Retry-After header value must be surfaced");
         }
-        other => panic!("expected RateLimit with retry_after_secs=Some(42), got: {other}"),
+        other => panic!("expected RateLimit with retry_after_secs=Some(12), got: {other}"),
     }
 
     mock.assert_async().await;

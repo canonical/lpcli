@@ -1610,6 +1610,11 @@ enum HardwareTokenCommand {
     Register {
         /// A name to help tell your registered keys apart.
         name: String,
+        /// Authenticate API requests with the existing classic OAuth session
+        /// from the system keyring or legacy credentials file, ignoring any
+        /// stored hardware-bound grant. The new key is still needed to register.
+        #[arg(long)]
+        classic: bool,
     },
 
     /// Revoke a registered security key.  Its grants can no longer mint
@@ -4107,9 +4112,21 @@ async fn handle_hardware_token(cmd: HardwareTokenCommand) -> lpcli::error::Resul
             println!("{table}");
         }
 
-        HardwareTokenCommand::Register { name } => {
-            let client = authenticated_client()?;
+        HardwareTokenCommand::Register { name, classic } => {
+            let client = if classic {
+                classic_authenticated_client()?
+            } else {
+                authenticated_client()?
+            };
             println!("Registering a security key with Launchpad...");
+            if client.is_hardware_bound() {
+                eprintln!("First authenticate with the key bound to your stored grant.");
+                eprintln!(
+                    "To use an existing OAuth session instead, rerun registration with --classic."
+                );
+            } else {
+                eprintln!("Authenticating API requests with the stored classic OAuth session.");
+            }
             let key =
                 hardware_tokens::register_hardware_key(&client, &name, usb_authenticator()).await?;
             println!(
@@ -5159,6 +5176,12 @@ fn authenticated_client() -> lpcli::error::Result<LaunchpadClient> {
     if let Some(session) = session {
         return Ok(LaunchpadClient::with_hardware_token(Arc::new(session)));
     }
+    classic_authenticated_client()
+}
+
+/// Load only the classic OAuth session from the keyring or legacy file.
+/// This never reads, replaces or deletes a stored hardware-bound grant.
+fn classic_authenticated_client() -> lpcli::error::Result<LaunchpadClient> {
     let creds = auth::load_credentials()?;
     Ok(LaunchpadClient::new(Some(creds)))
 }

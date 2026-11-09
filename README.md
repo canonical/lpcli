@@ -120,9 +120,41 @@ required. Hardware-bound tokens are currently supported on Linux only.
    run `lpcli logout --classic`. Grants use the separate `lpcli-hardware`
    consumer, so this does not affect them.
 
-From then on, lpcli uses the stored grant for every authenticated command. Each
+From then on, lpcli uses the stored grant by default for authenticated commands. Each
 invocation needs one touch to mint an access token, which is reused until
 shortly before it expires. Access tokens are never stored.
+
+#### Registering an additional key
+
+Authentication and registration use **different keys**. With a hardware-bound
+login, start with the key bound to your stored grant connected:
+
+```bash
+lpcli hardware-token register "Backup key"
+```
+
+Authenticate with the original key first. At the **Registration** prompt,
+connect the new key and press Enter. You may unplug the original key at that
+point, or leave both connected and select the new key. Device selection is
+labelled separately for authentication and registration. If the short-lived
+access token needs renewal later, reconnect the original key when prompted.
+A new key cannot authenticate with a grant bound to the original key; selecting
+it during authentication causes "This key has no matching credential".
+
+Alternatively, use an existing classic OAuth session even when a hardware-bound
+grant is stored:
+
+```bash
+lpcli hardware-token register "Backup key" --classic
+```
+
+This loads the OAuth session from the system keyring or the legacy
+`~/.config/lpcli/credentials.toml` file. Only the new key is needed. If no classic
+session remains, run `lpcli login` first. There is no automatic downgrade to
+classic authentication when hardware authentication fails. Registration does
+not replace your stored grant or issue a grant for the new key. After using a
+new classic bootstrap session, revoke its authorization and run
+`lpcli logout --classic` as above.
 
 Other useful commands:
 

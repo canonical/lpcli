@@ -1415,7 +1415,9 @@ pub async fn list_registered_authenticators(
 }
 
 /// Register a USB security key with the authenticated account, naming it
-/// `name`.  The user must touch the key.
+/// `name`.  The user must touch the key.  `authenticator` creates the new
+/// credential; a hardware-bound `client` may first need its own existing key
+/// to authenticate.  Registration does not issue or store a refresh grant.
 ///
 /// The registration state lives in the server session, so the completion
 /// request carries the session cookie set by the first request.
@@ -1583,6 +1585,7 @@ mod tests {
     #[derive(Default)]
     struct FakeAuthenticator {
         requests: Mutex<Vec<AssertionRequest>>,
+        registrations: Mutex<Vec<RegistrationRequest>>,
         credential_id: Option<Vec<u8>>,
     }
 
@@ -1600,8 +1603,15 @@ mod tests {
             })
         }
 
-        fn make_credential(&self, _request: &RegistrationRequest) -> Result<Registration> {
-            unreachable!("not used by these tests")
+        fn make_credential(&self, request: &RegistrationRequest) -> Result<Registration> {
+            self.registrations.lock().unwrap().push(request.clone());
+            Ok(Registration {
+                credential_id: self
+                    .credential_id
+                    .clone()
+                    .unwrap_or_else(|| CREDENTIAL_ID.to_vec()),
+                attestation_object: b"fake-attestation".to_vec(),
+            })
         }
     }
 
@@ -1903,6 +1913,253 @@ mod tests {
             Some("launchpad_tests=abc123; other=xyz")
         );
         assert_eq!(cookie_header(&reqwest::header::HeaderMap::new()), None);
+    }
+
+    // -- Registration --------------------------------------------------------
+
+    const NEW_CREDENTIAL_ID: &[u8] = b"new-credential";
+    const REGISTRATION_TEST_CHILD: &str = "LPCLI_REGISTRATION_TEST_CHILD";
+
+    // Isolate the storage override from other concurrently running tests.
+    fn registration_in_store(test_name: &str) -> bool {
+        if std::env::var(REGISTRATION_TEST_CHILD).as_deref() == Ok(test_name) {
+            return true;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grant.json");
+        let store = GrantStore::File(path.clone());
+        let original = HardwareTokenCredentials::new(
+            grant()
+                .with_credential_id(&encode_base64url(CREDENTIAL_ID))
+                .unwrap(),
+            HARDWARE_CONSUMER_KEY,
+        )
+        .unwrap();
+        store.save(&original).unwrap();
+        let original_bytes = std::fs::read(&path).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env(REGISTRATION_TEST_CHILD, test_name)
+            .env(CREDENTIALS_FILE_ENV, &path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "registration subprocess failed:\n{stdout}\n{stderr}"
+        );
+        assert!(stdout.contains("running 1 test"));
+        assert_eq!(store.load().unwrap().as_ref(), Some(&original));
+        assert!(std::fs::read(&path).unwrap() == original_bytes);
+        false
+    }
+
+    async fn registration_mocks(
+        server: &mut mockito::ServerGuard,
+        consumer: &str,
+        token: &str,
+    ) -> Vec<mockito::Mock> {
+        let person = format!("{}/devel/~example-user", server.url());
+        let location = format!("{person}/+authenticator/42");
+        let auth = Matcher::Regex(format!(
+            r#"oauth_consumer_key="{consumer}", oauth_token="{token}""#
+        ));
+        let client_data = client_data_json("webauthn.create", &[9; 32], WEB_ROOT).unwrap();
+        let credential = json!({
+            "id": encode_base64url(NEW_CREDENTIAL_ID),
+            "rawId": encode_base64url(NEW_CREDENTIAL_ID),
+            "type": "public-key",
+            "response": {
+                "clientDataJSON": encode_base64url(&client_data),
+                "attestationObject": encode_base64url(b"fake-attestation"),
+            },
+        });
+        // The Text parameter contains a JSON string whose contents are JSON.
+        let response = serde_json::to_string(&credential.to_string()).unwrap();
+        let body = format!(
+            "ws.op=completeWebAuthnRegistration&response={}&name=new-key",
+            url::form_urlencoded::byte_serialize(response.as_bytes()).collect::<String>()
+        );
+        let options = json!({"publicKey": {
+            "rp": {"id": "launchpad.net", "name": "Launchpad"},
+            "user": {"id": encode_base64url(b"user"), "name": "example-user", "displayName": "Example"},
+            "challenge": encode_base64url(&[9; 32]),
+            "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+
+        }});
+        vec![
+            server
+                .mock("GET", "/devel/")
+                .match_header("authorization", auth.clone())
+                .with_body(json!({"me_link": person}).to_string())
+                .create_async()
+                .await,
+            server
+                .mock("GET", "/devel/~example-user")
+                .match_header("authorization", auth.clone())
+                .with_body(json!({"name": "example-user", "self_link": person}).to_string())
+                .create_async()
+                .await,
+            server
+                .mock("POST", "/devel/~example-user")
+                .match_header("authorization", auth.clone())
+                .match_header("cookie", Matcher::Missing)
+                .match_body("ws.op=beginWebAuthnRegistration")
+                .with_header("set-cookie", "lp_session=abc123; Path=/; HttpOnly")
+                .with_body(options.to_string())
+                .create_async()
+                .await,
+            server
+                .mock("POST", "/devel/~example-user")
+                .match_header("authorization", auth.clone())
+                .match_header("cookie", "lp_session=abc123")
+                .match_body(body.as_str())
+                .with_status(201)
+                .with_header("location", &location)
+                .create_async()
+                .await,
+            server
+                .mock("GET", "/devel/~example-user/+authenticator/42")
+                .match_header("authorization", auth)
+                .with_body(json!({"id": 42, "name": "new-key"}).to_string())
+                .create_async()
+                .await,
+        ]
+    }
+
+    fn new_registration_key() -> Arc<FakeAuthenticator> {
+        Arc::new(FakeAuthenticator {
+            credential_id: Some(NEW_CREDENTIAL_ID.to_vec()),
+            ..Default::default()
+        })
+    }
+
+    fn assert_new_registration(key: &FakeAuthenticator) {
+        assert!(key.requests.lock().unwrap().is_empty());
+        let registrations = key.registrations.lock().unwrap();
+        assert_eq!(registrations.len(), 1);
+
+        let data = client_data_json("webauthn.create", &[9; 32], WEB_ROOT).unwrap();
+        assert_eq!(
+            registrations[0].client_data_hash,
+            <[u8; 32]>::from(Sha256::digest(data))
+        );
+    }
+
+    #[tokio::test]
+    async fn registration_with_hardware_session_uses_distinct_keys_and_preserves_grant() {
+        if !registration_in_store(
+            "hardware_tokens::tests::registration_with_hardware_session_uses_distinct_keys_and_preserves_grant",
+        ) {
+            return;
+        }
+        let mut server = mockito::Server::new_async().await;
+        let challenge = server
+            .mock("POST", "/+hw-challenge")
+            .match_body("oauth_token=refresh-token&oauth_token_secret=refresh-secret")
+            .with_body(challenge_body("launchpad.net", "discouraged"))
+            .expect(1)
+            .create_async()
+            .await;
+        let assertion_data = client_data_json("webauthn.get", &[0xAB; 32], WEB_ROOT).unwrap();
+        let assertion = assertion_json(
+            &Assertion {
+                credential_id: CREDENTIAL_ID.to_vec(),
+                authenticator_data: b"authenticator-data".to_vec(),
+                signature: b"signature".to_vec(),
+                user_handle: None,
+            },
+            &assertion_data,
+        )
+        .to_string();
+        let exchange = server
+            .mock("POST", "/+hw-access-token")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("oauth_token".into(), "refresh-token".into()),
+                Matcher::UrlEncoded("oauth_token_secret".into(), "refresh-secret".into()),
+                Matcher::UrlEncoded("challenge_id".into(), "7".into()),
+                Matcher::UrlEncoded("assertion".into(), assertion),
+            ]))
+            .with_body(token_body("minted-access", TimeDelta::hours(1)))
+            .expect(1)
+            .create_async()
+            .await;
+        let mocks = registration_mocks(&mut server, HARDWARE_CONSUMER_KEY, "minted-access").await;
+        let old_key = Arc::new(FakeAuthenticator::default());
+        let original = GrantStore::from_env().load().unwrap().unwrap();
+        let session = Arc::new(session(&server, old_key.clone(), original.grant().clone()));
+        let client = LaunchpadClient::with_hardware_token(Arc::clone(&session))
+            .with_base_url(format!("{}/devel", server.url()));
+        let new_key = new_registration_key();
+        let result = register_hardware_key(&client, "new-key", new_key.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(result.id, Some(42));
+        for mock in mocks {
+            mock.assert_async().await;
+        }
+        challenge.assert_async().await;
+        exchange.assert_async().await;
+        assert_eq!(session.credentials(), &original);
+        assert!(old_key.registrations.lock().unwrap().is_empty());
+        let assertions = old_key.requests.lock().unwrap();
+        assert_eq!(assertions.len(), 1);
+        assert_eq!(
+            assertions[0].allow_credentials,
+            vec![CREDENTIAL_ID.to_vec()]
+        );
+        assert_eq!(
+            assertions[0].client_data_hash,
+            <[u8; 32]>::from(Sha256::digest(assertion_data))
+        );
+        assert_new_registration(&new_key);
+        assert_ne!(
+            assertions[0].client_data_hash,
+            new_key.registrations.lock().unwrap()[0].client_data_hash
+        );
+    }
+
+    #[tokio::test]
+    async fn registration_with_classic_credentials_needs_no_existing_key() {
+        if !registration_in_store(
+            "hardware_tokens::tests::registration_with_classic_credentials_needs_no_existing_key",
+        ) {
+            return;
+        }
+        let mut server = mockito::Server::new_async().await;
+        let challenge = server
+            .mock("POST", "/+hw-challenge")
+            .expect(0)
+            .create_async()
+            .await;
+        let exchange = server
+            .mock("POST", "/+hw-access-token")
+            .expect(0)
+            .create_async()
+            .await;
+        let mocks = registration_mocks(&mut server, "classic-consumer", "classic-access").await;
+        let client = LaunchpadClient::new(Some(Credentials::new(
+            "classic-consumer",
+            "classic-access",
+            "classic-secret",
+        )))
+        .with_base_url(format!("{}/devel", server.url()));
+        let new_key = new_registration_key();
+        let result = register_hardware_key(&client, "new-key", new_key.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(result.id, Some(42));
+        for mock in mocks {
+            mock.assert_async().await;
+        }
+        challenge.assert_async().await;
+        exchange.assert_async().await;
+        assert_new_registration(&new_key);
     }
 
     // -- Minting -------------------------------------------------------------

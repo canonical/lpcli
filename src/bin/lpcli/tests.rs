@@ -3,6 +3,27 @@
 
 use super::*;
 
+#[test]
+fn cli_hardware_registration_can_use_classic_credentials() {
+    for classic in [false, true] {
+        let mut args = vec!["lpcli", "hardware-token", "register", "Backup key"];
+        if classic {
+            args.push("--classic");
+        }
+        let cli = Cli::try_parse_from(args).unwrap();
+        match cli.command {
+            Command::HardwareToken(HardwareTokenCommand::Register {
+                name,
+                classic: parsed_classic,
+            }) => {
+                assert_eq!(name, "Backup key");
+                assert_eq!(parsed_classic, classic);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+}
+
 // -----------------------------------------------------------------------
 // Helpers shared by multiple tests
 // -----------------------------------------------------------------------
