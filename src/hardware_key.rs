@@ -212,8 +212,9 @@ pub trait Interaction: Send + Sync {
     fn choose(&self, kind: &str, labels: &[String]) -> Result<usize>;
 }
 
-/// Prompts on the terminal.  Messages go to stderr so stdout stays usable
-/// for command output.
+/// Prompts on the terminal. Messages go to stderr so stdout stays usable
+/// for command output. Registration confirmation requires stdin to be a
+/// terminal; piped or redirected stdin is rejected before prompting.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ConsoleInteraction;
 
@@ -226,12 +227,20 @@ impl Interaction for ConsoleInteraction {
     }
 
     fn prepare_registration(&self) -> Result<()> {
+        use std::io::IsTerminal;
+
+        let stdin = std::io::stdin();
+        if !stdin.is_terminal() {
+            return Err(LpError::HardwareKey(
+                "Hardware key registration requires an interactive session.".to_string(),
+            ));
+        }
         eprintln!("Registration: insert the NEW security key you want to register.");
         eprintln!(
             "You can now unplug the authentication key, or select the new key if both are connected."
         );
         eprintln!("Press Enter when the new key is connected...");
-        wait_for_registration_key(&mut std::io::stdin().lock())
+        wait_for_registration_key(&mut stdin.lock())
     }
 
     fn prompt_touch(&self) {
@@ -266,25 +275,55 @@ impl Interaction for ConsoleInteraction {
         eprint!("Choose a {kind} [1-{}]: ", labels.len());
         let _ = std::io::stderr().flush();
 
-        let mut line = String::new();
-        if std::io::stdin().read_line(&mut line)? == 0 {
-            return Err(LpError::HardwareKeyCancelled);
-        }
-        line.trim()
-            .parse::<usize>()
-            .ok()
-            .filter(|choice| (1..=labels.len()).contains(choice))
-            .map(|choice| choice - 1)
-            .ok_or_else(|| LpError::HardwareKey(format!("Invalid {kind} selection.")))
+        read_selection(&mut std::io::stdin().lock(), kind, labels.len())
     }
 }
 
-fn wait_for_registration_key(input: &mut impl std::io::BufRead) -> Result<()> {
+/// Maximum prompt-line length in bytes, including the newline.
+const MAX_PROMPT_LINE_BYTES: usize = 1024;
+
+/// Read one complete prompt response without allowing unbounded allocation.
+/// This limits bytes, not time: waiting for terminal input may still block.
+fn read_prompt_line(input: &mut impl std::io::BufRead) -> Result<String> {
+    use std::io::{BufRead, Read};
+
     let mut line = String::new();
-    if input.read_line(&mut line)? == 0 {
+    // Read one extra byte to distinguish a full-sized line from oversized
+    // input. Never drain the rest of an invalid line: it may be endless.
+    if input
+        .take((MAX_PROMPT_LINE_BYTES + 1) as u64)
+        .read_line(&mut line)?
+        == 0
+    {
         return Err(LpError::HardwareKeyCancelled);
     }
-    Ok(())
+    if line.len() > MAX_PROMPT_LINE_BYTES {
+        return Err(LpError::HardwareKey(format!(
+            "Prompt response exceeds {MAX_PROMPT_LINE_BYTES} bytes."
+        )));
+    }
+    // Take's artificial EOF, or actual EOF after partial input, must not be
+    // treated as pressing Enter.
+    if !line.ends_with('\n') {
+        return Err(LpError::HardwareKey(
+            "Prompt response must end with Enter (a newline).".to_string(),
+        ));
+    }
+    Ok(line)
+}
+
+fn read_selection(input: &mut impl std::io::BufRead, kind: &str, count: usize) -> Result<usize> {
+    read_prompt_line(input)?
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|choice| (1..=count).contains(choice))
+        .map(|choice| choice - 1)
+        .ok_or_else(|| LpError::HardwareKey(format!("Invalid {kind} selection.")))
+}
+
+fn wait_for_registration_key(input: &mut impl std::io::BufRead) -> Result<()> {
+    read_prompt_line(input).map(|_| ())
 }
 
 /// Never prompts: PIN requests and choices fail.  The key may still need a
@@ -487,11 +526,189 @@ mod tests {
     }
 
     #[test]
+    fn console_registration_rejects_nonterminal_stdin() {
+        use std::io::{IsTerminal, Write};
+        use std::process::{Command, Stdio};
+
+        const CHILD_ENV: &str = "LPCLI_TEST_NONTERMINAL_REGISTRATION";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            assert!(!std::io::stdin().is_terminal());
+            let err = ConsoleInteraction.prepare_registration().unwrap_err();
+            assert!(matches!(err, LpError::HardwareKey(_)));
+            assert_eq!(
+                err.to_string(),
+                "Security key error: Hardware key registration requires an interactive session."
+            );
+            return;
+        }
+
+        // Run in subprocesses so the test controls real stdin without
+        // changing the test runner's file descriptors or environment.
+        for piped in [false, true] {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "hardware_key::tests::console_registration_rejects_nonterminal_stdin",
+                ])
+                .env(CHILD_ENV, "1")
+                .stdin(if piped { Stdio::piped() } else { Stdio::null() })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            if let Some(mut input) = child.stdin.take() {
+                // Even a piped Enter must not bypass the terminal check.
+                // The child may already have exited and closed its stdin.
+                match input.write_all(b"\n") {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                    Err(e) => panic!("cannot write test input: {e}"),
+                }
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "child failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.stderr.is_empty(),
+                "must reject before displaying prompts"
+            );
+        }
+    }
+
+    #[test]
     fn registration_preparation_requires_confirmation() {
-        assert!(wait_for_registration_key(&mut &b"\n"[..]).is_ok());
+        // Keep the existing workflow: Enter confirms, even after whitespace
+        // or other text. Both Unix and Windows line endings are accepted.
+        for response in ["\n", "\r\n", "   \n", "ready\n", "prêt\n"] {
+            assert!(wait_for_registration_key(&mut response.as_bytes()).is_ok());
+        }
         assert!(matches!(
             wait_for_registration_key(&mut &b""[..]),
             Err(LpError::HardwareKeyCancelled)
+        ));
+    }
+
+    #[test]
+    fn device_selection_accepts_normal_input() {
+        for (response, expected) in [
+            ("1\n", 0),
+            ("2\r\n", 1),
+            ("  2  \n", 1),
+            ("\u{2003}2\u{2003}\n", 1),
+            ("002\n", 1),
+            ("1000\n", 999),
+        ] {
+            assert_eq!(
+                read_selection(&mut response.as_bytes(), "security key", 1000).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn device_selection_still_rejects_invalid_choices() {
+        for response in ["0\n", "3\n", "-1\n", "two\n", "\n", "1 2\n"] {
+            let err = read_selection(&mut response.as_bytes(), "security key", 2).unwrap_err();
+            assert!(err.to_string().contains("Invalid security key selection."));
+        }
+        assert!(matches!(
+            read_selection(&mut &b""[..], "security key", 2),
+            Err(LpError::HardwareKeyCancelled)
+        ));
+    }
+
+    #[test]
+    fn prompts_reject_eof_after_partial_input() {
+        for response in ["1", "ready", "\r"] {
+            let err = wait_for_registration_key(&mut response.as_bytes()).unwrap_err();
+            assert!(err.to_string().contains("newline"));
+            let err = read_selection(&mut response.as_bytes(), "security key", 2).unwrap_err();
+            assert!(err.to_string().contains("newline"));
+        }
+    }
+
+    #[test]
+    fn prompt_limit_allows_full_sized_complete_lines() {
+        let registration = format!("{}\n", "x".repeat(MAX_PROMPT_LINE_BYTES - 1));
+        assert!(wait_for_registration_key(&mut registration.as_bytes()).is_ok());
+        let selection = format!("1{}\n", " ".repeat(MAX_PROMPT_LINE_BYTES - 2));
+        assert_eq!(
+            read_selection(&mut selection.as_bytes(), "security key", 2).unwrap(),
+            0
+        );
+        // The limit is measured in bytes, not Unicode characters.
+        let unicode = format!("{} \n", "é".repeat((MAX_PROMPT_LINE_BYTES - 2) / 2));
+        assert_eq!(unicode.len(), MAX_PROMPT_LINE_BYTES);
+        assert!(wait_for_registration_key(&mut unicode.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn prompts_reject_oversized_input_without_draining_it() {
+        for newline in ["", "\n"] {
+            // It starts with a valid choice, but truncation must not accept it.
+            let response = format!("1{}{newline}", " ".repeat(MAX_PROMPT_LINE_BYTES * 2));
+            let mut input = response.as_bytes();
+            let err = read_selection(&mut input, "security key", 2).unwrap_err();
+            assert!(err.to_string().contains("exceeds"));
+            assert_eq!(input.len(), response.len() - MAX_PROMPT_LINE_BYTES - 1);
+
+            let mut input = response.as_bytes();
+            let err = wait_for_registration_key(&mut input).unwrap_err();
+            assert!(err.to_string().contains("exceeds"));
+            assert_eq!(input.len(), response.len() - MAX_PROMPT_LINE_BYTES - 1);
+        }
+        // A newline on the extra byte is oversized, not confirmation.
+        let response = format!("{}\n", "x".repeat(MAX_PROMPT_LINE_BYTES));
+        assert!(wait_for_registration_key(&mut response.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn endless_input_is_bounded() {
+        struct EndlessInput {
+            bytes_read: usize,
+        }
+        impl std::io::Read for EndlessInput {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                // Fail fast if the bound is accidentally removed, rather than
+                // letting a regression hang or exhaust memory in this test.
+                let remaining = MAX_PROMPT_LINE_BYTES + 1 - self.bytes_read;
+                assert!(remaining > 0, "read beyond the prompt limit");
+                let n = buf.len().min(remaining);
+                buf[..n].fill(b'x');
+                self.bytes_read += n;
+                Ok(n)
+            }
+        }
+        let mut input = std::io::BufReader::with_capacity(1, EndlessInput { bytes_read: 0 });
+        let err = read_prompt_line(&mut input).unwrap_err();
+        assert!(err.to_string().contains("exceeds"));
+        assert_eq!(input.get_ref().bytes_read, MAX_PROMPT_LINE_BYTES + 1);
+    }
+
+    #[test]
+    fn successive_prompts_do_not_consume_each_others_input() {
+        let mut input = &b"\n 2\r\n"[..];
+        wait_for_registration_key(&mut input).unwrap();
+        assert_eq!(
+            read_selection(&mut input, "new security key", 2).unwrap(),
+            1
+        );
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn prompt_errors_do_not_echo_input() {
+        let response = format!("{}\n", "PRIVATE-INPUT".repeat(MAX_PROMPT_LINE_BYTES));
+        let err = read_prompt_line(&mut response.as_bytes()).unwrap_err();
+        assert!(!err.to_string().contains("PRIVATE-INPUT"));
+        let mut invalid_utf8 = &[0xff, b'\n'][..];
+        assert!(matches!(
+            read_prompt_line(&mut invalid_utf8),
+            Err(LpError::Io(_))
         ));
     }
 
