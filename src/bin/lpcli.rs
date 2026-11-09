@@ -58,6 +58,28 @@ fn parse_pocket(s: &str) -> Result<Pocket, String> {
     })
 }
 
+/// Upload-queue statuses, in Launchpad's API spelling.
+const QUEUE_STATUSES: [&str; 5] = ["New", "Unapproved", "Accepted", "Done", "Rejected"];
+
+/// Parse an upload-queue status argument for clap.
+///
+/// Matching is case-insensitive (e.g. `new`, `New` and `NEW` are all
+/// accepted), and the result is Launchpad's canonical spelling (e.g. `New`),
+/// which the `getPackageUploads` API requires.
+fn parse_queue_status(s: &str) -> Result<String, String> {
+    let wanted = s.trim();
+    QUEUE_STATUSES
+        .iter()
+        .find(|status| status.eq_ignore_ascii_case(wanted))
+        .map(|status| (*status).to_string())
+        .ok_or_else(|| {
+            format!(
+                "invalid upload-queue status '{s}'; valid statuses are: {}",
+                QUEUE_STATUSES.map(str::to_ascii_lowercase).join(", ")
+            )
+        })
+}
+
 /// Return the Launchpad API spelling of a pocket (e.g. `Release`).
 fn pocket_launchpad_name(pocket: Pocket) -> &'static str {
     match pocket {
@@ -1370,8 +1392,9 @@ enum QueueCommand {
         /// Filter by pocket: Release, Security, Updates, Proposed, or Backports.
         #[arg(short, long, value_parser = parse_pocket)]
         pocket: Option<Pocket>,
-        /// Filter by upload status: New, Unapproved, Accepted, Done, or Rejected.
-        #[arg(short, long, required = true)]
+        /// Filter by upload status: new, unapproved, accepted, done, or rejected
+        /// (case-insensitive).
+        #[arg(short, long, required = true, value_parser = parse_queue_status)]
         status: Option<String>,
         /// Keyword used to match the uploaded package name.
         #[arg(short, long)]
@@ -1404,8 +1427,9 @@ enum QueueCommand {
         /// Package version (optional; downloads the first match if not given).
         #[arg(short, long)]
         version: Option<String>,
-        /// Filter by upload status (e.g. "New", "Unapproved", "Accepted", "Done").
-        #[arg(short, long)]
+        /// Filter by upload status: new, unapproved, accepted, done, or rejected
+        /// (case-insensitive).
+        #[arg(short, long, value_parser = parse_queue_status)]
         status: String,
         /// Filter by architecture (e.g. "amd64", "arm64", "source").
         #[arg(short, long, value_parser = parse_queue_arch)]
@@ -1428,8 +1452,9 @@ enum QueueCommand {
         /// Package version (optional; shows the first match if not given).
         #[arg(short, long)]
         version: Option<String>,
-        /// Filter by upload status (e.g. "New", "Unapproved", "Accepted", "Done", "Rejected").
-        #[arg(short, long)]
+        /// Filter by upload status: new, unapproved, accepted, done, or rejected
+        /// (case-insensitive).
+        #[arg(short, long, value_parser = parse_queue_status)]
         status: String,
         /// Filter by architecture (e.g. "amd64", "arm64", "source").
         #[arg(short, long, value_parser = parse_queue_arch)]
@@ -1449,8 +1474,8 @@ enum QueueCommand {
         /// Package version (optional; accepts the first match if not given).
         #[arg(short, long)]
         version: Option<String>,
-        /// Filter by upload status (e.g. "New", "Unapproved").
-        #[arg(short, long, default_value = "New")]
+        /// Filter by upload status, e.g. new or unapproved (case-insensitive).
+        #[arg(short, long, default_value = "New", value_parser = parse_queue_status)]
         status: String,
         /// Filter by architecture (e.g. "amd64", "arm64", "source").
         #[arg(short, long, value_parser = parse_queue_arch)]
@@ -1470,8 +1495,8 @@ enum QueueCommand {
         /// Package version (optional; rejects the first match if not given).
         #[arg(short, long)]
         version: Option<String>,
-        /// Filter by upload status (e.g. "New", "Unapproved").
-        #[arg(short, long, default_value = "New")]
+        /// Filter by upload status, e.g. new or unapproved (case-insensitive).
+        #[arg(short, long, default_value = "New", value_parser = parse_queue_status)]
         status: String,
         /// Filter by architecture (e.g. "amd64", "arm64", "source").
         #[arg(short, long, value_parser = parse_queue_arch)]
