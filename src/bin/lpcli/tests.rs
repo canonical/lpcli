@@ -926,32 +926,35 @@ fn collect_empty_tasks_list_returns_error() {
 }
 
 // -----------------------------------------------------------------------
-// truncate / build_table (pre-existing)
+// build_table (pre-existing)
 // -----------------------------------------------------------------------
 
 #[test]
-fn truncate_short_string_unchanged() {
-    assert_eq!(truncate("hello", 10), "hello");
-}
-
-#[test]
-fn truncate_long_string_adds_ellipsis() {
-    let s = truncate("abcdefghij", 5);
-    assert!(s.ends_with('…'));
-    assert!(s.chars().count() <= 5);
-}
-
-#[test]
-fn truncate_exact_length_unchanged() {
-    assert_eq!(truncate("hello", 5), "hello");
-}
-
-#[test]
 fn build_table_smoke() {
-    let table = build_table(vec!["Col A", "Col B"]);
+    let display = Display::from_width(100);
+    let table = build_table(&display, vec!["Col A", "Col B"]);
     let rendered = table.to_string();
     assert!(rendered.contains("Col A"));
     assert!(rendered.contains("Col B"));
+}
+
+#[test]
+fn cli_width_is_global_and_precedes_subcommands() {
+    for args in [
+        vec!["lpcli", "--width", "150", "status"],
+        vec!["lpcli", "status", "--width", "150"],
+        vec!["lpcli", "bug", "search", "--width", "150"],
+    ] {
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert_eq!(cli.width, Some(150));
+    }
+}
+
+#[test]
+fn cli_width_rejects_invalid_values() {
+    for value in ["0", "-1", "wide", "65536"] {
+        assert!(Cli::try_parse_from(["lpcli", "--width", value, "status"]).is_err());
+    }
 }
 
 // -----------------------------------------------------------------------
