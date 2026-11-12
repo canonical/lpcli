@@ -926,32 +926,47 @@ fn collect_empty_tasks_list_returns_error() {
 }
 
 // -----------------------------------------------------------------------
-// truncate / build_table (pre-existing)
+// build_table (pre-existing)
 // -----------------------------------------------------------------------
 
 #[test]
-fn truncate_short_string_unchanged() {
-    assert_eq!(truncate("hello", 10), "hello");
-}
-
-#[test]
-fn truncate_long_string_adds_ellipsis() {
-    let s = truncate("abcdefghij", 5);
-    assert!(s.ends_with('…'));
-    assert!(s.chars().count() <= 5);
-}
-
-#[test]
-fn truncate_exact_length_unchanged() {
-    assert_eq!(truncate("hello", 5), "hello");
-}
-
-#[test]
 fn build_table_smoke() {
-    let table = build_table(vec!["Col A", "Col B"]);
+    let display = Display::from_width(100);
+    let table = build_table(&display, vec!["Col A", "Col B"]);
     let rendered = table.to_string();
     assert!(rendered.contains("Col A"));
     assert!(rendered.contains("Col B"));
+}
+
+#[test]
+fn cli_rejects_removed_width_option() {
+    for args in [
+        vec!["lpcli", "--width", "150", "status"],
+        vec!["lpcli", "status", "--width", "150"],
+        vec!["lpcli", "bug", "search", "--width", "150"],
+        vec!["lpcli", "--width=150", "status"],
+    ] {
+        let err = Cli::try_parse_from(&args).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
+        assert!(err.to_string().contains("--width"), "{args:?}: {err}");
+    }
+}
+
+#[test]
+fn cli_help_does_not_list_width_option() {
+    for args in [
+        vec!["lpcli", "--help"],
+        vec!["lpcli", "status", "--help"],
+        vec!["lpcli", "bug", "search", "--help"],
+    ] {
+        let help = Cli::try_parse_from(&args).unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp, "{args:?}");
+        assert!(!help.to_string().contains("--width"), "{args:?}: {help}");
+    }
 }
 
 // -----------------------------------------------------------------------

@@ -179,6 +179,25 @@ If a security key PIN is set, lpcli asks for it when Launchpad requests user
 verification. Keys with built-in verification (e.g. fingerprint) use that
 instead.
 
+## Display width
+
+To configure the output width, create `~/.config/lpcli/config.toml` (or the
+platform-equivalent configuration directory):
+
+```toml
+[display]
+width = 150
+```
+
+The configured width must be an integer between 1 and 65535 columns and takes
+precedence over terminal detection, including when output is redirected. If no
+width is configured, lpcli uses the terminal width when stdout is a terminal,
+or 100 columns when output is redirected or the width cannot be detected. 
+
+Widths include table borders and padding. Long cell text wraps instead of being
+truncated; extremely narrow outputs use a stacked `Field: value` layout. A
+configured width is not capped to the physical terminal width.
+
 ## Usage
 
 ```

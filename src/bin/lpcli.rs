@@ -5,9 +5,15 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+#[path = "lpcli/config.rs"]
+mod config;
+#[path = "lpcli/display.rs"]
+mod display;
+
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
-use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
+
+use display::Display;
 use ubuntu_info_rust::{Architecture, Pocket, SeriesInfo};
 
 use lpcli::{
@@ -1793,6 +1799,8 @@ async fn run() -> lpcli::error::Result<()> {
     if let Err(e) = validate_cli(&cli) {
         e.exit();
     }
+    let settings = config::load()?;
+    let display = Display::new(settings.display.width);
 
     match cli.command {
         Command::Status => handle_status().await?,
@@ -1827,21 +1835,21 @@ async fn run() -> lpcli::error::Result<()> {
             }
         }
 
-        Command::HardwareToken(cmd) => handle_hardware_token(cmd).await?,
+        Command::HardwareToken(cmd) => handle_hardware_token(cmd, &display).await?,
 
-        Command::Bug(cmd) => handle_bug(cmd).await?,
-        Command::Person(cmd) => handle_person(cmd).await?,
-        Command::Package(cmd) => handle_package(cmd).await?,
-        Command::Project(cmd) => handle_project(cmd).await?,
-        Command::Cve(cmd) => handle_cve(cmd).await?,
-        Command::Git(cmd) => handle_git(cmd).await?,
-        Command::Spec(cmd) => handle_spec(cmd).await?,
-        Command::Question(cmd) => handle_question(cmd).await?,
-        Command::Webhook(cmd) => handle_webhook(cmd).await?,
-        Command::Translation(cmd) => handle_translation(cmd).await?,
-        Command::Snap(cmd) => handle_snap(cmd).await?,
-        Command::Queue(cmd) => handle_queue(cmd).await?,
-        Command::AccessToken(cmd) => handle_access_token(cmd).await?,
+        Command::Bug(cmd) => handle_bug(cmd, &display).await?,
+        Command::Person(cmd) => handle_person(cmd, &display).await?,
+        Command::Package(cmd) => handle_package(cmd, &display).await?,
+        Command::Project(cmd) => handle_project(cmd, &display).await?,
+        Command::Cve(cmd) => handle_cve(cmd, &display).await?,
+        Command::Git(cmd) => handle_git(cmd, &display).await?,
+        Command::Spec(cmd) => handle_spec(cmd, &display).await?,
+        Command::Question(cmd) => handle_question(cmd, &display).await?,
+        Command::Webhook(cmd) => handle_webhook(cmd, &display).await?,
+        Command::Translation(cmd) => handle_translation(cmd, &display).await?,
+        Command::Snap(cmd) => handle_snap(cmd, &display).await?,
+        Command::Queue(cmd) => handle_queue(cmd, &display).await?,
+        Command::AccessToken(cmd) => handle_access_token(cmd, &display).await?,
     }
 
     Ok(())
@@ -1852,7 +1860,7 @@ async fn run() -> lpcli::error::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Render a list of bug tasks as a grouped table to stdout.
-fn print_bug_tasks(tasks: &[bugs::BugTask]) {
+fn print_bug_tasks(tasks: &[bugs::BugTask], display: &Display) {
     struct ParsedTask<'a> {
         series: Option<String>,
         task: &'a bugs::BugTask,
@@ -1899,7 +1907,7 @@ fn print_bug_tasks(tasks: &[bugs::BugTask]) {
     } else {
         vec!["Target", "Series", "Status", "Importance", "Assignee"]
     };
-    let mut table = build_table(header);
+    let mut table = build_table(display, header);
     for (target_name, tasks_for_target) in &by_target {
         for pt in tasks_for_target {
             let display_target = match &pt.series {
@@ -1980,8 +1988,12 @@ async fn resolve_all_attachment_urls(
     futures_util::future::join_all(futures).await
 }
 
-fn print_bug_attachments(attachments: &[bugs::BugAttachment], download_urls: &[String]) {
-    let mut table = build_table(vec!["Title", "Type", "URL"]);
+fn print_bug_attachments(
+    attachments: &[bugs::BugAttachment],
+    download_urls: &[String],
+    display: &Display,
+) {
+    let mut table = build_table(display, vec!["Title", "Type", "URL"]);
     for (a, url) in attachments.iter().zip(download_urls.iter()) {
         let title = a.title.as_deref().unwrap_or("—").to_string();
         let kind = a.attachment_type.as_deref().unwrap_or("—").to_string();
@@ -1992,7 +2004,7 @@ fn print_bug_attachments(attachments: &[bugs::BugAttachment], download_urls: &[S
     println!("{} attachment(s).", attachments.len());
 }
 
-async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
+async fn handle_bug(cmd: BugCommand, display: &Display) -> lpcli::error::Result<()> {
     let client = if matches!(&cmd, BugCommand::RemoteBugTrackers { .. }) {
         LaunchpadClient::new(None).with_max_retries(2)
     } else {
@@ -2023,17 +2035,17 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 println!("URL:     {}", link.underline());
             }
             println!();
-            print_bug_tasks(&tasks);
+            print_bug_tasks(&tasks, display);
             if !attachments.is_empty() {
                 let download_urls = resolve_all_attachment_urls(&client, &attachments).await;
                 println!();
-                print_bug_attachments(&attachments, &download_urls);
+                print_bug_attachments(&attachments, &download_urls, display);
             }
         }
 
         BugCommand::Tasks { bug_id } => {
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            print_bug_tasks(&tasks);
+            print_bug_tasks(&tasks, display);
         }
 
         BugCommand::Search {
@@ -2055,7 +2067,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 ..Default::default()
             };
             let tasks = bugs::search_bugs(&client, &target, &params).await?;
-            let mut table = build_table(vec!["ID", "Title", "Status", "Target"]);
+            let mut table = build_table(display, vec!["ID", "Title", "Status", "Target"]);
             for task in &tasks {
                 // The bug number is the last path segment of bug_link, e.g.
                 // "https://api.launchpad.net/devel/bugs/12345" → "12345".
@@ -2067,7 +2079,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                     .to_string();
                 table.add_row(vec![
                     bug_id,
-                    truncate(task.title.as_deref().unwrap_or("—"), 55),
+                    task.title.as_deref().unwrap_or("—").to_string(),
                     task.status.as_deref().unwrap_or("—").to_string(),
                     task.bug_target_display_name
                         .as_deref()
@@ -2324,7 +2336,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
 
         BugCommand::Subscriptions { bug_id } => {
             let subs = bugs::get_bug_subscriptions(&client, bug_id).await?;
-            let mut table = build_table(vec!["Person", "Subscribed By", "Date"]);
+            let mut table = build_table(display, vec!["Person", "Subscribed By", "Date"]);
             for s in &subs {
                 let person = s
                     .person_link
@@ -2351,7 +2363,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 println!("No attachments for bug #{bug_id}.");
             } else {
                 let download_urls = resolve_all_attachment_urls(&client, &attachments).await;
-                print_bug_attachments(&attachments, &download_urls);
+                print_bug_attachments(&attachments, &download_urls, display);
             }
         }
 
@@ -2760,7 +2772,10 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 println!("No bug watches found for bug #{bug_id}.");
                 return Ok(());
             }
-            let mut table = build_table(vec!["Watch ID", "Tracker", "Remote Bug", "Status", "URL"]);
+            let mut table = build_table(
+                display,
+                vec!["Watch ID", "Tracker", "Remote Bug", "Status", "URL"],
+            );
             for w in &watches {
                 let watch_id = w
                     .self_link
@@ -2799,7 +2814,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 return Ok(());
             }
 
-            let mut table = build_table(vec!["Name", "Title", "Type", "Base URL"]);
+            let mut table = build_table(display, vec!["Name", "Title", "Type", "Base URL"]);
             for tracker in &trackers {
                 table.add_row(vec![
                     tracker.name.as_deref().unwrap_or("—").to_string(),
@@ -2836,7 +2851,7 @@ fn parse_positive_limit(value: &str) -> Result<usize, String> {
 // Person handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
+async fn handle_person(cmd: PersonCommand, display: &Display) -> lpcli::error::Result<()> {
     let client = authenticated_client()?;
 
     match cmd {
@@ -2860,7 +2875,7 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
 
         PersonCommand::Search { query } => {
             let results = people::search_people(&client, &query).await?;
-            let mut table = build_table(vec!["Name", "Display Name", "Type"]);
+            let mut table = build_table(display, vec!["Name", "Display Name", "Type"]);
             for p in &results {
                 table.add_row(vec![
                     format!("~{}", p.name),
@@ -2876,7 +2891,7 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
 
         PersonCommand::Members { team } => {
             let members = people::get_team_members(&client, &team).await?;
-            let mut table = build_table(vec!["Member", "Status", "Since"]);
+            let mut table = build_table(display, vec!["Member", "Status", "Since"]);
             for m in &members {
                 // Extract "~username" from the full API URL (e.g. ".../~jdoe" → "~jdoe").
                 let member_name = m
@@ -2895,7 +2910,7 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
 
         PersonCommand::Bugs { name } => {
             let bugs_list = people::get_person_bugs(&client, &name).await?;
-            let mut table = build_table(vec!["Bug", "Title", "Status", "Importance"]);
+            let mut table = build_table(display, vec!["Bug", "Title", "Status", "Importance"]);
             for b in &bugs_list {
                 let bug_id = b
                     .bug_link
@@ -2904,7 +2919,7 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
                     .unwrap_or("—");
                 table.add_row(vec![
                     bug_id.to_string(),
-                    truncate(b.title.as_deref().unwrap_or("—"), 55),
+                    b.title.as_deref().unwrap_or("—").to_string(),
                     b.status.as_deref().unwrap_or("—").to_string(),
                     b.importance.as_deref().unwrap_or("—").to_string(),
                 ]);
@@ -2915,7 +2930,7 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
 
         PersonCommand::Ppas { name } => {
             let ppas = people::list_person_ppas(&client, &name).await?;
-            let mut table = build_table(vec!["Name", "Description", "Enabled"]);
+            let mut table = build_table(display, vec!["Name", "Description", "Enabled"]);
             for p in &ppas {
                 table.add_row(vec![
                     p.name.as_deref().unwrap_or("—"),
@@ -2928,7 +2943,7 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
 
         PersonCommand::OwnedTeams { name } => {
             let teams = people::get_person_owned_teams(&client, &name).await?;
-            let mut table = build_table(vec!["Name", "Display Name"]);
+            let mut table = build_table(display, vec!["Name", "Display Name"]);
             for t in &teams {
                 table.add_row(vec![format!("~{}", t.name), t.display_name.clone()]);
             }
@@ -2942,7 +2957,7 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
 // Package handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
+async fn handle_package(cmd: PackageCommand, display: &Display) -> lpcli::error::Result<()> {
     let client = LaunchpadClient::new(None); // packages can be queried anonymously
 
     match cmd {
@@ -2963,7 +2978,7 @@ async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
 
         PackageCommand::ListSeries { distro } => {
             let series = packages::list_distro_series(&client, &distro).await?;
-            let mut table = build_table(vec!["Name", "Version", "Status", "Active"]);
+            let mut table = build_table(display, vec!["Name", "Version", "Status", "Active"]);
             for s in &series {
                 table.add_row(vec![
                     s.name.as_str(),
@@ -2994,7 +3009,7 @@ async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
             };
             let pubs =
                 packages::search_published_sources(&client, &distro, series_name, &params).await?;
-            let mut table = build_table(vec!["Package", "Version", "Component", "Pocket"]);
+            let mut table = build_table(display, vec!["Package", "Version", "Component", "Pocket"]);
             for p in &pubs {
                 table.add_row(vec![
                     p.source_package_name.as_deref().unwrap_or("—"),
@@ -3026,7 +3041,7 @@ async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
                 ..Default::default()
             };
             let pubs = packages::list_ppa_sources(&client, &owner, &ppa, &params).await?;
-            let mut table = build_table(vec!["Package", "Version", "Status"]);
+            let mut table = build_table(display, vec!["Package", "Version", "Status"]);
             for p in &pubs {
                 table.add_row(vec![
                     p.source_package_name.as_deref().unwrap_or("—"),
@@ -3072,7 +3087,7 @@ async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
 // Project handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_project(cmd: ProjectCommand) -> lpcli::error::Result<()> {
+async fn handle_project(cmd: ProjectCommand, display: &Display) -> lpcli::error::Result<()> {
     let client = LaunchpadClient::new(None);
 
     match cmd {
@@ -3099,12 +3114,12 @@ async fn handle_project(cmd: ProjectCommand) -> lpcli::error::Result<()> {
 
         ProjectCommand::Search { query } => {
             let results = projects::search_projects(&client, &query).await?;
-            let mut table = build_table(vec!["Name", "Display Name", "Summary"]);
+            let mut table = build_table(display, vec!["Name", "Display Name", "Summary"]);
             for p in &results {
                 table.add_row(vec![
                     p.name.as_str(),
                     p.display_name.as_deref().unwrap_or("—"),
-                    &truncate(p.summary.as_deref().unwrap_or(""), 50),
+                    p.summary.as_deref().unwrap_or(""),
                 ]);
             }
             println!("{table}");
@@ -3116,7 +3131,7 @@ async fn handle_project(cmd: ProjectCommand) -> lpcli::error::Result<()> {
             } else {
                 projects::list_milestones(&client, &project).await?
             };
-            let mut table = build_table(vec!["Name", "Title", "Active", "Target Date"]);
+            let mut table = build_table(display, vec!["Name", "Title", "Active", "Target Date"]);
             for m in &milestones {
                 table.add_row(vec![
                     m.name.as_str(),
@@ -3166,7 +3181,7 @@ async fn handle_project(cmd: ProjectCommand) -> lpcli::error::Result<()> {
 
         ProjectCommand::ListSeries { project } => {
             let series = projects::list_project_series(&client, &project).await?;
-            let mut table = build_table(vec!["Name", "Title", "Status"]);
+            let mut table = build_table(display, vec!["Name", "Title", "Status"]);
             for s in &series {
                 table.add_row(vec![
                     s.name.as_str(),
@@ -3179,13 +3194,13 @@ async fn handle_project(cmd: ProjectCommand) -> lpcli::error::Result<()> {
 
         ProjectCommand::SeriesReleases { project, series } => {
             let releases = projects::list_series_releases(&client, &project, &series).await?;
-            let mut table = build_table(vec!["Version", "Release Date", "Notes"]);
+            let mut table = build_table(display, vec!["Version", "Release Date", "Notes"]);
             for r in &releases {
                 let date = r
                     .date_released
                     .map(|d| d.format("%Y-%m-%d").to_string())
                     .unwrap_or_else(|| "—".to_string());
-                let notes = truncate(r.release_notes.as_deref().unwrap_or(""), 40);
+                let notes = r.release_notes.as_deref().unwrap_or("").to_string();
                 table.add_row(vec![r.version.as_deref().unwrap_or("—"), &date, &notes]);
             }
             println!("{table}");
@@ -3198,7 +3213,7 @@ async fn handle_project(cmd: ProjectCommand) -> lpcli::error::Result<()> {
 // CVE handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_cve(cmd: CveCommand) -> lpcli::error::Result<()> {
+async fn handle_cve(cmd: CveCommand, display: &Display) -> lpcli::error::Result<()> {
     let client = authenticated_client()?;
 
     match cmd {
@@ -3231,12 +3246,12 @@ async fn handle_cve(cmd: CveCommand) -> lpcli::error::Result<()> {
                 ..Default::default()
             };
             let results = cves::search_cves(&client, &params).await?;
-            let mut table = build_table(vec!["CVE", "Status", "Title"]);
+            let mut table = build_table(display, vec!["CVE", "Status", "Title"]);
             for c in &results {
                 table.add_row(vec![
                     c.sequence.as_str(),
                     c.status.as_deref().unwrap_or("—"),
-                    &truncate(c.title.as_deref().unwrap_or(""), 50),
+                    c.title.as_deref().unwrap_or(""),
                 ]);
             }
             println!("{table}");
@@ -3245,12 +3260,12 @@ async fn handle_cve(cmd: CveCommand) -> lpcli::error::Result<()> {
 
         CveCommand::BugCves { bug_id } => {
             let results = cves::get_bug_cves(&client, bug_id).await?;
-            let mut table = build_table(vec!["CVE", "Status", "Title"]);
+            let mut table = build_table(display, vec!["CVE", "Status", "Title"]);
             for c in &results {
                 table.add_row(vec![
                     c.sequence.as_str(),
                     c.status.as_deref().unwrap_or("—"),
-                    &truncate(c.title.as_deref().unwrap_or(""), 50),
+                    c.title.as_deref().unwrap_or(""),
                 ]);
             }
             println!("{table}");
@@ -3263,7 +3278,7 @@ async fn handle_cve(cmd: CveCommand) -> lpcli::error::Result<()> {
 // Git handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_git(cmd: GitCommand) -> lpcli::error::Result<()> {
+async fn handle_git(cmd: GitCommand, display: &Display) -> lpcli::error::Result<()> {
     let client = LaunchpadClient::new(None);
 
     match cmd {
@@ -3311,7 +3326,7 @@ async fn handle_git(cmd: GitCommand) -> lpcli::error::Result<()> {
 
         GitCommand::ListPersonRepos { name } => {
             let repos = git::list_person_git_repositories(&client, &name).await?;
-            let mut table = build_table(vec!["Repository", "Type", "Modified"]);
+            let mut table = build_table(display, vec!["Repository", "Type", "Modified"]);
             for r in &repos {
                 let modified = r
                     .date_last_modified
@@ -3331,7 +3346,7 @@ async fn handle_git(cmd: GitCommand) -> lpcli::error::Result<()> {
 
         GitCommand::Refs { path } => {
             let refs = git::list_git_refs(&client, &path).await?;
-            let mut table = build_table(vec!["Ref", "Display Name", "SHA1"]);
+            let mut table = build_table(display, vec!["Ref", "Display Name", "SHA1"]);
             for r in &refs {
                 table.add_row(vec![
                     r.path.as_deref().unwrap_or("—"),
@@ -3347,13 +3362,10 @@ async fn handle_git(cmd: GitCommand) -> lpcli::error::Result<()> {
 
         GitCommand::Proposals { path, status } => {
             let proposals = git::list_merge_proposals(&client, &path, status.as_deref()).await?;
-            let mut table = build_table(vec![
-                "ID",
-                "Status",
-                "Source Branch",
-                "Target Branch",
-                "Date",
-            ]);
+            let mut table = build_table(
+                display,
+                vec!["ID", "Status", "Source Branch", "Target Branch", "Date"],
+            );
             for p in &proposals {
                 let mp_id = p
                     .self_link
@@ -3484,7 +3496,7 @@ async fn handle_git(cmd: GitCommand) -> lpcli::error::Result<()> {
 // Spec handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_spec(cmd: SpecCommand) -> lpcli::error::Result<()> {
+async fn handle_spec(cmd: SpecCommand, display: &Display) -> lpcli::error::Result<()> {
     let client = LaunchpadClient::new(None);
 
     match cmd {
@@ -3520,11 +3532,14 @@ async fn handle_spec(cmd: SpecCommand) -> lpcli::error::Result<()> {
             } else {
                 specifications::list_valid_project_specifications(&client, &target).await?
             };
-            let mut table = build_table(vec!["Name", "Title", "Priority", "Lifecycle", "Impl"]);
+            let mut table = build_table(
+                display,
+                vec!["Name", "Title", "Priority", "Lifecycle", "Impl"],
+            );
             for s in &specs {
                 table.add_row(vec![
                     s.name.as_str(),
-                    &truncate(s.title.as_deref().unwrap_or(""), 40),
+                    s.title.as_deref().unwrap_or(""),
                     s.priority.as_deref().unwrap_or("—"),
                     s.lifecycle_status.as_deref().unwrap_or("—"),
                     s.implementation_status.as_deref().unwrap_or("—"),
@@ -3541,7 +3556,7 @@ async fn handle_spec(cmd: SpecCommand) -> lpcli::error::Result<()> {
 // Question handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_question(cmd: QuestionCommand) -> lpcli::error::Result<()> {
+async fn handle_question(cmd: QuestionCommand, display: &Display) -> lpcli::error::Result<()> {
     let client = LaunchpadClient::new(None);
 
     match cmd {
@@ -3573,7 +3588,7 @@ async fn handle_question(cmd: QuestionCommand) -> lpcli::error::Result<()> {
                 status: status.as_deref(),
             };
             let results = questions::search_questions(&client, &target, &params).await?;
-            let mut table = build_table(vec!["ID", "Title", "Status"]);
+            let mut table = build_table(display, vec!["ID", "Title", "Status"]);
             for q in &results {
                 let id = q
                     .self_link
@@ -3582,7 +3597,7 @@ async fn handle_question(cmd: QuestionCommand) -> lpcli::error::Result<()> {
                     .unwrap_or("—");
                 table.add_row(vec![
                     id,
-                    &truncate(q.title.as_deref().unwrap_or(""), 55),
+                    q.title.as_deref().unwrap_or(""),
                     q.status.as_deref().unwrap_or("—"),
                 ]);
             }
@@ -3625,13 +3640,14 @@ async fn handle_question(cmd: QuestionCommand) -> lpcli::error::Result<()> {
 // Webhook handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_webhook(cmd: WebhookCommand) -> lpcli::error::Result<()> {
+async fn handle_webhook(cmd: WebhookCommand, display: &Display) -> lpcli::error::Result<()> {
     let client = authenticated_client()?;
 
     match cmd {
         WebhookCommand::List { target } => {
             let hooks = webhooks::list_target_webhooks(&client, &target).await?;
-            let mut table = build_table(vec!["Delivery URL", "Active", "Events", "Created"]);
+            let mut table =
+                build_table(display, vec!["Delivery URL", "Active", "Events", "Created"]);
             for h in &hooks {
                 let events = h
                     .event_types
@@ -3645,7 +3661,7 @@ async fn handle_webhook(cmd: WebhookCommand) -> lpcli::error::Result<()> {
                 table.add_row(vec![
                     h.delivery_url.as_deref().unwrap_or("—"),
                     &h.active.map(|a| a.to_string()).unwrap_or_default(),
-                    &truncate(&events, 40),
+                    &events,
                     &date,
                 ]);
             }
@@ -3693,7 +3709,10 @@ async fn handle_webhook(cmd: WebhookCommand) -> lpcli::error::Result<()> {
 
         WebhookCommand::Deliveries { webhook_url } => {
             let deliveries = webhooks::list_deliveries(&client, &webhook_url).await?;
-            let mut table = build_table(vec!["Sent", "Successful", "Status Code", "Pending"]);
+            let mut table = build_table(
+                display,
+                vec!["Sent", "Successful", "Status Code", "Pending"],
+            );
             for d in &deliveries {
                 let date = d
                     .date_sent
@@ -3718,7 +3737,10 @@ async fn handle_webhook(cmd: WebhookCommand) -> lpcli::error::Result<()> {
 // Translation handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_translation(cmd: TranslationCommand) -> lpcli::error::Result<()> {
+async fn handle_translation(
+    cmd: TranslationCommand,
+    display: &Display,
+) -> lpcli::error::Result<()> {
     let client = LaunchpadClient::new(None);
 
     match cmd {
@@ -3726,7 +3748,7 @@ async fn handle_translation(cmd: TranslationCommand) -> lpcli::error::Result<()>
             let series_name = canonical_series(&distro, &series);
             let entries =
                 translations::get_distro_series_import_queue(&client, &distro, series_name).await?;
-            let mut table = build_table(vec!["Path", "Status", "Date"]);
+            let mut table = build_table(display, vec!["Path", "Status", "Date"]);
             for e in &entries {
                 let date = e
                     .date_created
@@ -3746,7 +3768,7 @@ async fn handle_translation(cmd: TranslationCommand) -> lpcli::error::Result<()>
             let series_name = canonical_series(&distro, &series);
             let templates =
                 translations::get_distro_series_templates(&client, &distro, series_name).await?;
-            let mut table = build_table(vec!["Name", "Path", "Priority", "Current"]);
+            let mut table = build_table(display, vec!["Name", "Path", "Priority", "Current"]);
             for t in &templates {
                 table.add_row(vec![
                     t.name.as_deref().unwrap_or("—"),
@@ -3766,7 +3788,7 @@ async fn handle_translation(cmd: TranslationCommand) -> lpcli::error::Result<()>
 // Snap handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_snap(cmd: SnapCommand) -> lpcli::error::Result<()> {
+async fn handle_snap(cmd: SnapCommand, display: &Display) -> lpcli::error::Result<()> {
     let client = authenticated_client()?;
 
     match cmd {
@@ -3798,7 +3820,7 @@ async fn handle_snap(cmd: SnapCommand) -> lpcli::error::Result<()> {
 
         SnapCommand::Find { owner } => {
             let snap_list = snaps::find_snaps_by_owner(&client, &owner).await?;
-            let mut table = build_table(vec!["Name", "Store Name", "Private"]);
+            let mut table = build_table(display, vec!["Name", "Store Name", "Private"]);
             for s in &snap_list {
                 table.add_row(vec![
                     s.name.as_deref().unwrap_or("—"),
@@ -3811,7 +3833,7 @@ async fn handle_snap(cmd: SnapCommand) -> lpcli::error::Result<()> {
 
         SnapCommand::Builds { owner, name } => {
             let builds = snaps::get_snap_pending_builds(&client, &owner, &name).await?;
-            let mut table = build_table(vec!["Title", "Pocket", "Score", "Upload Status"]);
+            let mut table = build_table(display, vec!["Title", "Pocket", "Score", "Upload Status"]);
             for b in &builds {
                 table.add_row(vec![
                     b.title.as_deref().unwrap_or("—"),
@@ -3854,7 +3876,10 @@ async fn handle_snap(cmd: SnapCommand) -> lpcli::error::Result<()> {
 // AccessToken handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_access_token(cmd: AccessTokenCommand) -> lpcli::error::Result<()> {
+async fn handle_access_token(
+    cmd: AccessTokenCommand,
+    display: &Display,
+) -> lpcli::error::Result<()> {
     let client = authenticated_client()?;
 
     match cmd {
@@ -3898,7 +3923,10 @@ async fn handle_access_token(cmd: AccessTokenCommand) -> lpcli::error::Result<()
 
         AccessTokenCommand::List { project } => {
             let tokens = access_tokens::list_project_access_tokens(&client, &project).await?;
-            let mut table = build_table(vec!["Description", "Scopes", "Created", "Last Used"]);
+            let mut table = build_table(
+                display,
+                vec!["Description", "Scopes", "Created", "Last Used"],
+            );
             for t in &tokens {
                 let scopes = t.scopes.as_ref().map(|v| v.join(", ")).unwrap_or_default();
                 let created = t
@@ -3921,7 +3949,10 @@ async fn handle_access_token(cmd: AccessTokenCommand) -> lpcli::error::Result<()
 
         AccessTokenCommand::ListGit { repo } => {
             let tokens = access_tokens::list_git_access_tokens(&client, &repo).await?;
-            let mut table = build_table(vec!["Description", "Scopes", "Created", "Last Used"]);
+            let mut table = build_table(
+                display,
+                vec!["Description", "Scopes", "Created", "Last Used"],
+            );
             for t in &tokens {
                 let scopes = t.scopes.as_ref().map(|v| v.join(", ")).unwrap_or_default();
                 let created = t
@@ -4054,7 +4085,10 @@ fn key_label(key: &RegisteredAuthenticator) -> String {
     }
 }
 
-async fn handle_hardware_token(cmd: HardwareTokenCommand) -> lpcli::error::Result<()> {
+async fn handle_hardware_token(
+    cmd: HardwareTokenCommand,
+    display: &Display,
+) -> lpcli::error::Result<()> {
     match cmd {
         HardwareTokenCommand::Show => {
             let store = GrantStore::from_env();
@@ -4096,7 +4130,10 @@ async fn handle_hardware_token(cmd: HardwareTokenCommand) -> lpcli::error::Resul
                 );
                 return Ok(());
             }
-            let mut table = build_table(vec!["ID", "Name", "Registered", "Last Used", "Status"]);
+            let mut table = build_table(
+                display,
+                vec!["ID", "Name", "Registered", "Last Used", "Status"],
+            );
             let date = |d: Option<chrono::DateTime<chrono::Utc>>| {
                 d.map(|d| d.format("%Y-%m-%d").to_string())
             };
@@ -4308,7 +4345,7 @@ async fn handle_status() -> lpcli::error::Result<()> {
 // Queue handler
 // ---------------------------------------------------------------------------
 
-async fn handle_queue(cmd: QueueCommand) -> lpcli::error::Result<()> {
+async fn handle_queue(cmd: QueueCommand, display: &Display) -> lpcli::error::Result<()> {
     match cmd {
         QueueCommand::Search {
             pocket,
@@ -4322,6 +4359,7 @@ async fn handle_queue(cmd: QueueCommand) -> lpcli::error::Result<()> {
             limit,
         } => {
             handle_queue_search(
+                display,
                 pocket,
                 status,
                 name,
@@ -4350,7 +4388,7 @@ async fn handle_queue(cmd: QueueCommand) -> lpcli::error::Result<()> {
             arch,
             distro,
             series,
-        } => handle_queue_info(name, version, status, arch, distro, series).await,
+        } => handle_queue_info(display, name, version, status, arch, distro, series).await,
         QueueCommand::Accept {
             name,
             version,
@@ -4373,6 +4411,7 @@ async fn handle_queue(cmd: QueueCommand) -> lpcli::error::Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_queue_search(
+    display: &Display,
     pocket: Option<Pocket>,
     status: Option<String>,
     name: Option<String>,
@@ -4437,15 +4476,18 @@ async fn handle_queue_search(
         distro,
     );
 
-    let mut table = build_table(vec![
-        "Package",
-        "Version",
-        "Component",
-        "Pocket",
-        "Status",
-        "Archs",
-        "Created",
-    ]);
+    let mut table = build_table(
+        display,
+        vec![
+            "Package",
+            "Version",
+            "Component",
+            "Pocket",
+            "Status",
+            "Archs",
+            "Created",
+        ],
+    );
     for upload in &uploads {
         let pkg_name = upload
             .package_name
@@ -4860,6 +4902,7 @@ async fn handle_queue_reject(
 // ---------------------------------------------------------------------------
 
 async fn handle_queue_info(
+    display: &Display,
     name: String,
     version: Option<String>,
     status: String,
@@ -4978,16 +5021,17 @@ async fn handle_queue_info(
             "▸".green().bold(),
             debs.len(),
         );
-        let mut table = Table::new();
-        table.load_style(UTF8_FULL_CONDENSED);
-        table.set_header(vec![
-            "Package",
-            "Version",
-            "Architecture",
-            "Component",
-            "Section",
-            "Priority",
-        ]);
+        let mut table = build_table(
+            display,
+            vec![
+                "Package",
+                "Version",
+                "Architecture",
+                "Component",
+                "Section",
+                "Priority",
+            ],
+        );
         for b in &debs {
             table.add_row(vec![
                 b.name.as_deref().unwrap_or("?"),
@@ -5008,16 +5052,17 @@ async fn handle_queue_info(
             "▸".yellow().bold(),
             ddebs.len(),
         );
-        let mut table = Table::new();
-        table.load_style(UTF8_FULL_CONDENSED);
-        table.set_header(vec![
-            "Package",
-            "Version",
-            "Architecture",
-            "Component",
-            "Section",
-            "Priority",
-        ]);
+        let mut table = build_table(
+            display,
+            vec![
+                "Package",
+                "Version",
+                "Architecture",
+                "Component",
+                "Section",
+                "Priority",
+            ],
+        );
         for b in &ddebs {
             table.add_row(vec![
                 b.name.as_deref().unwrap_or("?"),
@@ -5191,12 +5236,9 @@ fn usb_authenticator() -> Arc<dyn Authenticator> {
     Arc::new(UsbAuthenticator::default())
 }
 
-/// Build a [`comfy_table::Table`] with headers.
-fn build_table(headers: Vec<&str>) -> Table {
-    let mut table = Table::new();
-    table.load_style(UTF8_FULL_CONDENSED);
-    table.set_header(headers);
-    table
+/// Build a [`comfy_table::Table`] with headers and the resolved display width.
+fn build_table(display: &Display, headers: Vec<&str>) -> display::DisplayTable {
+    display.table(headers)
 }
 
 // ---------------------------------------------------------------------------
@@ -5556,15 +5598,6 @@ fn remote_link_failure_error(bug_id: u64, failures: &[String]) -> Option<lpcli::
          task creation may already have succeeded: {}",
         failures.join("; ")
     )))
-}
-
-/// Truncate a string to at most `max` characters, appending `…` if truncated.
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", s.chars().take(max - 1).collect::<String>())
-    }
 }
 
 /// Parse a list of tags from a `Vec<String>` where each element may contain
