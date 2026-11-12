@@ -72,6 +72,8 @@ percent-encoding = "2"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+# RFC 9110 HTTP-date parsing for Retry-After (including legacy date formats)
+httpdate = "1"
 
 # Ubuntu distribution information (series, pockets, components, architectures)
 ubuntu-info-rust = "0.3"
@@ -100,6 +102,8 @@ apple-native-keyring-store = { version = "1", features = ["keychain"] }
 windows-native-keyring-store = "1"
 
 [dev-dependencies]
+# Deterministic timer tests without real retry delays
+tokio = { version = "1", features = ["test-util"] }
 tokio-test = "0.4"
 mockito = "1"
 dirs = "7"

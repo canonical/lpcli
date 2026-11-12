@@ -24,11 +24,15 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use crate::auth::{self, Credentials};
 use crate::error::{LpError, Result};
 use crate::hardware_tokens::HardwareTokenSession;
-use reqwest::{StatusCode, header::LOCATION};
+use reqwest::{
+    StatusCode,
+    header::{HeaderMap, LOCATION, RETRY_AFTER},
+};
 use serde::de::DeserializeOwned;
 
 // ---------------------------------------------------------------------------
@@ -107,10 +111,10 @@ impl LaunchpadClient {
     /// Set the maximum number of retry attempts for rate-limited (429) and
     /// server-error (5xx) responses.
     ///
-    /// `0` (the default) disables retries. Each retry waits at least
-    /// `initial_retry_delay_ms` milliseconds, doubling after each attempt
-    /// (exponential backoff). For 429 responses the `Retry-After` header
-    /// value takes precedence when present.
+    /// `0` (the default) disables retries. The backoff starts at
+    /// `initial_retry_delay_ms` milliseconds, doubling after each attempt.
+    /// For 429 responses, a valid `Retry-After` header (delay-seconds or
+    /// HTTP-date) overrides the backoff, including a zero delay for past dates.
     pub fn with_max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
         self
@@ -544,10 +548,11 @@ impl LaunchpadClient {
     /// Send a request, retrying on 429 and 5xx responses up to `max_retries`
     /// times with exponential backoff.
     ///
-    /// For 429 responses, the `Retry-After` header value (in seconds) is used
-    /// as the sleep duration when present; otherwise the current backoff delay
-    /// is used.  The delay starts at `initial_retry_delay_ms` and doubles after
-    /// each unsuccessful attempt.
+    /// For 429 responses, `Retry-After` can specify delay-seconds or an
+    /// HTTP-date. Future dates wait until that date; current/past dates do
+    /// not wait. Missing, invalid or unrepresentable hints use the current
+    /// backoff, which starts at `initial_retry_delay_ms` and doubles after
+    /// each unsuccessful attempt. 5xx responses continue to use backoff.
     ///
     /// Returns the final `reqwest::Response` (which may still carry a 429 or
     /// 5xx status if all retries were exhausted).  Transport-level errors
@@ -578,18 +583,13 @@ impl LaunchpadClient {
             if let Some(next) = saved
                 && (status.as_u16() == 429 || status.is_server_error())
             {
-                let sleep_ms = if status.as_u16() == 429 {
-                    // Honour the server's Retry-After hint when present.
-                    resp.headers()
-                        .get("Retry-After")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .map(|secs| secs.saturating_mul(1_000))
-                        .unwrap_or(delay_ms)
-                } else {
-                    delay_ms
-                };
-                tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+                let sleep_for = calculate_retry_delay(
+                    status,
+                    resp.headers(),
+                    Duration::from_millis(delay_ms),
+                    SystemTime::now(),
+                );
+                tokio::time::sleep(sleep_for).await;
                 delay_ms = delay_ms.saturating_mul(2);
                 retries_left -= 1;
                 current = next;
@@ -641,11 +641,7 @@ impl LaunchpadClient {
             ));
         }
         if status == StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = resp
-                .headers()
-                .get("Retry-After")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok());
+            let retry_after = retry_after_seconds(resp.headers(), SystemTime::now());
             return Err(LpError::RateLimit {
                 retry_after_secs: retry_after,
             });
@@ -707,11 +703,7 @@ impl LaunchpadClient {
             ));
         }
         if status == StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = resp
-                .headers()
-                .get("Retry-After")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok());
+            let retry_after = retry_after_seconds(resp.headers(), SystemTime::now());
             return Err(LpError::RateLimit {
                 retry_after_secs: retry_after,
             });
@@ -770,11 +762,7 @@ impl LaunchpadClient {
             ));
         }
         if status == StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = resp
-                .headers()
-                .get("Retry-After")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok());
+            let retry_after = retry_after_seconds(resp.headers(), SystemTime::now());
             return Err(LpError::RateLimit {
                 retry_after_secs: retry_after,
             });
@@ -1074,6 +1062,61 @@ pub fn urlenc(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
+/// Parse RFC 9110 Retry-After advice, using an explicit clock for date math.
+/// Unrepresentable delays are rejected rather than overflowing a deadline.
+fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
+    let value = value.trim_matches([' ', '\t']);
+    let delay = if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
+        Duration::from_secs(value.parse().ok()?)
+    } else {
+        httpdate::parse_http_date(value)
+            .ok()?
+            .duration_since(now)
+            .unwrap_or(Duration::ZERO)
+    };
+    now.checked_add(delay)?;
+    Some(delay)
+}
+
+/// Extract and parse the `Retry-After` header from `headers` into a wait
+/// [`Duration`] relative to `now`.
+///
+/// Returns `None` if the header is missing, contains non-ASCII bytes, or does
+/// not contain a valid, representable RFC 9110 `Retry-After` value.
+fn parse_retry_after_header(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
+    parse_retry_after(headers.get(RETRY_AFTER)?.to_str().ok()?, now)
+}
+
+/// Calculate the duration to wait before the next retry attempt.
+///
+/// For `429 Too Many Requests` responses, a valid `Retry-After` header delay
+/// that can be scheduled by the Tokio timer takes precedence over `backoff`.
+/// All other retryable statuses (such as `5xx` server errors), or responses
+/// without a usable `Retry-After` header, fall back to `backoff`.
+fn calculate_retry_delay(
+    status: StatusCode,
+    headers: &HeaderMap,
+    backoff: Duration,
+    now: SystemTime,
+) -> Duration {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        parse_retry_after_header(headers, now)
+            .filter(|delay| tokio::time::Instant::now().checked_add(*delay).is_some())
+            .unwrap_or(backoff)
+    } else {
+        backoff
+    }
+}
+
+/// RateLimit exposes whole seconds; round up so its advice never retries early.
+fn retry_after_seconds(headers: &HeaderMap, now: SystemTime) -> Option<u64> {
+    parse_retry_after_header(headers, now).map(|delay| {
+        delay
+            .as_secs()
+            .saturating_add(u64::from(delay.subsec_nanos() != 0))
+    })
+}
+
 /// Whether a 401 response body says that the access token itself was
 /// rejected (as opposed to, say, a missing permission).
 fn is_rejected_token_message(body: &str) -> bool {
@@ -1161,6 +1204,158 @@ impl<T: DeserializeOwned + std::fmt::Debug> Collection<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HTTP_DATE: &str = "Sun, 06 Nov 1994 08:49:37 GMT";
+
+    fn date() -> SystemTime {
+        httpdate::parse_http_date(HTTP_DATE).unwrap()
+    }
+
+    fn retry_headers(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, value.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn retry_after_parses_integer_seconds() {
+        for (value, secs) in [("0", 0), ("120", 120), ("0012", 12), (" \t12\t ", 12)] {
+            assert_eq!(
+                parse_retry_after(value, date()),
+                Some(Duration::from_secs(secs))
+            );
+        }
+    }
+
+    #[test]
+    fn retry_after_accepts_all_http_date_formats() {
+        let now = date() - Duration::from_secs(120);
+        for value in [
+            HTTP_DATE,
+            "Sunday, 06-Nov-94 08:49:37 GMT",
+            "Sun Nov  6 08:49:37 1994",
+        ] {
+            assert_eq!(
+                parse_retry_after(value, now),
+                Some(Duration::from_secs(120))
+            );
+        }
+        assert_eq!(
+            parse_retry_after(&format!(" \t{HTTP_DATE}\t "), now),
+            Some(Duration::from_secs(120))
+        );
+    }
+
+    #[test]
+    fn retry_after_past_and_current_dates_are_zero() {
+        assert_eq!(parse_retry_after(HTTP_DATE, date()), Some(Duration::ZERO));
+        assert_eq!(
+            parse_retry_after(HTTP_DATE, date() + Duration::from_secs(1)),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn retry_after_preserves_fractional_delay_and_rounds_up_for_errors() {
+        let now = date() - Duration::from_millis(1250);
+        let headers = retry_headers(HTTP_DATE);
+        assert_eq!(
+            parse_retry_after_header(&headers, now),
+            Some(Duration::from_millis(1250))
+        );
+        assert_eq!(retry_after_seconds(&headers, now), Some(2));
+        assert_eq!(retry_after_seconds(&headers, date()), Some(0));
+        assert_eq!(retry_after_seconds(&retry_headers("120"), now), Some(120));
+        assert_eq!(
+            retry_after_seconds(&headers, date() - Duration::from_nanos(1)),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn retry_after_rejects_invalid_and_unrepresentable_values() {
+        for value in [
+            "",
+            " ",
+            "-1",
+            "+1",
+            "1.5",
+            "١٢",
+            "12 seconds",
+            "not a date",
+            "Sun, 32 Nov 1994 08:49:37 GMT",
+            "18446744073709551616",
+            "18446744073709551615",
+        ] {
+            assert_eq!(parse_retry_after(value, date()), None, "{value}");
+        }
+        assert_eq!(retry_after_seconds(&HeaderMap::new(), date()), None);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            RETRY_AFTER,
+            reqwest::header::HeaderValue::from_bytes(b"\xff").unwrap(),
+        );
+        assert_eq!(parse_retry_after_header(&headers, date()), None);
+    }
+
+    #[test]
+    fn calculate_retry_delay_uses_backoff_only_without_usable_429_advice() {
+        let backoff = Duration::from_millis(100);
+        for headers in [
+            HeaderMap::new(),
+            retry_headers("invalid"),
+            retry_headers("18446744073709551615"),
+        ] {
+            assert_eq!(
+                calculate_retry_delay(StatusCode::TOO_MANY_REQUESTS, &headers, backoff, date()),
+                backoff
+            );
+        }
+        assert_eq!(
+            calculate_retry_delay(
+                StatusCode::TOO_MANY_REQUESTS,
+                &retry_headers(HTTP_DATE),
+                backoff,
+                date()
+            ),
+            Duration::ZERO
+        );
+        // HTTP-date parsing does not broaden which statuses honor Retry-After.
+        assert_eq!(
+            calculate_retry_delay(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &retry_headers("0"),
+                backoff,
+                date()
+            ),
+            backoff
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_after_sleep_preserves_server_delay() {
+        // Exercise the same delay selection and timer used by send_with_retry,
+        // without real socket I/O or a wall clock that moves during the test.
+        for (header, delay) in [
+            ("2", Duration::from_secs(2)),
+            (HTTP_DATE, Duration::from_millis(1250)),
+        ] {
+            let selected = calculate_retry_delay(
+                StatusCode::TOO_MANY_REQUESTS,
+                &retry_headers(header),
+                Duration::from_millis(1),
+                date() - Duration::from_millis(1250),
+            );
+            assert_eq!(selected, delay);
+            let sleep = tokio::time::sleep(selected);
+            tokio::pin!(sleep);
+            assert!(futures_util::poll!(sleep.as_mut()).is_pending());
+            tokio::time::advance(delay - Duration::from_millis(1)).await;
+            assert!(futures_util::poll!(sleep.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert!(futures_util::poll!(sleep.as_mut()).is_ready());
+        }
+    }
 
     #[test]
     fn url_builder_no_double_slash() {
