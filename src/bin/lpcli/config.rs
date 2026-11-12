@@ -11,36 +11,21 @@ use serde::Deserialize;
 use lpcli::error::{LpError, Result};
 
 /// Top-level configuration for the `lpcli` command-line tool.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
     /// Display-related settings.
     pub display: DisplayConfig,
 }
 
 /// Display-related settings.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct DisplayConfig {
     /// Terminal width used when formatting output, in columns.
     ///
     /// `None` means "auto-detect" (the default).
     pub width: Option<u16>,
-}
-
-/// The raw TOML representation of [`AppConfig`].
-///
-/// Kept separate from the public types so that validation can produce
-/// actionable errors instead of exposing serde's internal type names.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct RawAppConfig {
-    display: RawDisplayConfig,
-}
-
-/// The raw TOML representation of [`DisplayConfig`].
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct RawDisplayConfig {
-    width: Option<toml::Value>,
 }
 
 /// Returns the path to the lpcli configuration file.
@@ -79,89 +64,19 @@ pub fn load_from(path: &Path) -> Result<AppConfig> {
         }
     };
 
-    parse(&raw)
-}
-
-/// Parse and validate the TOML representation of the configuration.
-fn parse(raw: &str) -> Result<AppConfig> {
-    let raw_config: RawAppConfig = toml::from_str(raw).map_err(|e| {
-        let location = e
-            .span()
-            .and_then(|span| line_col(raw, span.start))
-            .map(|(line, column)| format!(" at line {line}, column {column}"))
-            .unwrap_or_default();
-        LpError::Config(format!("Failed to parse config{location}: {}", e.message()))
+    let config: AppConfig = toml::from_str(&raw).map_err(|err| {
+        LpError::Config(format!(
+            "Failed to parse config file {}: {err}",
+            path.display()
+        ))
     })?;
-
-    raw_config.try_into()
-}
-
-impl TryFrom<RawAppConfig> for AppConfig {
-    type Error = LpError;
-
-    fn try_from(raw: RawAppConfig) -> Result<Self> {
-        Ok(Self {
-            display: DisplayConfig {
-                width: parse_width(raw.display.width)?,
-            },
-        })
-    }
-}
-
-/// Validate the optional `display.width` value.
-fn parse_width(value: Option<toml::Value>) -> Result<Option<u16>> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-
-    let width = match value {
-        toml::Value::Integer(width) => width,
-        other => {
-            return Err(LpError::Config(format!(
-                "Invalid display.width: expected an integer between 1 and 65535, got {}",
-                toml_type_name(&other)
-            )));
-        }
-    };
-
-    if !(1..=i64::from(u16::MAX)).contains(&width) {
+    if config.display.width == Some(0) {
         return Err(LpError::Config(format!(
-            "Invalid display.width: must be between 1 and 65535 (got {width})"
+            "Invalid display.width in {}: must be between 1 and 65535 (got 0)",
+            path.display()
         )));
     }
-
-    Ok(Some(width as u16))
-}
-
-/// Return a human-readable name for a TOML value's type.
-fn toml_type_name(value: &toml::Value) -> &'static str {
-    match value {
-        toml::Value::String(_) => "a string",
-        toml::Value::Integer(_) => "an integer",
-        toml::Value::Float(_) => "a float",
-        toml::Value::Boolean(_) => "a boolean",
-        toml::Value::Datetime(_) => "a datetime",
-        toml::Value::Array(_) => "an array",
-        toml::Value::Table(_) => "a table",
-    }
-}
-
-/// Convert a byte offset into a 1-based `(line, column)` pair.
-fn line_col(input: &str, offset: usize) -> Option<(usize, usize)> {
-    let mut line = 1usize;
-    let mut column = 1usize;
-    for (idx, ch) in input.char_indices() {
-        if idx >= offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            column = 1;
-        } else {
-            column += 1;
-        }
-    }
-    Some((line, column))
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -193,6 +108,14 @@ mod tests {
         let config = load_from(&path).unwrap();
 
         assert_eq!(config.display.width, Some(150));
+    }
+
+    #[test]
+    fn boundary_widths_are_valid() {
+        for width in [1, u16::MAX] {
+            let (_dir, path) = write_config(&format!("[display]\nwidth = {width}\n"));
+            assert_eq!(load_from(&path).unwrap().display.width, Some(width));
+        }
     }
 
     #[test]
@@ -241,8 +164,8 @@ mod tests {
         let err = load_from(&path).unwrap_err();
 
         assert!(matches!(err, LpError::Config(_)));
-        assert!(err.to_string().contains("between 1 and 65535"));
-        assert!(err.to_string().contains("got 65536"));
+        assert!(err.to_string().contains("65536"));
+        assert!(err.to_string().contains("width"));
     }
 
     #[test]
@@ -252,8 +175,8 @@ mod tests {
         let err = load_from(&path).unwrap_err();
 
         assert!(matches!(err, LpError::Config(_)));
-        assert!(err.to_string().contains("between 1 and 65535"));
-        assert!(err.to_string().contains("got -1"));
+        assert!(err.to_string().contains("-1"));
+        assert!(err.to_string().contains("width"));
     }
 
     #[test]
@@ -263,8 +186,8 @@ mod tests {
         let err = load_from(&path).unwrap_err();
 
         assert!(matches!(err, LpError::Config(_)));
-        assert!(err.to_string().contains("expected an integer"));
-        assert!(err.to_string().contains("got a string"));
+        assert!(err.to_string().contains("width"));
+        assert!(err.to_string().contains("wide"));
     }
 
     #[test]
@@ -273,6 +196,14 @@ mod tests {
 
         let err = load_from(&path).unwrap_err();
 
+        assert!(matches!(err, LpError::Config(_)));
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn unknown_top_level_field_is_config_error() {
+        let (_dir, path) = write_config("displai = true\n");
+        let err = load_from(&path).unwrap_err();
         assert!(matches!(err, LpError::Config(_)));
         assert!(err.to_string().contains("unknown field"));
     }

@@ -15,20 +15,15 @@ pub struct Display {
 }
 
 impl Display {
-    /// Resolve explicit CLI width, then configuration, then terminal width.
-    pub fn new(cli_width: Option<u16>, configured_width: Option<u16>) -> Self {
-        Self::resolve(cli_width, configured_width, terminal_width())
+    /// Resolve the configured width, then the terminal width.
+    pub fn new(configured_width: Option<u16>) -> Self {
+        Self::resolve(configured_width, terminal_width())
     }
 
     /// Resolve width using an injected terminal width (useful for tests).
-    pub fn resolve(
-        cli_width: Option<u16>,
-        configured_width: Option<u16>,
-        detected_width: Option<u16>,
-    ) -> Self {
+    fn resolve(configured_width: Option<u16>, detected_width: Option<u16>) -> Self {
         Self {
-            width: cli_width
-                .or(configured_width)
+            width: configured_width
                 .or(detected_width.filter(|width| *width > 0))
                 .unwrap_or(DEFAULT_WIDTH),
         }
@@ -58,18 +53,6 @@ impl Display {
             width: self.width,
         }
     }
-}
-
-/// Parse a positive terminal width for clap.
-pub fn parse_width(value: &str) -> Result<u16, String> {
-    let width = value
-        .trim()
-        .parse::<u32>()
-        .map_err(|_| "width must be a positive integer between 1 and 65535".to_string())?;
-    u16::try_from(width)
-        .ok()
-        .filter(|width| *width > 0)
-        .ok_or_else(|| "width must be a positive integer between 1 and 65535".to_string())
 }
 
 /// Detect stdout's terminal width through comfy-table's existing tty support.
@@ -152,25 +135,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn width_precedence_is_cli_config_terminal_default() {
-        assert_eq!(
-            Display::resolve(Some(150), Some(120), Some(180)).width(),
-            150
-        );
-        assert_eq!(Display::resolve(None, Some(120), Some(180)).width(), 120);
-        assert_eq!(Display::resolve(None, None, Some(180)).width(), 180);
-        assert_eq!(Display::resolve(None, None, Some(0)).width(), DEFAULT_WIDTH);
-        assert_eq!(Display::resolve(None, None, None).width(), DEFAULT_WIDTH);
+    fn width_precedence_is_config_terminal_default() {
+        assert_eq!(Display::resolve(Some(120), Some(180)).width(), 120);
+        assert_eq!(Display::resolve(Some(120), None).width(), 120);
+        assert_eq!(Display::resolve(None, Some(180)).width(), 180);
+        assert_eq!(Display::resolve(None, Some(0)).width(), DEFAULT_WIDTH);
+        assert_eq!(Display::resolve(None, None).width(), DEFAULT_WIDTH);
     }
 
     #[test]
-    fn width_parser_rejects_invalid_values() {
-        assert_eq!(parse_width("150").unwrap(), 150);
-        assert_eq!(parse_width(" 1 ").unwrap(), 1);
-        for value in ["0", "-1", "wide", "65536", ""] {
-            assert!(parse_width(value).is_err(), "{value}");
-        }
-        assert_eq!(parse_width("65535").unwrap(), u16::MAX);
+    fn loaded_config_width_overrides_detected_terminal_width() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[display]\nwidth = 5\n").unwrap();
+        let config = super::super::config::load_from(&path).unwrap();
+        let display = Display::resolve(config.display.width, Some(120));
+        let mut table = display.table(vec!["ID", "Title"]);
+        table.add_row(vec!["1", "A complete title"]);
+        assert_eq!(display.width(), 5);
+        assert!(table.to_string().contains("Title: A complete title"));
     }
 
     #[test]

@@ -939,21 +939,33 @@ fn build_table_smoke() {
 }
 
 #[test]
-fn cli_width_is_global_and_precedes_subcommands() {
+fn cli_rejects_removed_width_option() {
     for args in [
         vec!["lpcli", "--width", "150", "status"],
         vec!["lpcli", "status", "--width", "150"],
         vec!["lpcli", "bug", "search", "--width", "150"],
+        vec!["lpcli", "--width=150", "status"],
     ] {
-        let cli = Cli::try_parse_from(args).unwrap();
-        assert_eq!(cli.width, Some(150));
+        let err = Cli::try_parse_from(&args).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
+        assert!(err.to_string().contains("--width"), "{args:?}: {err}");
     }
 }
 
 #[test]
-fn cli_width_rejects_invalid_values() {
-    for value in ["0", "-1", "wide", "65536"] {
-        assert!(Cli::try_parse_from(["lpcli", "--width", value, "status"]).is_err());
+fn cli_help_does_not_list_width_option() {
+    for args in [
+        vec!["lpcli", "--help"],
+        vec!["lpcli", "status", "--help"],
+        vec!["lpcli", "bug", "search", "--help"],
+    ] {
+        let help = Cli::try_parse_from(&args).unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp, "{args:?}");
+        assert!(!help.to_string().contains("--width"), "{args:?}: {help}");
     }
 }
 

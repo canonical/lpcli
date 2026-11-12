@@ -297,11 +297,6 @@ fn canonical_bug_series(
     long_about = None,
 )]
 struct Cli {
-    /// Maximum output width in columns, including table borders and padding.
-    /// Overrides the display.width setting in config.toml.
-    #[arg(long, global = true, value_parser = display::parse_width)]
-    width: Option<u16>,
-
     #[command(subcommand)]
     command: Command,
 }
@@ -1805,7 +1800,7 @@ async fn run() -> lpcli::error::Result<()> {
         e.exit();
     }
     let settings = config::load()?;
-    let display = Display::new(cli.width, settings.display.width);
+    let display = Display::new(settings.display.width);
 
     match cli.command {
         Command::Status => handle_status().await?,

@@ -181,17 +181,7 @@ instead.
 
 ## Display width
 
-Tables automatically use the terminal width when stdout is a terminal. When
-output is redirected or the terminal width cannot be detected, lpcli uses 100
-columns. Set an explicit width for a single command with the global `--width`
-option (before or after the subcommand):
-
-```bash
-lpcli --width 150 bug search --target ubuntu --package unbound
-lpcli bug search --target ubuntu --package unbound --width 150
-```
-
-To save a preferred width, create `~/.config/lpcli/config.toml` (or the
+To configure the output width, create `~/.config/lpcli/config.toml` (or the
 platform-equivalent configuration directory):
 
 ```toml
@@ -199,11 +189,15 @@ platform-equivalent configuration directory):
 width = 150
 ```
 
-The command-line option overrides the configuration file, which overrides
-terminal detection. Widths include table borders and padding. Long cell text
-wraps instead of being truncated; extremely narrow outputs use a stacked
-`Field: value` layout. Explicit and configured widths are not capped to the
-physical terminal width.
+The configured width must be an integer between 1 and 65535 columns and takes
+precedence over terminal detection, including when output is redirected. If no
+width is configured, lpcli uses the terminal width when stdout is a terminal,
+or 100 columns when output is redirected or the width cannot be detected. There
+is no `--width` command-line option.
+
+Widths include table borders and padding. Long cell text wraps instead of being
+truncated; extremely narrow outputs use a stacked `Field: value` layout. A
+configured width is not capped to the physical terminal width.
 
 ## Usage
 
