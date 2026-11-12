@@ -583,7 +583,7 @@ impl LaunchpadClient {
             if let Some(next) = saved
                 && (status.as_u16() == 429 || status.is_server_error())
             {
-                let sleep_for = retry_delay(
+                let sleep_for = calculate_retry_delay(
                     status,
                     resp.headers(),
                     Duration::from_millis(delay_ms),
@@ -1078,19 +1078,29 @@ fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
     Some(delay)
 }
 
-fn retry_after_delay(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
+/// Extract and parse the `Retry-After` header from `headers` into a wait
+/// [`Duration`] relative to `now`.
+///
+/// Returns `None` if the header is missing, contains non-ASCII bytes, or does
+/// not contain a valid, representable RFC 9110 `Retry-After` value.
+fn parse_retry_after_header(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
     parse_retry_after(headers.get(RETRY_AFTER)?.to_str().ok()?, now)
 }
 
-/// Keep 5xx retry policy unchanged and reject hints that cannot be scheduled.
-fn retry_delay(
+/// Calculate the duration to wait before the next retry attempt.
+///
+/// For `429 Too Many Requests` responses, a valid `Retry-After` header delay
+/// that can be scheduled by the Tokio timer takes precedence over `backoff`.
+/// All other retryable statuses (such as `5xx` server errors), or responses
+/// without a usable `Retry-After` header, fall back to `backoff`.
+fn calculate_retry_delay(
     status: StatusCode,
     headers: &HeaderMap,
     backoff: Duration,
     now: SystemTime,
 ) -> Duration {
     if status == StatusCode::TOO_MANY_REQUESTS {
-        retry_after_delay(headers, now)
+        parse_retry_after_header(headers, now)
             .filter(|delay| tokio::time::Instant::now().checked_add(*delay).is_some())
             .unwrap_or(backoff)
     } else {
@@ -1100,7 +1110,7 @@ fn retry_delay(
 
 /// RateLimit exposes whole seconds; round up so its advice never retries early.
 fn retry_after_seconds(headers: &HeaderMap, now: SystemTime) -> Option<u64> {
-    retry_after_delay(headers, now).map(|delay| {
+    parse_retry_after_header(headers, now).map(|delay| {
         delay
             .as_secs()
             .saturating_add(u64::from(delay.subsec_nanos() != 0))
@@ -1250,7 +1260,7 @@ mod tests {
         let now = date() - Duration::from_millis(1250);
         let headers = retry_headers(HTTP_DATE);
         assert_eq!(
-            retry_after_delay(&headers, now),
+            parse_retry_after_header(&headers, now),
             Some(Duration::from_millis(1250))
         );
         assert_eq!(retry_after_seconds(&headers, now), Some(2));
@@ -1285,11 +1295,11 @@ mod tests {
             RETRY_AFTER,
             reqwest::header::HeaderValue::from_bytes(b"\xff").unwrap(),
         );
-        assert_eq!(retry_after_delay(&headers, date()), None);
+        assert_eq!(parse_retry_after_header(&headers, date()), None);
     }
 
     #[test]
-    fn retry_delay_uses_backoff_only_without_usable_429_advice() {
+    fn calculate_retry_delay_uses_backoff_only_without_usable_429_advice() {
         let backoff = Duration::from_millis(100);
         for headers in [
             HeaderMap::new(),
@@ -1297,12 +1307,12 @@ mod tests {
             retry_headers("18446744073709551615"),
         ] {
             assert_eq!(
-                retry_delay(StatusCode::TOO_MANY_REQUESTS, &headers, backoff, date()),
+                calculate_retry_delay(StatusCode::TOO_MANY_REQUESTS, &headers, backoff, date()),
                 backoff
             );
         }
         assert_eq!(
-            retry_delay(
+            calculate_retry_delay(
                 StatusCode::TOO_MANY_REQUESTS,
                 &retry_headers(HTTP_DATE),
                 backoff,
@@ -1312,7 +1322,7 @@ mod tests {
         );
         // HTTP-date parsing does not broaden which statuses honor Retry-After.
         assert_eq!(
-            retry_delay(
+            calculate_retry_delay(
                 StatusCode::SERVICE_UNAVAILABLE,
                 &retry_headers("0"),
                 backoff,
@@ -1330,7 +1340,7 @@ mod tests {
             ("2", Duration::from_secs(2)),
             (HTTP_DATE, Duration::from_millis(1250)),
         ] {
-            let selected = retry_delay(
+            let selected = calculate_retry_delay(
                 StatusCode::TOO_MANY_REQUESTS,
                 &retry_headers(header),
                 Duration::from_millis(1),
