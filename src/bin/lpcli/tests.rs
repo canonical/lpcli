@@ -445,12 +445,16 @@ async fn public_comments_do_not_load_auth_or_retry_on_denial() {
             .with_body(r#"{"entries":[{"content":"public"}]}"#)
             .create_async()
             .await;
-        let attachments = server
+        let mut attachments_builder = server
             .mock("GET", "/bugs/59/attachments")
             .match_header("authorization", mockito::Matcher::Missing)
-            .with_body(r#"{"entries":[]}"#)
-            .create_async()
-            .await;
+            .with_body(r#"{"entries":[]}"#);
+        if status != 200 {
+            // `fetch_bug_comments` uses `tokio::try_join!`, which cancels the
+            // concurrent attachments request if `get_bug_comments` errors first.
+            attachments_builder = attachments_builder.expect_at_most(1);
+        }
+        let attachments = attachments_builder.create_async().await;
         let client = read_client_with_auth(ReadAuthPolicy::Anonymous, || panic!("must not prompt"))
             .unwrap()
             .with_base_url(server.url());
@@ -474,6 +478,7 @@ async fn failed_page_exposes_no_partial_data_and_is_not_replayed() {
     let attachments = server
         .mock("GET", "/bugs/59/attachments")
         .with_body(r#"{"entries":[]}"#)
+        .expect_at_most(1)
         .create_async()
         .await;
     let client = mock_read_client(&server, true);
