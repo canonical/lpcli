@@ -74,6 +74,7 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 | Add a comment | `lpcli bug comment --bug-id 123456 --message "Reproduced on noble."` |
 | List comments | `lpcli bug comments --bug-id 123456` |
 | File a new bug | `lpcli bug create --target ubuntu --package curl --title "title" --description "desc"` |
+| Edit a bug description | `lpcli bug set-description --bug-id 123456 --description "new text"` or `--description-file ./desc.txt` (`-` reads stdin) |
 | Set bug task status | `lpcli bug set-status --bug-id 123456 --target curl --series noble --status in-progress` |
 | Set status on multiple series | `lpcli bug set-status --bug-id 123456 --target curl --many-series "noble, jammy" --status fix-released` |
 | Set status on all series | `lpcli bug set-status --bug-id 123456 --target curl --all-series --status fix-released` |

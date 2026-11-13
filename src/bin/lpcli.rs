@@ -592,6 +592,24 @@ enum BugCommand {
         #[arg(short = 'a', long)]
         attachment_type: Option<String>,
     },
+    /// Change the description of a bug.
+    #[command(
+        group(ArgGroup::new("description_source")
+            .required(true)
+            .args(["description", "description_file"])),
+    )]
+    SetDescription {
+        /// The Launchpad bug number.
+        #[arg(short, long)]
+        bug_id: u64,
+        /// New description text. Mutually exclusive with --description-file.
+        #[arg(short, long)]
+        description: Option<String>,
+        /// Path to a file containing the new description ('-' for standard
+        /// input). Mutually exclusive with --description.
+        #[arg(long)]
+        description_file: Option<String>,
+    },
     /// Change the status of a bug task.
     #[command(
         group(ArgGroup::new("target_spec")
@@ -2323,6 +2341,22 @@ async fn handle_bug(
                     "✓".green().bold(),
                     bug.id
                 );
+            }
+        }
+
+        BugCommand::SetDescription {
+            bug_id,
+            description,
+            description_file,
+        } => {
+            let text = resolve_new_description(description, description_file.as_deref())?;
+            let updated = bugs::set_bug_description(&client, bug_id, &text).await?;
+            println!(
+                "{} Description updated for bug #{bug_id}.",
+                "✓".green().bold()
+            );
+            if let Some(link) = &updated.web_link {
+                println!("URL: {}", link.underline());
             }
         }
 
@@ -5952,6 +5986,62 @@ fn parse_tags_from_vec(args: &[String]) -> Vec<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Resolve the new bug description from `--description` or
+/// `--description-file`.
+///
+/// Exactly one of the two must be supplied (enforced by clap). The resolved
+/// text is rejected when it is empty or whitespace-only: Launchpad does not
+/// accept an empty bug description, and an empty pipe or file silently
+/// wiping the current description would be an easy mistake to make.
+fn resolve_new_description(
+    description: Option<String>,
+    description_file: Option<&str>,
+) -> lpcli::error::Result<String> {
+    let text = match (description, description_file) {
+        (Some(text), _) => text,
+        (None, Some(path)) => read_description_file(path)?,
+        (None, None) => unreachable!("clap requires --description or --description-file"),
+    };
+    if text.trim().is_empty() {
+        return Err(lpcli::error::LpError::Other(
+            "the new bug description must not be empty".into(),
+        ));
+    }
+    Ok(text)
+}
+
+/// Read the new bug description from the file given by `--description-file`.
+///
+/// A path of `-` reads the description from standard input, mirroring
+/// `gh issue edit --body-file -`.
+fn read_description_file(path: &str) -> lpcli::error::Result<String> {
+    if path == "-" {
+        read_description_from_reader(std::io::stdin()).map_err(|e| {
+            lpcli::error::LpError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to read description from standard input: {e}"),
+            ))
+        })
+    } else {
+        std::fs::read_to_string(path).map_err(|e| {
+            lpcli::error::LpError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to read description file '{}': {e}", path),
+            ))
+        })
+    }
+}
+
+/// Read description text from an arbitrary reader.
+///
+/// Separated from [`read_description_file`] so the stdin path can be unit
+/// tested with a [`std::io::Cursor`] stand-in.
+fn read_description_from_reader<R: std::io::Read>(mut reader: R) -> std::io::Result<String> {
+    let mut buf = String::new();
+    reader.read_to_string(&mut buf)?;
+    Ok(buf)
 }
 
 /// Remove tags from `current_tags` according to the supplied remove flags.
