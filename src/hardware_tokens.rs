@@ -1248,55 +1248,18 @@ fn trusted_coordination_directory_in(
 
 #[cfg(target_os = "linux")]
 fn passwd_home_directory(uid: u32) -> Result<PathBuf> {
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
+    use nix::unistd::{Uid, User};
 
-    // SAFETY: sysconf(_SC_GETPW_R_SIZE_MAX) has no memory safety requirements.
-    let initial = match unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) } {
-        n if n > 0 => n as usize,
-        _ => 1024,
-    };
-    let mut buf = vec![0u8; initial];
-    let mut pwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
-    let mut result = std::ptr::null_mut();
-
-    loop {
-        // SAFETY: `pwd` holds uninitialized `passwd` storage, `buf` is valid
-        // for `buf.len()` bytes, and `result` receives either `&mut pwd` or null.
-        let rc = unsafe {
-            libc::getpwuid_r(
-                uid as libc::uid_t,
-                pwd.as_mut_ptr(),
-                buf.as_mut_ptr().cast::<libc::c_char>(),
-                buf.len(),
-                &mut result,
-            )
-        };
-        if rc == 0 {
-            if result.is_null() {
-                return Err(cache_error());
-            }
-            // SAFETY: `rc == 0` and `result` is non-null, so `pw_dir` points to
-            // a NUL-terminated path inside `buf`.
-            let pw_dir = unsafe { (*result).pw_dir };
-            if pw_dir.is_null() {
-                return Err(cache_error());
-            }
-            // SAFETY: `pw_dir` is a valid C string inside `buf`.
-            let path = PathBuf::from(OsStr::from_bytes(
-                unsafe { std::ffi::CStr::from_ptr(pw_dir) }.to_bytes(),
-            ));
-            if path.as_os_str().is_empty() || path == Path::new("/") {
-                return Err(cache_error());
-            }
-            return Ok(path);
-        }
-        if rc == libc::ERANGE && buf.len() < 65_536 {
-            buf.resize(buf.len() * 2, 0);
-            continue;
-        }
+    // nix wraps getpwuid_r and copies its buffer-backed fields into owned values.
+    // Unlike home_dir(), this lookup never consults HOME.
+    let user = User::from_uid(Uid::from_raw(uid))
+        .map_err(|_| cache_error())?
+        .ok_or_else(cache_error)?;
+    let path = user.dir;
+    if path.as_os_str().is_empty() || path == Path::new("/") {
         return Err(cache_error());
     }
+    Ok(path)
 }
 
 #[cfg(target_os = "linux")]
@@ -4204,6 +4167,28 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(session.access_credentials().await.unwrap(), fresh);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn passwd_home_lookup_returns_owned_path() {
+        use nix::unistd::{Uid, User};
+
+        let uid = Uid::effective();
+        let expected = User::from_uid(uid).unwrap().unwrap().dir;
+        let actual = passwd_home_directory(uid.as_raw());
+        if expected.as_os_str().is_empty() || expected == Path::new("/") {
+            assert!(actual.is_err());
+        } else {
+            assert_eq!(actual.unwrap(), expected);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn passwd_home_lookup_rejects_missing_user() {
+        // Linux reserves (uid_t)-1 as an invalid UID.
+        assert!(passwd_home_directory(u32::MAX).is_err());
     }
 
     #[cfg(target_os = "linux")]
