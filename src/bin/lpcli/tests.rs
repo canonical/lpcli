@@ -3,6 +3,377 @@
 
 use super::*;
 
+mod documentation_examples {
+    use super::*;
+
+    /// Collect logical shell lines and inline commands with their Markdown source lines.
+    fn candidates(markdown: &str) -> Vec<(usize, String)> {
+        let mut examples = Vec::new();
+        let mut fence: Option<(&str, bool)> = None;
+        let mut pending = String::new();
+        let mut start_line = 0;
+
+        for (index, line) in markdown.lines().enumerate() {
+            let line_number = index + 1;
+            let trimmed = line.trim_start();
+            if let Some((delimiter, shell)) = fence {
+                if trimmed.starts_with(delimiter) {
+                    if !pending.is_empty() {
+                        examples.push((start_line, std::mem::take(&mut pending)));
+                    }
+                    fence = None;
+                } else if shell && (!trimmed.is_empty() || !pending.is_empty()) {
+                    if pending.is_empty() {
+                        start_line = line_number;
+                    } else {
+                        // Join explicit continuations before tokenizing: shlex otherwise emits
+                        // an empty argument for a standalone backslash-newline. Keep a trailing
+                        // backslash until another line arrives so dangling ones remain errors.
+                        pending.pop();
+                    }
+                    pending.push_str(line);
+                    // shlex distinguishes continuations from escaped backslashes and comments.
+                    if !(line.ends_with('\\') && shlex::split(&pending).is_none()) {
+                        examples.push((start_line, std::mem::take(&mut pending)));
+                    }
+                }
+                continue;
+            }
+
+            if let Some(delimiter) = ["```", "~~~"]
+                .into_iter()
+                .find(|delimiter| trimmed.starts_with(delimiter))
+            {
+                let language = trimmed[delimiter.len()..].split_whitespace().next();
+                fence = Some((delimiter, matches!(language, Some("bash" | "sh"))));
+                continue;
+            }
+
+            for inline in line.split('`').skip(1).step_by(2) {
+                let inline = inline.trim();
+                // A bare `lpcli` in prose names the program/consumer, not a command example.
+                if inline
+                    .strip_prefix("lpcli")
+                    .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+                {
+                    examples.push((line_number, inline.to_owned()));
+                }
+            }
+        }
+        if !pending.is_empty() {
+            examples.push((start_line, pending));
+        }
+        examples
+    }
+
+    // shlex parses words, not redirection operators. Check placeholder spelling in the
+    // source, since tokenization removes the quotes/escapes that make angle brackets literal.
+    fn has_unquoted_placeholder(command: &str) -> bool {
+        let mut quote = None;
+        let mut word_start = true;
+        let mut chars = command.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\\' if quote != Some('\'') => {
+                    chars.next();
+                    word_start = false;
+                }
+                '\'' | '"' if quote.is_none() => {
+                    quote = Some(ch);
+                    word_start = false;
+                }
+                '\'' | '"' if quote == Some(ch) => quote = None,
+                '#' if quote.is_none() && word_start => {
+                    for ch in chars.by_ref() {
+                        if ch == '\n' {
+                            break;
+                        }
+                    }
+                    word_start = true;
+                }
+                '<' if quote.is_none() => {
+                    if chars
+                        .clone()
+                        .take_while(|ch| !ch.is_whitespace() && !matches!(ch, '\'' | '"' | '\\'))
+                        .any(|ch| ch == '>')
+                    {
+                        return true;
+                    }
+                    word_start = false;
+                }
+                _ if quote.is_none() => word_start = ch.is_whitespace(),
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn command_args(command: &str) -> Result<Option<Vec<String>>, &'static str> {
+        let mut words =
+            shlex::split(command).ok_or("invalid shell quoting or dangling backslash")?;
+        let start = if words.first().is_some_and(|word| word == "lpcli") {
+            Some(0)
+        } else {
+            // Support the documented `cat ... | lpcli ...` form, not arbitrary shell scripts.
+            // Check command boundaries rather than treating any argument named lpcli as a command.
+            words
+                .windows(2)
+                .position(|pair| pair[0] == "|" && pair[1] == "lpcli")
+                .map(|pipe| pipe + 1)
+        };
+        if start.is_some() && has_unquoted_placeholder(command) {
+            return Err(
+                "unquoted <...> placeholder is shell redirection, not a CLI argument; use a concrete value or quote literal text",
+            );
+        }
+        Ok(start.map(|start| words.drain(start..).collect()))
+    }
+
+    fn validation_failures(document: &str, markdown: &str) -> (usize, Vec<String>) {
+        let mut count = 0;
+        let mut failures = Vec::new();
+        for (line, command) in candidates(markdown) {
+            let args = match command_args(&command) {
+                Ok(Some(args)) => args,
+                Ok(None) => continue,
+                Err(error) => {
+                    count += 1;
+                    failures.push(format!("{document}:{line}: {}\n  {error}", command.trim()));
+                    continue;
+                }
+            };
+            count += 1;
+            if let Err(error) = Cli::try_parse_from(&args).and_then(|cli| validate_cli(&cli))
+                && !matches!(
+                    error.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                )
+            {
+                failures.push(format!("{document}:{line}: {}\n  {error}", command.trim()));
+            }
+        }
+        (count, failures)
+    }
+
+    #[test]
+    fn documented_cli_examples_parse_and_validate() {
+        let mut total = 0;
+        let mut failures = Vec::new();
+        for (document, markdown) in [
+            ("README.md", include_str!("../../../README.md")),
+            ("AGENTS.md", include_str!("../../../AGENTS.md")),
+        ] {
+            let (count, errors) = validation_failures(document, markdown);
+            total += count;
+            failures.extend(errors);
+            eprintln!("{document}: checked {count} lpcli command examples");
+        }
+        assert!(total > 0, "no documented lpcli command examples found");
+        assert!(
+            failures.is_empty(),
+            "{} of {total} documented lpcli examples failed:\n\n{}",
+            failures.len(),
+            failures.join("\n\n")
+        );
+    }
+
+    #[test]
+    fn extracts_shell_fences_and_inline_commands_only() {
+        let markdown = "Use `lpcli --help` and `lpcli --version`; `lpcli` names the program.\n\
+                        ```bash\n\
+                        lpcli login\n\
+                        cargo build --release\n\
+                        ```\n\
+                        ~~~sh\n\
+                        lpcli status\n\
+                        ~~~\n\
+                        ```rust\n\
+                        `lpcli not-a-command`\n\
+                        ```\n\
+                        ```\n\
+                        lpcli <COMMAND> [OPTIONS]\n\
+                        ```\n\
+                        Ignore `lpcli-helper --help` and `echo lpcli --help`.\n";
+        let examples: Vec<_> = candidates(markdown)
+            .into_iter()
+            .filter_map(|(line, command)| command_args(&command).unwrap().map(|args| (line, args)))
+            .collect();
+        assert_eq!(
+            examples,
+            vec![
+                (1, vec!["lpcli".to_owned(), "--help".to_owned()]),
+                (1, vec!["lpcli".to_owned(), "--version".to_owned()]),
+                (3, vec!["lpcli".to_owned(), "login".to_owned()]),
+                (7, vec!["lpcli".to_owned(), "status".to_owned()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn shell_quotes_and_comments_preserve_argument_contents() {
+        let command =
+            r#"lpcli bug comment --bug-id 123456 --message "A \"quote\", # and | lpcli" # ignored"#;
+        assert_eq!(
+            command_args(command).unwrap().unwrap(),
+            [
+                "lpcli",
+                "bug",
+                "comment",
+                "--bug-id",
+                "123456",
+                "--message",
+                "A \"quote\", # and | lpcli"
+            ]
+        );
+        let command = "lpcli bug comment --bug-id 123456 --message 'literal # | and \\ slash'";
+        assert_eq!(
+            command_args(command).unwrap().unwrap().last().unwrap(),
+            "literal # | and \\ slash"
+        );
+        assert!(command_args("# lpcli not-a-command").unwrap().is_none());
+        assert_eq!(
+            command_args("lpcli bug comment --bug-id 1 --message ''")
+                .unwrap()
+                .unwrap()
+                .last()
+                .unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn unquoted_placeholders_fail_but_literal_brackets_and_comments_are_allowed() {
+        for command in [
+            "lpcli person show --name <person>",
+            "lpcli login --hardware-token --account <you> --grant-token <oauth_token>",
+        ] {
+            // These string arguments pass clap, but are not argv in a shell invocation.
+            let cli = Cli::try_parse_from(shlex::split(command).unwrap()).unwrap();
+            validate_cli(&cli).unwrap();
+            let (count, failures) = validation_failures("placeholder.md", &format!("`{command}`"));
+            assert_eq!(count, 1);
+            assert_eq!(failures.len(), 1);
+            assert!(failures[0].starts_with("placeholder.md:1:"));
+            assert!(failures[0].contains("unquoted <...> placeholder"));
+        }
+        for command in [
+            "lpcli person show --name '<person>'",
+            "lpcli person show --name \"<person>\"",
+            r"lpcli person show --name \<person\>",
+            "lpcli person show --name person#tag # <placeholder>",
+            r#"lpcli person show --name "A \"quote\" and <literal>""#,
+        ] {
+            let (count, failures) = validation_failures("literal.md", &format!("`{command}`"));
+            assert_eq!(count, 1);
+            assert!(failures.is_empty(), "{}", failures.join("\n"));
+        }
+    }
+
+    #[test]
+    fn continuations_use_shell_unescaping_and_keep_start_lines() {
+        let markdown = "```bash\n\
+                        # This comment does not continue \\\n\
+                        lpcli hardware-token register \\\n\
+                            \"My Yubi\\\n\
+                        Key\" # trailing comment \\\n\
+                        lpcli status\n\
+                        lpcli bug comment --bug-id 1 --message backslash\\\\\n\
+                        lpcli logout\n\
+                        ```";
+        let examples: Vec<_> = candidates(markdown)
+            .into_iter()
+            .filter_map(|(line, command)| command_args(&command).unwrap().map(|args| (line, args)))
+            .collect();
+        assert_eq!(examples.len(), 4);
+        assert_eq!(examples[0].0, 3);
+        assert_eq!(
+            examples[0].1,
+            ["lpcli", "hardware-token", "register", "My YubiKey"]
+        );
+        assert_eq!(
+            examples[1],
+            (6, vec!["lpcli".to_owned(), "status".to_owned()])
+        );
+        assert_eq!(examples[2].1.last().unwrap(), "backslash\\");
+        assert_eq!(examples[3].0, 8);
+        let (_, failures) = validation_failures("dangling.md", "```sh\nlpcli status \\\n```");
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("dangling backslash"));
+    }
+
+    #[test]
+    fn input_pipe_extracts_lpcli_but_not_upstream_arguments() {
+        let command = "cat 'description with spaces.txt' | lpcli bug set-description \\\n    --bug-id 123456 --description-file - # stdin";
+        let examples = candidates(&format!("```sh\n{command}\n```"));
+        assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].0, 2);
+        assert_eq!(
+            command_args(&examples[0].1).unwrap().unwrap(),
+            [
+                "lpcli",
+                "bug",
+                "set-description",
+                "--bug-id",
+                "123456",
+                "--description-file",
+                "-"
+            ]
+        );
+        let (count, failures) = validation_failures("pipe.md", &format!("```sh\n{command}\n```"));
+        assert_eq!(count, 1);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        assert!(command_args("echo lpcli --help").unwrap().is_none());
+        assert!(command_args("cat lpcli | cat").unwrap().is_none());
+    }
+
+    #[test]
+    fn validation_aggregates_parse_shell_and_semantic_errors() {
+        let markdown = "```sh\n\
+                        lpcli not-a-command\n\
+                        lpcli bug show\n\
+                        lpcli package series --series not-a-series\n\
+                        lpcli --public login\n\
+                        lpcli bug comment --bug-id 1 --message 'unclosed\n\
+                        lpcli status\n\
+                        ```\n\
+                        Finally, `lpcli --version`.";
+        let (count, failures) = validation_failures("examples.md", markdown);
+        assert_eq!(count, 7);
+        assert_eq!(failures.len(), 5, "{}", failures.join("\n"));
+        for (failure, line) in failures.iter().zip(2..=6) {
+            assert!(
+                failure.starts_with(&format!("examples.md:{line}:")),
+                "{failure}"
+            );
+        }
+        assert!(failures[2].contains("not-a-series"));
+        assert!(failures[3].contains("--public"));
+        assert!(failures[4].contains("invalid shell quoting"));
+    }
+
+    #[test]
+    fn only_help_and_version_error_kinds_count_as_success() {
+        let markdown = "```bash\n\
+                        lpcli --help\n\
+                        lpcli --version\n\
+                        lpcli bug --help\n\
+                        lpcli help bug\n\
+                        lpcli\n\
+                        lpcli bug\n\
+                        lpcli not-a-command --help\n\
+                        ```";
+        let (count, failures) = validation_failures("help.md", markdown);
+        assert_eq!(count, 7);
+        assert_eq!(failures.len(), 3, "{}", failures.join("\n"));
+        for (failure, line) in failures.iter().zip(6..=8) {
+            assert!(
+                failure.starts_with(&format!("help.md:{line}:")),
+                "{failure}"
+            );
+        }
+    }
+}
+
 #[test]
 fn cli_hardware_clear_cache_parses_without_credentials_or_token_arguments() {
     for args in [
