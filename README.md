@@ -242,6 +242,16 @@ lpcli bug comments --bug-id 123456
 lpcli bug create --target ubuntu --package curl --title "curl crashes on redirect" \
     --description "Steps to reproduce: ..."
 
+# Change the description of a bug (requires 'launchpad.Edit' permission on the bug)
+lpcli bug set-description --bug-id 123456 \
+    --description "Updated description with reproduction steps."
+
+# Change the description of a bug from a file ('-' reads standard input)
+lpcli bug set-description --bug-id 123456 --description-file ./description.txt
+
+# Change the description of a bug from a pipe
+cat description.txt | lpcli bug set-description --bug-id 123456 --description-file -
+
 # Change the status of a bug task (--target is the name shown by 'lpcli bug tasks';
 # status values are kebab-case: new, confirmed, triaged, in-progress,
 # fix-committed, fix-released, invalid, wont-fix, opinion, expired)

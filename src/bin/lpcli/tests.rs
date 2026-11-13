@@ -1924,3 +1924,204 @@ fn find_task_to_link_not_found_fails() {
     let res = find_task_to_link(&tasks, 42, &selector);
     assert!(res.is_err());
 }
+
+// -----------------------------------------------------------------------
+// bug set-description
+// -----------------------------------------------------------------------
+
+/// `bug set-description --description` parses the bug id and description text.
+#[test]
+fn cli_bug_set_description_accepts_description_text() {
+    let cli = Cli::try_parse_from([
+        "lpcli",
+        "bug",
+        "set-description",
+        "--bug-id",
+        "2174396",
+        "--description",
+        "Crash when unlocking the session.",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Bug(BugCommand::SetDescription {
+            bug_id,
+            description,
+            description_file,
+        }) => {
+            assert_eq!(bug_id, 2174396);
+            assert_eq!(
+                description.as_deref(),
+                Some("Crash when unlocking the session.")
+            );
+            assert!(description_file.is_none());
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+/// `bug set-description --description-file` parses the file path.
+#[test]
+fn cli_bug_set_description_accepts_description_file() {
+    let cli = Cli::try_parse_from([
+        "lpcli",
+        "bug",
+        "set-description",
+        "-b",
+        "42",
+        "--description-file",
+        "/tmp/description.txt",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Bug(BugCommand::SetDescription {
+            bug_id,
+            description,
+            description_file,
+        }) => {
+            assert_eq!(bug_id, 42);
+            assert!(description.is_none());
+            assert_eq!(description_file.as_deref(), Some("/tmp/description.txt"));
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+/// `-` is accepted as the `--description-file` value (meaning stdin).
+#[test]
+fn cli_bug_set_description_accepts_stdin_marker() {
+    let cli = Cli::try_parse_from([
+        "lpcli",
+        "bug",
+        "set-description",
+        "-b",
+        "42",
+        "--description-file",
+        "-",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Bug(BugCommand::SetDescription {
+            description_file, ..
+        }) => {
+            assert_eq!(description_file.as_deref(), Some("-"));
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+/// Omitting both `--description` and `--description-file` is an error.
+#[test]
+fn cli_bug_set_description_requires_description_or_file() {
+    let err =
+        Cli::try_parse_from(["lpcli", "bug", "set-description", "--bug-id", "42"]).unwrap_err();
+    assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+}
+
+/// Passing both `--description` and `--description-file` is an error.
+#[test]
+fn cli_bug_set_description_rejects_description_and_file_together() {
+    let err = Cli::try_parse_from([
+        "lpcli",
+        "bug",
+        "set-description",
+        "--bug-id",
+        "42",
+        "--description",
+        "text",
+        "--description-file",
+        "/tmp/description.txt",
+    ])
+    .unwrap_err();
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
+/// `read_description_file` reads the file contents verbatim, including
+/// newlines and unicode text.
+#[test]
+fn read_description_file_reads_file_contents() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("description.txt");
+    std::fs::write(&path, "line one\nline two ✓\n").unwrap();
+
+    let text =
+        read_description_file(path.to_str().unwrap()).expect("reading the file should succeed");
+    assert_eq!(text, "line one\nline two ✓\n");
+}
+
+/// `read_description_file` reports a helpful error naming the path for a
+/// missing file (mirroring the attachment-reader error pattern).
+#[test]
+fn read_description_file_missing_file_is_an_error() {
+    let err = read_description_file("/nonexistent/description.txt").unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Failed to read description file '/nonexistent/description.txt'"),
+        "msg: {msg}"
+    );
+}
+
+/// `resolve_new_description` returns the text given via `--description`.
+#[test]
+fn resolve_new_description_accepts_text() {
+    let text = resolve_new_description(Some("Updated description.".into()), None)
+        .expect("text should be accepted");
+    assert_eq!(text, "Updated description.");
+}
+
+/// `resolve_new_description` reads the file given via `--description-file`.
+#[test]
+fn resolve_new_description_reads_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("description.txt");
+    std::fs::write(&path, "description from a file").unwrap();
+
+    let text = resolve_new_description(None, Some(path.to_str().unwrap()))
+        .expect("file input should be accepted");
+    assert_eq!(text, "description from a file");
+}
+
+/// `resolve_new_description` rejects an empty `--description` value.
+#[test]
+fn resolve_new_description_rejects_empty_text() {
+    let err = resolve_new_description(Some(String::new()), None).unwrap_err();
+    assert!(err.to_string().contains("must not be empty"), "msg: {err}");
+}
+
+/// `resolve_new_description` rejects a whitespace-only `--description` value.
+#[test]
+fn resolve_new_description_rejects_whitespace_only_text() {
+    let err = resolve_new_description(Some("  \n\t".into()), None).unwrap_err();
+    assert!(err.to_string().contains("must not be empty"), "msg: {err}");
+}
+
+/// `resolve_new_description` rejects an empty description file, so an empty
+/// pipe or file cannot silently wipe the current description.
+#[test]
+fn resolve_new_description_rejects_empty_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty.txt");
+    std::fs::write(&path, "").unwrap();
+
+    let err = resolve_new_description(None, Some(path.to_str().unwrap())).unwrap_err();
+    assert!(err.to_string().contains("must not be empty"), "msg: {err}");
+}
+
+/// `read_description_from_reader` reads stdin-style input verbatim.
+#[test]
+fn read_description_from_reader_reads_input() {
+    use std::io::Cursor;
+
+    let text = read_description_from_reader(Cursor::new(b"piped description\n".to_vec()))
+        .expect("reading should succeed");
+    assert_eq!(text, "piped description\n");
+}
+
+/// `read_description_from_reader` surfaces non-UTF-8 input as an I/O error.
+#[test]
+fn read_description_from_reader_rejects_non_utf8() {
+    use std::io::Cursor;
+
+    let err = read_description_from_reader(Cursor::new(vec![0xff, 0xfe, 0x41]))
+        .expect_err("non-UTF-8 input should be an error");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
