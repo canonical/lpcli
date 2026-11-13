@@ -16,6 +16,26 @@ use lpcli::error::{LpError, Result};
 pub struct AppConfig {
     /// Display-related settings.
     pub display: DisplayConfig,
+    /// Authentication-related settings.
+    pub authentication: AuthenticationConfig,
+}
+
+/// Authentication-related settings.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthenticationConfig {
+    /// Cross-invocation hardware access-token cache lifetime, in seconds.
+    ///
+    /// The default is 300 seconds; zero disables cross-invocation caching.
+    pub hardware_token_cache_seconds: u64,
+}
+
+impl Default for AuthenticationConfig {
+    fn default() -> Self {
+        Self {
+            hardware_token_cache_seconds: 300,
+        }
+    }
 }
 
 /// Display-related settings.
@@ -48,7 +68,7 @@ pub fn load() -> Result<AppConfig> {
 /// Load the user configuration from `path`.
 ///
 /// A missing file yields [`AppConfig::default`].  Malformed TOML, unknown
-/// fields, wrong value types, and out-of-range widths are reported as
+/// fields, wrong value types, and out-of-range settings are reported as
 /// [`LpError::Config`] with a message that identifies the problem.
 pub fn load_from(path: &Path) -> Result<AppConfig> {
     let raw = match std::fs::read_to_string(path) {
@@ -74,6 +94,13 @@ pub fn load_from(path: &Path) -> Result<AppConfig> {
         return Err(LpError::Config(format!(
             "Invalid display.width in {}: must be between 1 and 65535 (got 0)",
             path.display()
+        )));
+    }
+    if config.authentication.hardware_token_cache_seconds > 86_400 {
+        return Err(LpError::Config(format!(
+            "Invalid authentication.hardware_token_cache_seconds in {}: must be between 0 and 86400 seconds (got {})",
+            path.display(),
+            config.authentication.hardware_token_cache_seconds
         )));
     }
     Ok(config)
@@ -134,6 +161,84 @@ mod tests {
         let config = load_from(&path).unwrap();
 
         assert_eq!(config, AppConfig::default());
+    }
+
+    #[test]
+    fn hardware_token_cache_defaults_to_five_minutes() {
+        assert_eq!(
+            AppConfig::default()
+                .authentication
+                .hardware_token_cache_seconds,
+            300
+        );
+        for contents in ["", "[authentication]\n", "[display]\nwidth = 80\n"] {
+            let (_dir, path) = write_config(contents);
+            assert_eq!(
+                load_from(&path)
+                    .unwrap()
+                    .authentication
+                    .hardware_token_cache_seconds,
+                300
+            );
+        }
+    }
+
+    #[test]
+    fn hardware_token_cache_valid_values_load() {
+        for seconds in [0, 1, 300, 86_400] {
+            let (_dir, path) = write_config(&format!(
+                "[authentication]\nhardware_token_cache_seconds = {seconds}\n"
+            ));
+            assert_eq!(
+                load_from(&path)
+                    .unwrap()
+                    .authentication
+                    .hardware_token_cache_seconds,
+                seconds
+            );
+        }
+    }
+
+    #[test]
+    fn hardware_token_cache_above_one_day_is_config_error() {
+        let (_dir, path) = write_config("[authentication]\nhardware_token_cache_seconds = 86401\n");
+
+        let err = load_from(&path).unwrap_err();
+
+        assert!(matches!(err, LpError::Config(_)));
+        let message = err.to_string();
+        assert!(message.contains("authentication.hardware_token_cache_seconds"));
+        assert!(message.contains("between 0 and 86400"));
+        assert!(message.contains("86401"));
+        assert!(message.contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn invalid_hardware_token_cache_values_are_config_errors() {
+        for value in ["-1", "\"300\"", "true", "1.5"] {
+            let (_dir, path) = write_config(&format!(
+                "[authentication]\nhardware_token_cache_seconds = {value}\n"
+            ));
+
+            let err = load_from(&path).unwrap_err();
+
+            assert!(matches!(err, LpError::Config(_)));
+            let message = err.to_string();
+            assert!(message.contains("hardware_token_cache_seconds"));
+            assert!(message.contains(value));
+            assert!(message.contains(&path.display().to_string()));
+        }
+    }
+
+    #[test]
+    fn unknown_authentication_field_is_config_error() {
+        let (_dir, path) = write_config("[authentication]\nhardware_token_cache_second = 300\n");
+
+        let err = load_from(&path).unwrap_err();
+
+        assert!(matches!(err, LpError::Config(_)));
+        assert!(err.to_string().contains("unknown field"));
+        assert!(err.to_string().contains("hardware_token_cache_second"));
     }
 
     #[test]

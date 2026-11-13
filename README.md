@@ -18,7 +18,7 @@ applications can build on the same type-safe API wrappers.
   the operating system keyring (Secret Service, Keychain, or Credential Manager),
   with a plaintext file fallback when no keyring is available.
 - **Hardware-bound API tokens** — optionally bind your API access to a USB FIDO2
-  security key (e.g. a YubiKey), so stored credentials are useless without it.
+  security key (e.g. a YubiKey), so exchanging a stored grant requires the key.
 - **Rich terminal output** — coloured text and formatted tables via
   [`colored`](https://crates.io/crates/colored) and
   [`comfy-table`](https://crates.io/crates/comfy-table).
@@ -54,8 +54,12 @@ cargo install --path .
 
 ## Authentication
 
-Most read operations work anonymously. To perform write operations (file bugs,
-add comments, set statuses, etc.) you must first log in:
+Reads that may include private data use authentication by default. To read
+only public data without loading credentials or touching a security key, use
+`--public`, for example `lpcli --public bug show --bug-id 123456`. Public-only
+results may omit private objects, fields, or collection entries. Some public
+Ubuntu distribution reads work anonymously by default. To perform write
+operations (file bugs, add comments, set statuses, etc.) you must log in:
 
 ```bash
 lpcli login
@@ -120,9 +124,46 @@ required. Hardware-bound tokens are currently supported on Linux only.
    run `lpcli logout --classic`. Grants use the separate `lpcli-hardware`
    consumer, so this does not affect them.
 
-From then on, lpcli uses the stored grant by default for authenticated commands. Each
-invocation needs one touch to mint an access token, which is reused until
-shortly before it expires. Access tokens are never stored.
+From then on, lpcli uses the stored grant by default for authenticated commands.
+A successful key check mints a short-lived access token for API requests.
+
+#### Access-token cache
+
+By default, lpcli caches the access token for up to five minutes across
+invocations, bounded by the token's Launchpad expiry. The grace period starts
+with the key check and does not extend when the token is used. Set
+`authentication.hardware_token_cache_seconds` in `~/.config/lpcli/config.toml`
+(or the platform-equivalent configuration directory) to an integer from 0 to 86400
+seconds (one day):
+
+```toml
+[authentication]
+hardware_token_cache_seconds = 300
+```
+
+Set it to `0` to disable cross-invocation caching. Access tokens are cached in
+the OS keyring only, with no plaintext-file fallback. On Linux, cross-process
+locking and a non-secret generation marker are kept in `~/.cache/lpcli`
+(resolved from the account's system passwd home directory rather than
+environment overrides, falling back to `/run/user/<uid>` if home is
+unavailable). If the keyring or both coordination directories are unavailable,
+each invocation requires a key touch; under `sudo`, access tokens are kept in
+memory only. No security-key PINs or FIDO assertions are stored in the cache.
+
+A cached access token is an ordinary short-lived OAuth token: anyone who obtains it
+can use it without the security key until Launchpad expires it, even after the local
+cache grace period ends. The local grace period limits lpcli's reuse, not the token's
+server-side validity.
+
+Clear the cached access token at any time, without deleting the hardware-bound
+grant:
+
+```bash
+lpcli hardware-token clear-cache
+```
+
+Clearing does not revoke issued tokens on Launchpad or remove tokens already held
+by running processes. The local deadline relies on the system clock.
 
 #### Registering an additional key
 
