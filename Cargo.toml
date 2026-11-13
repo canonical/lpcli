@@ -7,7 +7,7 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/canonical/lpcli"
 keywords = ["launchpad", "ubuntu", "cli", "packaging"]
 categories = ["command-line-utilities"]
-rust-version = "1.93"
+rust-version = "1.97"
 
 [[bin]]
 name = "lpcli"
@@ -94,6 +94,8 @@ unit-prefix = "0.5.2"
 dbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust", "vendored"] }
 # Non-blocking hidraw access for USB FIDO2 security keys
 libc = "0.2"
+# Safe getpwuid_r wrapper for environment-independent cache coordination paths
+nix = { version = "0.30", default-features = false, features = ["user"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1", features = ["keychain"] }

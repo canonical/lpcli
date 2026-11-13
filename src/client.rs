@@ -35,12 +35,76 @@ use reqwest::{
 };
 use serde::de::DeserializeOwned;
 
+fn api_http_client(hardware: bool, base_url: &str) -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(concat!("lpcli/", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(30))
+        .redirect(redirect_policy(hardware.then_some(base_url)))
+        .build()
+        .expect("Failed to build HTTP client")
+}
+
+fn redirect_policy(signing_origin: Option<&str>) -> reqwest::redirect::Policy {
+    let Some(signing_origin) = signing_origin.map(str::to_owned) else {
+        return reqwest::redirect::Policy::limited(10);
+    };
+    reqwest::redirect::Policy::custom(move |attempt| {
+        let previous = attempt.previous();
+        if previous.len() >= 10 {
+            return attempt.error("too many redirects");
+        }
+        // Once a redirect leaves the signing origin, reqwest removes the
+        // Authorization header. Do not follow a bounce back to that origin:
+        // its eventual 401 would otherwise be mistaken for a signed request.
+        if let Some(original) = previous.first()
+            && same_origin(original.as_str(), &signing_origin)
+            && same_origin(attempt.url().as_str(), original.as_str())
+            && previous
+                .iter()
+                .any(|url| !same_origin(url.as_str(), original.as_str()))
+        {
+            return attempt.stop();
+        }
+        attempt.follow()
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 /// Base URL for the Launchpad devel API.
 pub const API_BASE: &str = "https://api.launchpad.net/devel";
+
+// Private response metadata; never infer a rejected generation from the
+// session's current credentials, which may already have changed.
+#[derive(Clone)]
+struct RejectedRequestCredentials(Credentials);
+
+#[derive(Debug, Clone)]
+enum HardwareSession {
+    Real(Arc<HardwareTokenSession>),
+    #[cfg(test)]
+    Test(Arc<tests::TestHardwareSession>),
+}
+
+impl HardwareSession {
+    async fn access_credentials(&self) -> Result<Credentials> {
+        match self {
+            Self::Real(session) => session.access_credentials().await,
+            #[cfg(test)]
+            Self::Test(session) => session.access_credentials().await,
+        }
+    }
+
+    async fn invalidate_rejected_access_token(&self, credentials: &Credentials) -> Result<bool> {
+        match self {
+            Self::Real(session) => session.invalidate_rejected_access_token(credentials).await,
+            #[cfg(test)]
+            Self::Test(session) => session.invalidate_rejected_access_token(credentials).await,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Client
@@ -53,7 +117,7 @@ pub struct LaunchpadClient {
     credentials: Option<Credentials>,
     /// A hardware-bound session; when set it signs requests instead of
     /// `credentials`.
-    hardware: Option<Arc<HardwareTokenSession>>,
+    hardware: Option<HardwareSession>,
     /// Override the API base URL (useful in tests).
     base_url: String,
     /// Maximum number of retry attempts for 429 and 5xx responses.
@@ -70,11 +134,7 @@ impl LaunchpadClient {
     /// Pass `Some(creds)` for authenticated calls; `None` for anonymous access.
     pub fn new(credentials: Option<Credentials>) -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .user_agent(concat!("lpcli/", env!("CARGO_PKG_VERSION")))
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("Failed to build HTTP client"),
+            http: api_http_client(false, API_BASE),
             credentials,
             hardware: None,
             base_url: API_BASE.to_string(),
@@ -89,10 +149,13 @@ impl LaunchpadClient {
     /// The first signed request mints a token, which needs a touch of the
     /// security key; later requests reuse it until shortly before it
     /// expires.  Requests to hosts other than the API host are sent without
-    /// an `Authorization` header.
+    /// an `Authorization` header. A redirect that leaves the signing origin
+    /// and later returns to it is not followed: its request would no longer
+    /// carry the original authorization, so a 401 could not identify the token.
     pub fn with_hardware_token(session: Arc<HardwareTokenSession>) -> Self {
         Self {
-            hardware: Some(session),
+            http: api_http_client(true, API_BASE),
+            hardware: Some(HardwareSession::Real(session)),
             ..Self::new(None)
         }
     }
@@ -105,6 +168,9 @@ impl LaunchpadClient {
     /// Override the base URL (used in integration tests with a mock server).
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        if self.hardware.is_some() {
+            self.http = api_http_client(true, &self.base_url);
+        }
         self
     }
 
@@ -153,21 +219,21 @@ impl LaunchpadClient {
     /// safe (GET) requests are retried, since repeating others could
     /// duplicate their effects.
     pub async fn get_url<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
-        match self.get_url_once(url).await {
-            Err(e) if self.hardware_token_rejected(&e) => self.get_url_once(url).await,
-            result => result,
+        for attempt in 0..2 {
+            let req = self.http.get(url).header("Accept", "application/json");
+            let (req, credentials) = self.authorize_request(req, url).await?;
+            let resp = self.send_with_retry(req).await?;
+            let resp = self.attach_request_credentials(resp, credentials);
+            let signed = resp
+                .extensions()
+                .get::<RejectedRequestCredentials>()
+                .is_some();
+            match self.handle_response(resp).await {
+                Err(e) if attempt == 0 && signed && Self::hardware_token_rejected(&e) => continue,
+                result => return result,
+            }
         }
-    }
-
-    async fn get_url_once<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
-        let mut req = self.http.get(url).header("Accept", "application/json");
-
-        if let Some(auth_header) = self.authorization(url).await? {
-            req = req.header("Authorization", auth_header);
-        }
-
-        let resp = self.send_with_retry(req).await?;
-        self.handle_response(resp).await
+        unreachable!("the second GET attempt always returns")
     }
 
     /// Fetch a file resource URL (e.g. `diff_text_link`) and return the body
@@ -231,17 +297,16 @@ impl LaunchpadClient {
         url: &str,
         params: &HashMap<&str, &str>,
     ) -> Result<T> {
-        let mut req = self
+        let req = self
             .http
             .post(url)
             .header("Accept", "application/json")
             .form(params);
 
-        if let Some(auth_header) = self.authorization(url).await? {
-            req = req.header("Authorization", auth_header);
-        }
+        let (req, credentials) = self.authorize_request(req, url).await?;
 
         let resp = self.send_with_retry(req).await?;
+        let resp = self.attach_request_credentials(resp, credentials);
         self.handle_response(resp).await
     }
 
@@ -257,17 +322,16 @@ impl LaunchpadClient {
         url: &str,
         params: &HashMap<&str, &str>,
     ) -> Result<T> {
-        let mut req = self
+        let req = self
             .http
             .patch(url)
             .header("Accept", "application/json")
             .json(params);
 
-        if let Some(auth_header) = self.authorization(url).await? {
-            req = req.header("Authorization", auth_header);
-        }
+        let (req, credentials) = self.authorize_request(req, url).await?;
 
         let resp = self.send_with_retry(req).await?;
+        let resp = self.attach_request_credentials(resp, credentials);
         self.handle_response(resp).await
     }
 
@@ -283,17 +347,16 @@ impl LaunchpadClient {
         url: &str,
         body: &serde_json::Value,
     ) -> Result<T> {
-        let mut req = self
+        let req = self
             .http
             .patch(url)
             .header("Accept", "application/json")
             .json(body);
 
-        if let Some(auth_header) = self.authorization(url).await? {
-            req = req.header("Authorization", auth_header);
-        }
+        let (req, credentials) = self.authorize_request(req, url).await?;
 
         let resp = self.send_with_retry(req).await?;
+        let resp = self.attach_request_credentials(resp, credentials);
         self.handle_response(resp).await
     }
 
@@ -305,34 +368,32 @@ impl LaunchpadClient {
     /// `Location` header but an empty body).
     pub async fn post_ok(&self, path: &str, params: &HashMap<&str, &str>) -> Result<()> {
         let url = self.url(path);
-        let mut req = self
+        let req = self
             .http
             .post(&url)
             .header("Accept", "application/json")
             .form(params);
 
-        if let Some(auth_header) = self.authorization(&url).await? {
-            req = req.header("Authorization", auth_header);
-        }
+        let (req, credentials) = self.authorize_request(req, &url).await?;
 
         let resp = self.send_with_retry(req).await?;
+        let resp = self.attach_request_credentials(resp, credentials);
         self.handle_response_ok(resp).await
     }
 
     /// Perform an authenticated POST request against an absolute URL and return
     /// `Ok(())` on success, discarding the response body.
     pub async fn post_url_ok(&self, url: &str, params: &HashMap<&str, &str>) -> Result<()> {
-        let mut req = self
+        let req = self
             .http
             .post(url)
             .header("Accept", "application/json")
             .form(params);
 
-        if let Some(auth_header) = self.authorization(url).await? {
-            req = req.header("Authorization", auth_header);
-        }
+        let (req, credentials) = self.authorize_request(req, url).await?;
 
         let resp = self.send_with_retry(req).await?;
+        let resp = self.attach_request_credentials(resp, credentials);
         self.handle_response_ok(resp).await
     }
 
@@ -357,29 +418,27 @@ impl LaunchpadClient {
         url: &str,
         params: &HashMap<&str, &str>,
     ) -> Result<String> {
-        let mut req = self
+        let req = self
             .http
             .post(url)
             .header("Accept", "application/json")
             .form(params);
 
-        if let Some(auth_header) = self.authorization(url).await? {
-            req = req.header("Authorization", auth_header);
-        }
+        let (req, credentials) = self.authorize_request(req, url).await?;
 
         let resp = self.send_with_retry(req).await?;
+        let resp = self.attach_request_credentials(resp, credentials);
         self.handle_created_location(resp).await
     }
 
     /// Perform an authenticated DELETE on an absolute URL, discarding the body.
     pub async fn delete_url_ok(&self, url: &str) -> Result<()> {
-        let mut req = self.http.delete(url).header("Accept", "application/json");
+        let req = self.http.delete(url).header("Accept", "application/json");
 
-        if let Some(auth_header) = self.authorization(url).await? {
-            req = req.header("Authorization", auth_header);
-        }
+        let (req, credentials) = self.authorize_request(req, url).await?;
 
         let resp = self.send_with_retry(req).await?;
+        let resp = self.attach_request_credentials(resp, credentials);
         self.handle_response_ok(resp).await
     }
 
@@ -402,18 +461,17 @@ impl LaunchpadClient {
         params: &[(&str, &str)],
     ) -> Result<T> {
         let body = encode_pairs(params);
-        let mut req = self
+        let req = self
             .http
             .post(url)
             .header("Accept", "application/json")
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body);
 
-        if let Some(auth_header) = self.authorization(url).await? {
-            req = req.header("Authorization", auth_header);
-        }
+        let (req, credentials) = self.authorize_request(req, url).await?;
 
         let resp = self.send_with_retry(req).await?;
+        let resp = self.attach_request_credentials(resp, credentials);
         self.handle_response(resp).await
     }
 
@@ -437,18 +495,17 @@ impl LaunchpadClient {
     /// POST with key-value pairs against an absolute URL, discarding the body.
     pub async fn post_pairs_url_ok(&self, url: &str, params: &[(&str, &str)]) -> Result<()> {
         let body = encode_pairs(params);
-        let mut req = self
+        let req = self
             .http
             .post(url)
             .header("Accept", "application/json")
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body);
 
-        if let Some(auth_header) = self.authorization(url).await? {
-            req = req.header("Authorization", auth_header);
-        }
+        let (req, credentials) = self.authorize_request(req, url).await?;
 
         let resp = self.send_with_retry(req).await?;
+        let resp = self.attach_request_credentials(resp, credentials);
         self.handle_response_ok(resp).await
     }
 
@@ -460,18 +517,17 @@ impl LaunchpadClient {
         params: &[(&str, &str)],
     ) -> Result<String> {
         let body = encode_pairs(params);
-        let mut req = self
+        let req = self
             .http
             .post(url)
             .header("Accept", "application/json")
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(body);
 
-        if let Some(auth_header) = self.authorization(url).await? {
-            req = req.header("Authorization", auth_header);
-        }
+        let (req, credentials) = self.authorize_request(req, url).await?;
 
         let resp = self.send_with_retry(req).await?;
+        let resp = self.attach_request_credentials(resp, credentials);
         self.handle_created_location(resp).await
     }
 
@@ -495,50 +551,75 @@ impl LaunchpadClient {
         if let Some(cookie) = cookie {
             req = req.header(reqwest::header::COOKIE, cookie);
         }
-        if let Some(auth_header) = self.authorization(url).await? {
-            req = req.header("Authorization", auth_header);
-        }
-        Ok(req.send().await?)
+        let (req, credentials) = self.authorize_request(req, url).await?;
+        let resp = req.send().await?;
+        Ok(self.attach_request_credentials(resp, credentials))
     }
 
     // -----------------------------------------------------------------------
     // Request signing
     // -----------------------------------------------------------------------
 
-    /// Return the `Authorization` header value for a request to `url`, if
-    /// the request should be signed.
-    ///
-    /// Hardware-bound tokens are only sent to the API host, and are minted
-    /// on demand.  Stored credentials are sent with every request, as before.
-    async fn authorization(&self, url: &str) -> Result<Option<String>> {
-        if let Some(session) = &self.hardware {
-            if !same_origin(url, &self.base_url) {
-                return Ok(None);
+    /// Sign the request and retain the exact hardware credentials used for it.
+    async fn authorize_request(
+        &self,
+        mut req: reqwest::RequestBuilder,
+        url: &str,
+    ) -> Result<(reqwest::RequestBuilder, Option<Credentials>)> {
+        let hardware_credentials = if let Some(session) = &self.hardware {
+            if same_origin(url, &self.base_url) {
+                Some(session.access_credentials().await?)
+            } else {
+                None
             }
-            let creds = session.access_credentials().await?;
-            return auth::build_auth_header(&creds).map(Some);
+        } else {
+            None
+        };
+        let signing_credentials = if self.hardware.is_some() {
+            hardware_credentials.as_ref()
+        } else {
+            self.credentials.as_ref()
+        };
+        if let Some(creds) = signing_credentials {
+            req = req.header("Authorization", auth::build_auth_header(creds)?);
         }
-        self.credentials
-            .as_ref()
-            .map(auth::build_auth_header)
-            .transpose()
+        Ok((req, hardware_credentials))
     }
 
-    /// Discard a hardware-bound access token that Launchpad no longer
-    /// accepts, so the next request mints a new one.
-    async fn note_unauthorized(&self, body: &str) {
-        if let Some(session) = &self.hardware
+    /// Keep the signing identity with the response, including raw responses
+    /// passed to the crate-visible response handlers by other modules.
+    fn attach_request_credentials(
+        &self,
+        mut resp: reqwest::Response,
+        credentials: Option<Credentials>,
+    ) -> reqwest::Response {
+        if resp.status() == StatusCode::UNAUTHORIZED
+            && same_origin(resp.url().as_str(), &self.base_url)
+            && let Some(credentials) = credentials
+        {
+            resp.extensions_mut()
+                .insert(RejectedRequestCredentials(credentials));
+        }
+        resp
+    }
+
+    async fn note_unauthorized(&self, credentials: Option<RejectedRequestCredentials>, body: &str) {
+        if let (Some(session), Some(credentials)) = (&self.hardware, credentials)
             && is_rejected_token_message(body)
         {
-            session.invalidate().await;
+            // Local invalidation and blacklisting precede persistent cleanup.
+            // A keyring failure must not hide Launchpad's rejection; explicit
+            // cache-clearing operations still report their own errors.
+            let _ = session
+                .invalidate_rejected_access_token(&credentials.0)
+                .await;
         }
     }
 
     /// Whether `error` reports a rejected hardware-bound access token.
-    fn hardware_token_rejected(&self, error: &LpError) -> bool {
-        self.hardware.is_some()
-            && matches!(error, LpError::Api { status: 401, message }
-                if is_rejected_token_message(message))
+    fn hardware_token_rejected(error: &LpError) -> bool {
+        matches!(error, LpError::Api { status: 401, message }
+            if is_rejected_token_message(message))
     }
 
     // -----------------------------------------------------------------------
@@ -606,17 +687,18 @@ impl LaunchpadClient {
 
     pub(crate) async fn handle_response<T: DeserializeOwned>(
         &self,
-        resp: reqwest::Response,
+        mut resp: reqwest::Response,
     ) -> Result<T> {
         let status = resp.status();
         if status == StatusCode::UNAUTHORIZED {
+            let credentials = resp.extensions_mut().remove::<RejectedRequestCredentials>();
             // Read the response body so the exact Launchpad error message is
             // surfaced to the user rather than a generic string.
             let body = resp
                 .text()
                 .await
                 .unwrap_or_else(|_| "(could not read response body)".to_string());
-            self.note_unauthorized(&body).await;
+            self.note_unauthorized(credentials, &body).await;
             return Err(LpError::Api {
                 status: 401,
                 message: body,
@@ -671,14 +753,15 @@ impl LaunchpadClient {
     /// Like [`handle_response`] but discards the response body on success.
     ///
     /// Used for operations that return `201 Created` with no JSON body.
-    async fn handle_response_ok(&self, resp: reqwest::Response) -> Result<()> {
+    async fn handle_response_ok(&self, mut resp: reqwest::Response) -> Result<()> {
         let status = resp.status();
         if status == StatusCode::UNAUTHORIZED {
+            let credentials = resp.extensions_mut().remove::<RejectedRequestCredentials>();
             let body = resp
                 .text()
                 .await
                 .unwrap_or_else(|_| "(could not read response body)".to_string());
-            self.note_unauthorized(&body).await;
+            self.note_unauthorized(credentials, &body).await;
             return Err(LpError::Api {
                 status: 401,
                 message: body,
@@ -730,14 +813,18 @@ impl LaunchpadClient {
 
     /// Like [`handle_response_ok`] but returns the `Location` header value on
     /// success.
-    pub(crate) async fn handle_created_location(&self, resp: reqwest::Response) -> Result<String> {
+    pub(crate) async fn handle_created_location(
+        &self,
+        mut resp: reqwest::Response,
+    ) -> Result<String> {
         let status = resp.status();
         if status == StatusCode::UNAUTHORIZED {
+            let credentials = resp.extensions_mut().remove::<RejectedRequestCredentials>();
             let body = resp
                 .text()
                 .await
                 .unwrap_or_else(|_| "(could not read response body)".to_string());
-            self.note_unauthorized(&body).await;
+            self.note_unauthorized(credentials, &body).await;
             return Err(LpError::Api {
                 status: 401,
                 message: body,
@@ -813,14 +900,15 @@ impl LaunchpadClient {
             .user_agent(concat!("lpcli/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(30))
             .read_timeout(std::time::Duration::from_secs(300))
+            .redirect(redirect_policy(
+                self.hardware.is_some().then_some(&self.base_url),
+            ))
             .build()
             .map_err(|e| LpError::Other(format!("Failed to build download client: {e}")))?;
 
-        let mut req = download_client.get(url);
+        let req = download_client.get(url);
 
-        if let Some(auth_header) = self.authorization(url).await? {
-            req = req.header("Authorization", auth_header);
-        }
+        let (req, credentials) = self.authorize_request(req, url).await?;
 
         let resp = req.send().await.map_err(|e| {
             if e.is_timeout() {
@@ -832,14 +920,17 @@ impl LaunchpadClient {
             }
         })?;
 
+        let mut resp = self.attach_request_credentials(resp, credentials);
         let status = resp.status();
 
         if !status.is_success() {
             let code = status.as_u16();
+            let credentials = resp.extensions_mut().remove::<RejectedRequestCredentials>();
             let body = resp
                 .text()
                 .await
                 .unwrap_or_else(|_| "(could not read body)".to_string());
+            self.note_unauthorized(credentials, &body).await;
             return Err(LpError::Api {
                 status: code,
                 message: format!("Failed to download {url}: HTTP {code} — {body}"),
@@ -906,14 +997,15 @@ impl LaunchpadClient {
             .user_agent(concat!("lpcli/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(30))
             .read_timeout(std::time::Duration::from_secs(300))
+            .redirect(redirect_policy(
+                self.hardware.is_some().then_some(&self.base_url),
+            ))
             .build()
             .map_err(|e| LpError::Other(format!("Failed to build download client: {e}")))?;
 
-        let mut req = download_client.get(url);
+        let req = download_client.get(url);
 
-        if let Some(auth_header) = self.authorization(url).await? {
-            req = req.header("Authorization", auth_header);
-        }
+        let (req, credentials) = self.authorize_request(req, url).await?;
 
         let resp = req.send().await.map_err(|e| {
             if e.is_timeout() {
@@ -925,14 +1017,17 @@ impl LaunchpadClient {
             }
         })?;
 
+        let mut resp = self.attach_request_credentials(resp, credentials);
         let status = resp.status();
 
         if !status.is_success() {
             let code = status.as_u16();
+            let credentials = resp.extensions_mut().remove::<RejectedRequestCredentials>();
             let body = resp
                 .text()
                 .await
                 .unwrap_or_else(|_| "(could not read body)".to_string());
+            self.note_unauthorized(credentials, &body).await;
             return Err(LpError::Api {
                 status: code,
                 message: format!("Failed to download {url}: HTTP {code} — {body}"),
@@ -1000,17 +1095,16 @@ impl LaunchpadClient {
         form: reqwest::multipart::Form,
     ) -> Result<String> {
         let url = self.url(path);
-        let mut req = self
+        let req = self
             .http
             .post(&url)
             .header("Accept", "application/json")
             .multipart(form);
 
-        if let Some(auth_header) = self.authorization(&url).await? {
-            req = req.header("Authorization", auth_header);
-        }
+        let (req, credentials) = self.authorize_request(req, &url).await?;
 
         let resp = self.send_with_retry(req).await?;
+        let resp = self.attach_request_credentials(resp, credentials);
         self.handle_created_location(resp).await
     }
 
@@ -1019,6 +1113,7 @@ impl LaunchpadClient {
     /// Sends an authenticated GET with redirect policy set to `none` and
     /// returns the `Location` header value from a 3xx response.  Returns
     /// `None` if the response is not a redirect or lacks a `Location` header.
+    /// A rejected hardware-bound access token returns the original 401 error.
     pub async fn resolve_redirect(&self, url: &str) -> Result<Option<String>> {
         let no_redirect_client = reqwest::Client::builder()
             .user_agent(concat!("lpcli/", env!("CARGO_PKG_VERSION")))
@@ -1027,16 +1122,29 @@ impl LaunchpadClient {
             .build()
             .map_err(|e| LpError::Other(format!("Failed to build HTTP client: {e}")))?;
 
-        let mut req = no_redirect_client
+        let req = no_redirect_client
             .get(url)
             .header("Accept", "application/json");
 
-        if let Some(auth_header) = self.authorization(url).await? {
-            req = req.header("Authorization", auth_header);
-        }
+        let (req, credentials) = self.authorize_request(req, url).await?;
 
         let resp = req.send().await?;
+        let mut resp = self.attach_request_credentials(resp, credentials);
 
+        if resp.status() == StatusCode::UNAUTHORIZED {
+            let credentials = resp.extensions_mut().remove::<RejectedRequestCredentials>();
+            let body = resp.text().await.unwrap_or_default();
+            let rejected = credentials.is_some() && is_rejected_token_message(&body);
+            self.note_unauthorized(credentials, &body).await;
+            return if rejected {
+                Err(LpError::Api {
+                    status: 401,
+                    message: body,
+                })
+            } else {
+                Ok(None)
+            };
+        }
         if resp.status().is_redirection() {
             let location = resp
                 .headers()
@@ -1204,6 +1312,62 @@ impl<T: DeserializeOwned + std::fmt::Debug> Collection<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Debug, Default)]
+    struct TestSessionState {
+        current: Option<Credentials>,
+        minted: usize,
+        rejected: Vec<Credentials>,
+    }
+
+    #[derive(Debug, Default)]
+    pub(super) struct TestHardwareSession {
+        state: tokio::sync::Mutex<TestSessionState>,
+        fail_invalidation: AtomicBool,
+    }
+
+    impl TestHardwareSession {
+        pub(super) async fn access_credentials(&self) -> Result<Credentials> {
+            let mut state = self.state.lock().await;
+            if let Some(credentials) = &state.current {
+                return Ok(credentials.clone());
+            }
+            state.minted += 1;
+            let credentials =
+                Credentials::new("test-consumer", format!("token{}", state.minted), "secret");
+            state.current = Some(credentials.clone());
+            Ok(credentials)
+        }
+
+        pub(super) async fn invalidate_rejected_access_token(
+            &self,
+            credentials: &Credentials,
+        ) -> Result<bool> {
+            let mut state = self.state.lock().await;
+            state.rejected.push(credentials.clone());
+            let matches = state.current.as_ref() == Some(credentials);
+            if matches {
+                state.current = None;
+            }
+            if self.fail_invalidation.load(Ordering::SeqCst) {
+                return Err(LpError::Keyring("test deletion failure".into()));
+            }
+            Ok(matches)
+        }
+    }
+
+    fn test_hardware_client(base: &str) -> (LaunchpadClient, Arc<TestHardwareSession>) {
+        let session = Arc::new(TestHardwareSession::default());
+        let mut client = LaunchpadClient::new(None).with_base_url(base);
+        client.http = api_http_client(true, base);
+        client.hardware = Some(HardwareSession::Test(session.clone()));
+        (client, session)
+    }
+
+    fn token_header(token: &str) -> mockito::Matcher {
+        mockito::Matcher::Regex(format!(r#"oauth_token="{token}""#))
+    }
 
     const HTTP_DATE: &str = "Sun, 06 Nov 1994 08:49:37 GMT";
 
@@ -1408,6 +1572,360 @@ mod tests {
         assert!(!is_rejected_token_message(
             "Unauthorized: missing permission"
         ));
+    }
+
+    #[tokio::test]
+    async fn signed_get_retries_once_and_invalidates_each_rejected_generation() {
+        let mut server = mockito::Server::new_async().await;
+        let first = server
+            .mock("GET", "/item")
+            .match_header("authorization", token_header("token1"))
+            .with_status(401)
+            .with_body("Expired token (token1)")
+            .create_async()
+            .await;
+        let second = server
+            .mock("GET", "/item")
+            .match_header("authorization", token_header("token2"))
+            .with_status(401)
+            .with_body("Unknown access token (token2)")
+            .create_async()
+            .await;
+        let (client, session) = test_hardware_client(&server.url());
+        let result: Result<serde_json::Value> = client.get("item").await;
+        assert!(matches!(result, Err(LpError::Api { status: 401, .. })));
+        first.assert_async().await;
+        second.assert_async().await;
+        let state = session.state.lock().await;
+        assert_eq!(state.minted, 2);
+        assert_eq!(
+            state
+                .rejected
+                .iter()
+                .map(|c| c.access_token.token.as_str())
+                .collect::<Vec<_>>(),
+            ["token1", "token2"]
+        );
+        assert!(state.current.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_recovers_after_persistent_invalidation_failure() {
+        let mut server = mockito::Server::new_async().await;
+        let rejected = server
+            .mock("GET", "/item")
+            .match_header("authorization", token_header("token1"))
+            .with_status(401)
+            .with_body("Expired token")
+            .create_async()
+            .await;
+        let fresh = server
+            .mock("GET", "/item")
+            .match_header("authorization", token_header("token2"))
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+        let (client, session) = test_hardware_client(&server.url());
+        session.fail_invalidation.store(true, Ordering::SeqCst);
+        let _: serde_json::Value = client.get("item").await.unwrap();
+        rejected.assert_async().await;
+        fresh.assert_async().await;
+        let state = session.state.lock().await;
+        assert_eq!(state.minted, 2);
+        assert_eq!(state.rejected[0].access_token.token, "token1");
+        assert_eq!(state.current.as_ref().unwrap().access_token.token, "token2");
+    }
+
+    #[tokio::test]
+    async fn get_and_mutation_rejections_survive_invalidation_failure() {
+        let mut server = mockito::Server::new_async().await;
+        let first = server
+            .mock("GET", "/item")
+            .match_header("authorization", token_header("token1"))
+            .with_status(401)
+            .with_body("Expired token")
+            .create_async()
+            .await;
+        let second = server
+            .mock("GET", "/item")
+            .match_header("authorization", token_header("token2"))
+            .with_status(401)
+            .with_body("Unknown access token")
+            .create_async()
+            .await;
+        let mutation = server
+            .mock("POST", "/item")
+            .match_header("authorization", token_header("token3"))
+            .with_status(401)
+            .with_body("Expired token")
+            .create_async()
+            .await;
+        let (client, session) = test_hardware_client(&server.url());
+        session.fail_invalidation.store(true, Ordering::SeqCst);
+        let result: Result<serde_json::Value> = client.get("item").await;
+        assert!(
+            matches!(result, Err(LpError::Api { status: 401, message }) if message == "Unknown access token")
+        );
+        let result: Result<serde_json::Value> = client.post("item", &HashMap::new()).await;
+        assert!(
+            matches!(result, Err(LpError::Api { status: 401, message }) if message == "Expired token")
+        );
+        for mock in [first, second, mutation] {
+            mock.assert_async().await;
+        }
+        let state = session.state.lock().await;
+        assert_eq!(state.minted, 3);
+        assert_eq!(state.rejected.len(), 3);
+        assert!(state.current.is_none());
+    }
+
+    #[tokio::test]
+    async fn delayed_raw_response_does_not_invalidate_renewed_credentials() {
+        let mut server = mockito::Server::new_async().await;
+        let old = server
+            .mock("POST", "/old")
+            .match_header("authorization", token_header("token1"))
+            .with_status(401)
+            .with_body("Unknown access token")
+            .create_async()
+            .await;
+        let expired = server
+            .mock("GET", "/rotate")
+            .match_header("authorization", token_header("token1"))
+            .with_status(401)
+            .with_body("Expired token")
+            .create_async()
+            .await;
+        let renewed = server
+            .mock("GET", "/rotate")
+            .match_header("authorization", token_header("token2"))
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+        let check = server
+            .mock("GET", "/check")
+            .match_header("authorization", token_header("token2"))
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+        let (client, session) = test_hardware_client(&server.url());
+        let delayed_client = client.clone();
+        let old_url = client.url("old");
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let delayed = tokio::spawn(async move {
+            let response = delayed_client
+                .post_pairs_url_raw(&old_url, &[], None)
+                .await
+                .unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            delayed_client.handle_created_location(response).await
+        });
+        ready_rx.await.unwrap();
+        let _: serde_json::Value = client.get("rotate").await.unwrap();
+        release_tx.send(()).unwrap();
+        assert!(matches!(
+            delayed.await.unwrap(),
+            Err(LpError::Api { status: 401, .. })
+        ));
+        let _: serde_json::Value = client.get("check").await.unwrap();
+        for mock in [old, expired, renewed, check] {
+            mock.assert_async().await;
+        }
+        let state = session.state.lock().await;
+        assert_eq!(state.minted, 2);
+        assert_eq!(state.current.as_ref().unwrap().access_token.token, "token2");
+        assert_eq!(
+            state
+                .rejected
+                .iter()
+                .map(|c| c.access_token.token.as_str())
+                .collect::<Vec<_>>(),
+            ["token1", "token1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn unsigned_and_unrelated_errors_do_not_invalidate_or_retry() {
+        let mut api = mockito::Server::new_async().await;
+        let mut foreign = mockito::Server::new_async().await;
+        let permission = api
+            .mock("GET", "/permission")
+            .match_header("authorization", token_header("token1"))
+            .with_status(401)
+            .with_body("Unauthorized: missing permission")
+            .create_async()
+            .await;
+        let non_401 = api
+            .mock("GET", "/other")
+            .match_header("authorization", token_header("token1"))
+            .with_status(403)
+            .with_body("Expired token")
+            .create_async()
+            .await;
+        let unsigned = foreign
+            .mock("GET", "/foreign")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_status(401)
+            .with_body("Expired token")
+            .create_async()
+            .await;
+        let (client, session) = test_hardware_client(&api.url());
+        let _: Result<serde_json::Value> = client.get("permission").await;
+        let _: Result<serde_json::Value> = client.get("other").await;
+        let result: Result<serde_json::Value> =
+            client.get_url(&format!("{}/foreign", foreign.url())).await;
+        assert!(matches!(result, Err(LpError::Api { status: 401, .. })));
+        for mock in [permission, non_401, unsigned] {
+            mock.assert_async().await;
+        }
+        let state = session.state.lock().await;
+        assert_eq!(state.minted, 1);
+        assert!(state.rejected.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cross_origin_redirects_never_attribute_unsigned_rejections_to_the_token() {
+        let mut api = mockito::Server::new_async().await;
+        let mut foreign = mockito::Server::new_async().await;
+        let outward = api
+            .mock("GET", "/outward")
+            .match_header("authorization", token_header("token1"))
+            .with_status(302)
+            .with_header("location", &format!("{}/reject", foreign.url()))
+            .create_async()
+            .await;
+        let foreign_rejection = foreign
+            .mock("GET", "/reject")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_status(401)
+            .with_body("Expired token")
+            .create_async()
+            .await;
+        let bounce_start = api
+            .mock("GET", "/bounce")
+            .match_header("authorization", token_header("token1"))
+            .with_status(302)
+            .with_header("location", &format!("{}/bounce", foreign.url()))
+            .create_async()
+            .await;
+        let bounce_back = foreign
+            .mock("GET", "/bounce")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_status(302)
+            .with_header("location", &format!("{}/return", api.url()))
+            .create_async()
+            .await;
+        let not_followed = api.mock("GET", "/return").expect(0).create_async().await;
+        let (client, session) = test_hardware_client(&api.url());
+        let result: Result<serde_json::Value> = client.get("outward").await;
+        assert!(matches!(result, Err(LpError::Api { status: 401, .. })));
+        let result: Result<serde_json::Value> = client.get("bounce").await;
+        assert!(matches!(result, Err(LpError::Api { status: 302, .. })));
+        for mock in [
+            outward,
+            foreign_rejection,
+            bounce_start,
+            bounce_back,
+            not_followed,
+        ] {
+            mock.assert_async().await;
+        }
+        let state = session.state.lock().await;
+        assert_eq!(state.minted, 1);
+        assert!(state.rejected.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_preserves_rejections_across_request_methods() {
+        let mut server = mockito::Server::new_async().await;
+        let (client, session) = test_hardware_client(&server.url());
+        let client = client.with_max_retries(2).with_retry_delay_ms(0);
+        session.fail_invalidation.store(true, Ordering::SeqCst);
+        let params = HashMap::new();
+        let dir = tempfile::tempdir().unwrap();
+        for (index, (method, path)) in [
+            ("POST", "/post"),
+            ("PATCH", "/patch"),
+            ("DELETE", "/delete"),
+            ("POST", "/location"),
+            ("POST", "/multipart"),
+            ("POST", "/raw"),
+            ("GET", "/download"),
+            ("GET", "/progress"),
+            ("GET", "/redirect"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let token = format!("token{}", index + 1);
+            let rejected = server
+                .mock(method, *path)
+                .match_header("authorization", token_header(&token))
+                .with_status(401)
+                .with_body("Expired token")
+                .create_async()
+                .await;
+            let url = format!("{}{path}", server.url());
+            let result: Result<()> = match *path {
+                "/post" => client
+                    .post_url::<serde_json::Value>(&url, &params)
+                    .await
+                    .map(|_| ()),
+                "/patch" => client
+                    .patch_url::<serde_json::Value>(&url, &params)
+                    .await
+                    .map(|_| ()),
+                "/delete" => client.delete_url_ok(&url).await,
+                "/location" => client
+                    .post_url_created_location(&url, &params)
+                    .await
+                    .map(|_| ()),
+                "/multipart" => client
+                    .post_multipart_created_location(path, reqwest::multipart::Form::new())
+                    .await
+                    .map(|_| ()),
+                "/raw" => {
+                    let resp = client.post_pairs_url_raw(&url, &[], None).await.unwrap();
+                    client
+                        .handle_response::<serde_json::Value>(resp)
+                        .await
+                        .map(|_| ())
+                }
+                "/download" => client
+                    .download_to_file(&url, &dir.path().join("file"))
+                    .await
+                    .map(|_| ()),
+                "/progress" => client
+                    .download_to_file_with_progress(&url, &dir.path().join("file"), |_, _| {})
+                    .await
+                    .map(|_| ()),
+                "/redirect" => client.resolve_redirect(&url).await.map(|_| ()),
+                _ => unreachable!(),
+            };
+            match result {
+                Err(LpError::Api {
+                    status: 401,
+                    message,
+                }) => {
+                    if matches!(*path, "/download" | "/progress") {
+                        assert!(message.contains("Expired token"), "{path}");
+                    } else {
+                        assert_eq!(message, "Expired token", "{path}");
+                    }
+                }
+                other => panic!("unexpected result for {path}: {other:?}"),
+            }
+            rejected.assert_async().await;
+        }
+        let state = session.state.lock().await;
+        assert_eq!(state.minted, 9);
+        assert_eq!(state.rejected.len(), 9);
+        assert!(state.current.is_none());
     }
 
     /// Verify that an authenticated client stores its credentials.
