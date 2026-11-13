@@ -110,4 +110,6 @@ tokio-test = "0.4"
 mockito = "1"
 dirs = "7"
 tempfile = "3"
+# Parse documented shell examples without executing them
+shlex = "2.0.1"
 

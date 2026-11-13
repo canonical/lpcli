@@ -11,7 +11,7 @@ applications can build on the same type-safe API wrappers.
 
 ## Features
 
-- **Full Launchpad API coverage** — bugs, packages, projects, people, CVEs, Git,
+- **Broad Launchpad API coverage** — bugs, packages, projects, people, CVEs, Git,
   specs (blueprints), questions, webhooks, translations, snap recipes, package
   upload queues, and access tokens.
 - **OAuth 1.0a authentication** — securely log in once; credentials are stored in
@@ -27,8 +27,12 @@ applications can build on the same type-safe API wrappers.
 
 ## Requirements
 
-- Rust 1.93
-- Ubuntu Linux (or any Linux distribution with OpenSSL available)
+- Ubuntu Linux (other Linux distributions may also work).
+- For source builds: Rust 1.97 or newer and native build tools, including a C
+  compiler, Make, CMake, and pkg-config. The provided development container uses
+  Ubuntu 26.04 and Rust 1.97.
+- HTTPS access to Launchpad; the HTTP client uses Rustls and system certificate
+  verification.
 - A Secret Service provider (e.g. GNOME Secret Service or KWallet) is
   recommended for secure credential storage. On Linux the credentials backend
   uses the D-Bus Secret Service API and vendors libdbus, so no system
@@ -42,14 +46,14 @@ applications can build on the same type-safe API wrappers.
 ```bash
 git clone https://github.com/canonical/lpcli
 cd lpcli
-cargo build --release
+cargo build --locked --release
 # The binary is at target/release/lpcli
 ```
 
 You can install it into your `$PATH`:
 
 ```bash
-cargo install --path .
+cargo install --locked --path .
 ```
 
 ## Authentication
@@ -58,16 +62,25 @@ Reads that may include private data use authentication by default. To read
 only public data without loading credentials or touching a security key, use
 `--public`, for example `lpcli --public bug show --bug-id 123456`. Public-only
 results may omit private objects, fields, or collection entries. Some public
-Ubuntu distribution reads work anonymously by default. To perform write
-operations (file bugs, add comments, set statuses, etc.) you must log in:
+distribution reads work anonymously by default. Use `--authenticated` to require
+credentials for these reads too, for example:
+
+```bash
+lpcli --authenticated package search --series noble --name curl
+```
+
+`--public` and `--authenticated` are mutually exclusive. `--public` is available
+for data reads, while mutations and identity/security-management commands require
+authentication. To perform write operations (file bugs, add comments, set statuses,
+etc.) you must log in:
 
 ```bash
 lpcli login
 ```
 
-This starts the OAuth flow. Your browser will be opened to the Launchpad authorisation
-page. After granting access, your credentials are saved to the operating system
-keyring for future use. If no keyring is available, lpcli falls back to
+This starts the OAuth flow. Open the printed URL in your browser, authorise access
+on Launchpad, then press Enter in the terminal. Your credentials are saved to the
+operating system keyring for future use. If no keyring is available, lpcli falls back to
 `~/.config/lpcli/credentials.toml`.
 
 To verify authentication and check connectivity:
@@ -76,11 +89,17 @@ To verify authentication and check connectivity:
 lpcli status
 ```
 
-To remove your stored credentials:
+To remove both your stored classic OAuth credentials and hardware-bound grant:
 
 ```bash
 lpcli logout
 ```
+
+Use `lpcli logout --classic` or `lpcli logout --hardware-token` to remove only the
+selected type. Logout removes local credentials and clears the persisted hardware
+access-token cache when removing the grant. Revoke authorisations on Launchpad to
+invalidate credentials server-side; local logout does not revoke tokens or remove
+access tokens already held by running processes.
 
 ### Hardware-bound API tokens
 
@@ -207,8 +226,11 @@ lpcli logout --hardware-token        # delete the stored grant only
 
 # Import a grant issued elsewhere (the secret is prompted for, or read from
 # LPCLI_HARDWARE_GRANT_SECRET):
-lpcli login --hardware-token --account <you> --grant-token <oauth_token>
+lpcli login --hardware-token --account jdoe --grant-token "issued-oauth-token"
 ```
+
+In the import example, replace `jdoe` with your Launchpad account and
+`issued-oauth-token` with the token from your issued grant.
 
 The grant is stored in the system keyring, falling back to
 `~/.config/lpcli/hardware-token.json` (owner-only) when no keyring is
@@ -233,7 +255,7 @@ width = 150
 The configured width must be an integer between 1 and 65535 columns and takes
 precedence over terminal detection, including when output is redirected. If no
 width is configured, lpcli uses the terminal width when stdout is a terminal,
-or 100 columns when output is redirected or the width cannot be detected. 
+or 100 columns when output is redirected or the width cannot be detected.
 
 Widths include table borders and padding. Long cell text wraps instead of being
 truncated; extremely narrow outputs use a stacked `Field: value` layout. A
@@ -241,15 +263,26 @@ configured width is not capped to the physical terminal width.
 
 ## Usage
 
-```
-lpcli <COMMAND> [SUBCOMMAND] [OPTIONS]
+Run `lpcli --help` for the command list and `lpcli bug --help` for a command's
+subcommands. For options on an individual operation:
+
+```bash
+lpcli bug show --help
 ```
 
-Run `lpcli --help` or `lpcli <COMMAND> --help` for the full list of options.
+The examples below use illustrative accounts, resource IDs, versions, and URLs.
+Replace them with your own values and ensure referenced files exist. Reads that
+require authentication assume you have logged in; use `--public` for public-only
+reads. Mutation examples change Launchpad data and require appropriate permissions.
 
 ---
 
 ### Bugs
+
+For bulk task mutations, `--all-series` includes **series-less tasks** (such as
+upstream or distribution-level tasks) as well as release-specific tasks for the
+matching targets. Inspect `lpcli bug tasks --bug-id 123456` before applying bulk
+changes.
 
 ```bash
 # Show a single bug
@@ -274,7 +307,7 @@ lpcli bug search --target ubuntu --tag "regression-update" --limit 10
 lpcli bug search --target ubuntu --importance "Critical" --limit 10
 
 # Add a comment to a bug
-lpcli bug comment --bug-id 123456 --message "Reproduced on noble."
+lpcli bug add-comment --bug-id 123456 --message "Reproduced on noble."
 
 # List all comments on a bug
 lpcli bug comments --bug-id 123456
@@ -303,15 +336,15 @@ lpcli bug set-status --bug-id 123456 --target curl \
 lpcli bug set-status --bug-id 123456 --target curl \
     --many-series "noble, jammy" --status fix-released
 
-# Change status on every series the bug currently has a task for
+# Change status on all matching tasks, including series-less tasks
 lpcli bug set-status --bug-id 123456 --target curl \
     --all-series --status fix-released
 
-# Change status across multiple targets
+# Change status across multiple targets, including their series-less tasks
 lpcli bug set-status --bug-id 123456 --many-targets "rust-alacritty, rust-eza" \
     --all-series --status fix-released
 
-# Change status on all targets the bug currently has tasks for
+# Change status on every current task (all targets, including series-less tasks)
 lpcli bug set-status --bug-id 123456 --all-targets --all-series --status fix-released
 
 # Change status only on series-less (distribution-level or upstream) tasks
@@ -322,14 +355,14 @@ lpcli bug set-status --bug-id 123456 --target curl \
 lpcli bug set-importance --bug-id 123456 --target curl \
     --series noble --importance high
 
-# Change importance across multiple targets / series
+# Change importance on every current task, including series-less tasks
 lpcli bug set-importance --bug-id 123456 --all-targets --all-series --importance critical
 
 # Assign a bug task to a user
 lpcli bug set-assignee --bug-id 123456 --target curl \
     --series noble --name jdoe
 
-# Assign across multiple targets / series
+# Assign every current task, including series-less tasks
 lpcli bug set-assignee --bug-id 123456 --all-targets --all-series --name jdoe
 
 # Subscribe / unsubscribe a person
@@ -397,7 +430,7 @@ lpcli person search --query "John Doe"
 # List members of a team
 lpcli person members --team ubuntu-security
 
-# List bugs filed by or assigned to a person
+# List bug tasks for bugs filed by a person
 lpcli person bugs --name jdoe
 
 # List PPAs owned by a person
@@ -473,10 +506,10 @@ lpcli project series-releases --project launchpad --series trunk
 # Show a CVE
 lpcli cve show --sequence 2024-1234
 
-# Search CVEs (optionally filtered by distribution)
+# Search CVEs in Ubuntu (--distro defaults to ubuntu)
 lpcli cve search --distro ubuntu --limit 10
 
-# Search CVEs by keyword
+# Search CVEs in Ubuntu by keyword
 lpcli cve search --keyword "buffer overflow" --limit 20
 
 # List CVEs linked to a bug
@@ -507,6 +540,9 @@ lpcli git proposals --path "~jdoe/launchpad/+git/myrepo" --status "Needs review"
 # List code review comments on a merge proposal
 lpcli git comments --path "~jdoe/launchpad/+git/myrepo" --id 12345
 
+# Select a preview diff when listing inline review comments
+lpcli git comments --path "~jdoe/launchpad/+git/myrepo" --id 12345 --diff 67890
+
 # List code review diffs on a merge proposal
 lpcli git diffs --path "~jdoe/launchpad/+git/myrepo" --id 12345
 ```
@@ -519,7 +555,7 @@ lpcli git diffs --path "~jdoe/launchpad/+git/myrepo" --id 12345
 # Show a specification
 lpcli spec show --target launchpad --name feature-x
 
-# List all specifications for a project
+# List currently valid specifications for a project
 lpcli spec list --target launchpad
 
 # List all specifications (including non-current)
@@ -546,6 +582,9 @@ lpcli question messages --target ubuntu --question-id 42
 
 ### Webhooks
 
+For operations on an existing webhook, use its API `self_link` as `--webhook-url`.
+The URL below illustrates that format; substitute your own webhook's link.
+
 ```bash
 # List webhooks for a project or Git repository
 lpcli webhook list --target launchpad
@@ -564,13 +603,13 @@ lpcli webhook create --target launchpad \
     --secret "mysecret"
 
 # Send a test ping to a webhook
-lpcli webhook ping --webhook-url "https://api.launchpad.net/devel/..."
+lpcli webhook ping --webhook-url "https://api.launchpad.net/devel/launchpad/+webhook/1"
 
 # List recent deliveries for a webhook
-lpcli webhook deliveries --webhook-url "https://api.launchpad.net/devel/..."
+lpcli webhook deliveries --webhook-url "https://api.launchpad.net/devel/launchpad/+webhook/1"
 
 # Delete a webhook
-lpcli webhook delete --webhook-url "https://api.launchpad.net/devel/..."
+lpcli webhook delete --webhook-url "https://api.launchpad.net/devel/launchpad/+webhook/1"
 ```
 
 ---
@@ -596,7 +635,7 @@ lpcli snap show --owner jdoe --name my-snap
 # Find snap recipes owned by a person
 lpcli snap find --owner jdoe
 
-# List builds for a snap recipe
+# List pending builds for a snap recipe
 lpcli snap builds --owner jdoe --name my-snap
 
 # Request new builds for a snap recipe
@@ -606,6 +645,12 @@ lpcli snap request-builds --owner jdoe --name my-snap
 ---
 
 ### Package Upload Queues
+
+When `--series` is omitted, queue commands use the distribution's current
+development series. Specify it explicitly to work on a stable release. Use
+`--version` to disambiguate matching uploads; accepting multiple matching versions
+without it fails rather than choosing one. The mutation examples below select a
+specific series and version.
 
 ```bash
 # Search packages in the upload queue for a distro series
@@ -625,17 +670,20 @@ lpcli queue info --name curl --status "New" --arch amd64
 lpcli queue info --name curl --version 8.5.0-2ubuntu10 --status "New" --arch source
 
 # Accept a package from the queue (requires queue-admin permissions)
-lpcli queue accept --name curl --status "New" --arch source
-lpcli queue accept --name curl --status "New" --arch source --series noble
+lpcli queue accept --name curl --version 8.5.0-2ubuntu10 --status "New" \
+    --arch source --series noble
 
 # Reject a package from the queue (requires queue-admin permissions)
-lpcli queue reject --name curl --status "New" --arch source
-lpcli queue reject --name curl --status "New" --arch source --comment "Needs a bug fix."
+lpcli queue reject --name curl --version 8.5.0-2ubuntu10 --status "New" \
+    --arch source --series noble --comment "Needs a bug fix."
 ```
 
 ---
 
 ### Personal Access Tokens
+
+For revocation, use the token's API `self_link` as `--token-url`; substitute your
+own token's link for the illustrative URL below.
 
 ```bash
 # Issue a personal access token for a project
@@ -653,7 +701,7 @@ lpcli access-token list --project launchpad
 lpcli access-token list-git --repo "~jdoe/launchpad/+git/myrepo"
 
 # Revoke an access token
-lpcli access-token revoke --token-url "https://api.launchpad.net/devel/..."
+lpcli access-token revoke --token-url "https://api.launchpad.net/devel/launchpad/+access-token/1"
 ```
 
 ---
@@ -685,7 +733,7 @@ async fn main() -> lpcli::error::Result<()> {
 ### Authenticated usage
 
 ```rust
-use lpcli::{auth, client::LaunchpadClient, bugs, packages};
+use lpcli::{auth, client::LaunchpadClient, packages};
 
 #[tokio::main]
 async fn main() -> lpcli::error::Result<()> {
@@ -709,12 +757,12 @@ async fn main() -> lpcli::error::Result<()> {
 
 ### Error handling
 
-All library functions return `lpcli::error::Result<T>`, which is an alias for
+Fallible API operations use `lpcli::error::Result<T>`, which is an alias for
 `std::result::Result<T, lpcli::error::LpError>`. Meaningful variants include:
 
 | Variant | When raised |
 |---------|-------------|
-| `LpError::NotAuthenticated` | Credentials file is missing; run `lpcli login` |
+| `LpError::NotAuthenticated` | No usable authentication credentials are available; run `lpcli login` |
 | `LpError::NotFound` | The requested resource does not exist on Launchpad |
 | `LpError::Api` | Launchpad returned a non-success HTTP status |
 | `LpError::RateLimit` | Launchpad throttled the request (HTTP 429) |
@@ -735,7 +783,8 @@ async fn main() -> lpcli::error::Result<()> {
     let store = hardware_tokens::GrantStore::from_env();
     let session = hardware_tokens::load_session(&store, Arc::new(UsbAuthenticator::default()))?
         .ok_or(lpcli::error::LpError::NotAuthenticated)?;
-    // The first request mints an access token: touch the key when prompted.
+    // If no reusable cached access token is available, the first request mints one.
+    // Touch the key when prompted.
     let lp = LaunchpadClient::with_hardware_token(Arc::new(session));
     let bug = lpcli::bugs::get_bug(&lp, 1).await?;
     println!("Bug #{}: {}", bug.id, bug.title);
@@ -749,10 +798,11 @@ async fn main() -> lpcli::error::Result<()> {
 
 ```
 src/
-  lib.rs            — Public library crate root; re-exports all modules
+  lib.rs            — Public library crate root; exposes the API modules
   auth.rs           — OAuth 1.0a login flow and credential persistence
   hardware_tokens.rs — Hardware-bound OAuth grants, token minting and renewal
-  hardware_key.rs   — USB FIDO2 security keys (CTAP2 over Linux hidraw)
+  hardware_key.rs   — USB FIDO2 security-key interface
+  hardware_key/     — CTAP2, PIN/UV protocols, CBOR, and Linux hidraw transport
   client.rs         — Low-level HTTP client for the Launchpad REST API
   bugs.rs           — Bug tracking
   packages.rs       — Source packages, distro series, PPAs
@@ -772,7 +822,13 @@ src/
   error.rs          — LpError type
 
   bin/
-    lpcli.rs        — CLI binary (clap argument parsing and dispatch)
+    lpcli.rs        — CLI binary (clap argument parsing, authentication policy, dispatch)
+    lpcli/
+      config.rs     — Configuration loading and validation
+      display.rs    — Terminal output formatting
+      tests.rs      — CLI argument, documentation-example, and handler-helper tests
+
+tests/              — Mocked HTTP integration tests
 ```
 
 ---
@@ -780,11 +836,27 @@ src/
 ## Contributing
 
 1. Fork the repository and create your branch from `main`.
-2. Write idiomatic Rust following the conventions in
-   [`.github/instructions/rust.instructions.md`](.github/instructions/rust.instructions.md).
-3. Run `cargo fmt` and `cargo clippy -- -D warnings` before submitting.
-4. Add or update tests in `tests/` for any new behaviour.
+2. Write idiomatic Rust following [the project rules](AGENTS.md) and
+   [Rust conventions](rust-instructions.md).
+3. Add or update inline library tests, CLI tests in `src/bin/lpcli/tests.rs`, or
+   integration tests in `tests/` for changed behaviour. Use mocked HTTP responses
+   and isolated filesystem/subprocess fixtures for routine validation.
+4. Run the CI-equivalent checks below and the documentation tests.
 5. Open a pull request against `main`.
+
+```bash
+cargo fmt -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
+cargo build --locked --all-targets --all-features
+cargo test --locked --all-targets --all-features
+cargo test --locked --doc
+```
+
+CI also checks tracked filenames for ASCII-only names and audits dependencies
+against the RustSec advisory database. CLI tests parse the `lpcli` examples in this
+README and `AGENTS.md`, including argument validation, without executing commands
+or making Launchpad requests.
 
 ---
 
