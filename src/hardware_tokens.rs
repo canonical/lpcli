@@ -45,8 +45,27 @@
 //! An access token is reused until shortly before it expires (the smaller of
 //! 60 seconds and a tenth of its lifetime), so ordinary requests do not each
 //! need a touch.  Minting is serialised, so concurrent requests share one new
-//! token.  Access tokens are never persisted, so each new lpcli invocation
-//! needs one touch.
+//! token. [`HardwareTokenSession::new`] is memory-only. [`load_session`] also
+//! reuses tokens across processes through the system keyring for five minutes
+//! by default; [`HardwareLogin::cache_timeout`] and [`load_session_with_cache`]
+//! select 0–86400 seconds (zero disables persistence). There is no plaintext
+//! access-token fallback.
+//! [`clear_cached_access_token`] explicitly removes the persisted token.
+//!
+//! A private lock and non-secret generation marker in an ownership-checked,
+//! canonical per-user directory (using the passwd home cache directory
+//! `~/.cache/lpcli` independent of environment overrides, falling back to
+//! `/run/user/<uid>` if home is unavailable or unwritable) coordinate
+//! cooperating processes. Without either directory, caching is memory-only while
+//! existing grants and uncached grant changes remain usable; coordination
+//! contention or mid-login coordination changes fail safely without committing.
+//! Explicitly memory-only logins never write a grant. No OS lock spans an await.
+//! Lock/keyring failures cause fresh minting without persistence; the minted
+//! token is still reused in that process until its fixed deadline. Persistence
+//! is currently implemented only on Linux. Clearing does not revoke already
+//! issued credentials or discard tokens held by running sessions; revoke on
+//! Launchpad for that. Wall-clock rollback across process restarts cannot be
+//! detected reliably, so this cache assumes a trustworthy system clock.
 //!
 //! # Grant storage
 //!
@@ -54,8 +73,8 @@
 //! format, so a file written by either tool can be read by the other.  It
 //! holds the refresh token and secret, the account, the optional credential
 //! ID, the service root, the WebAuthn origin and the consumer key.  Access
-//! tokens, challenges, assertions and PINs are never stored, and private keys
-//! never leave the security key.
+//! tokens are stored only in the separate, optional keyring cache. Challenges,
+//! assertions and PINs are never stored, and private keys never leave the key.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -68,7 +87,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::{self, Credentials};
 use crate::client::{Collection, LaunchpadClient};
@@ -104,6 +123,12 @@ const RECORD_KIND: &str = "hardware-token";
 const MINTING_CHALLENGE_BYTES: usize = 32;
 const DEFAULT_WEBAUTHN_TIMEOUT: Duration = Duration::from_secs(60);
 const MINTING_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default cross-process cache lifetime (five minutes).
+pub const DEFAULT_ACCESS_TOKEN_CACHE_TTL: Duration = Duration::from_secs(300);
+/// Maximum permitted cross-process cache lifetime (one day).
+pub const MAX_ACCESS_TOKEN_CACHE_TTL: Duration = Duration::from_secs(86400);
+const ACCESS_CACHE_USER: &str = "launchpad-hardware-access-token";
 
 // ---------------------------------------------------------------------------
 // Base64url
@@ -427,6 +452,18 @@ impl GrantStore {
 
     /// Save `credentials`, replacing any stored grant.
     pub fn save(&self, credentials: &HardwareTokenCredentials) -> Result<StoredIn> {
+        self.save_with_cache(credentials, &KeyringAccessTokenCache)
+    }
+
+    fn save_with_cache(
+        &self,
+        credentials: &HardwareTokenCredentials,
+        cache: &dyn AccessTokenCache,
+    ) -> Result<StoredIn> {
+        with_grant_cache_change(self, cache, || self.save_raw(credentials))
+    }
+
+    fn save_raw(&self, credentials: &HardwareTokenCredentials) -> Result<StoredIn> {
         let serialized = credentials.to_json()?;
         match self {
             Self::Keyring => {
@@ -448,11 +485,27 @@ impl GrantStore {
         }
     }
 
-    /// Delete the stored grant.  Deleting a missing grant succeeds.
+    /// Delete the stored grant and clear its access-token cache. Missing
+    /// entries succeed. Contended locks fail before deleting the grant or
+    /// rotating its generation; retry after the competing operation finishes.
+    /// When no cross-process coordination directory is available (e.g. under
+    /// sudo), uncached grant deletion still proceeds. Generation markers fence
+    /// outstanding publications when available; a failed fence also aborts
+    /// before deletion. Without coordination, persistence is disabled.
+    /// Cache deletion is best effort; use
+    /// [`clear_cached_access_token`] to require confirmed cache deletion.
     ///
     /// This only removes the local copy; use
     /// [`revoke_hardware_bound_oauth_token`] to revoke it on Launchpad.
     pub fn delete(&self) -> Result<()> {
+        self.delete_with_cache(&KeyringAccessTokenCache)
+    }
+
+    fn delete_with_cache(&self, cache: &dyn AccessTokenCache) -> Result<()> {
+        with_grant_cache_change(self, cache, || self.delete_raw()).map(|_| ())
+    }
+
+    fn delete_raw(&self) -> Result<()> {
         match self {
             Self::Keyring => {
                 let keyring_result = auth::keyring_entry_for(KEYRING_USER)
@@ -965,6 +1018,548 @@ fn parse_minted_token(body: &str) -> Result<MintedAccessToken> {
 }
 
 // ---------------------------------------------------------------------------
+// Keyring-only access-token cache
+// ---------------------------------------------------------------------------
+
+trait CacheLock: Send {}
+impl CacheLock for std::fs::File {}
+
+trait AccessTokenCache: Send + Sync {
+    fn lock(&self) -> Result<Box<dyn CacheLock>>;
+    // None means there is no trusted runtime namespace: grant storage can
+    // proceed uncached. Contention in a trusted namespace is an error, NEVER
+    // an uncached fallback, or it would permit racing a checked login commit.
+    fn mutation_lock(&self) -> Result<Option<Box<dyn CacheLock>>> {
+        self.lock().map(Some)
+    }
+    fn read(&self) -> Result<Option<Zeroizing<String>>>;
+    fn write(&self, record: &str) -> Result<()>;
+    fn delete(&self) -> Result<()>;
+    fn generation(&self) -> Result<String>;
+    // Callers must hold the shared mutation/cache lock while rotating.
+    fn rotate_generation(&self) -> Result<String>;
+}
+
+struct KeyringAccessTokenCache;
+
+fn with_grant_cache_change<T>(
+    store: &GrantStore,
+    cache: &dyn AccessTokenCache,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let lock = grant_mutation_lock(store, cache)?;
+    if lock.is_none() {
+        return operation();
+    }
+    change_grant_while_locked(cache, operation)
+}
+
+fn grant_mutation_lock(
+    store: &GrantStore,
+    cache: &dyn AccessTokenCache,
+) -> Result<Option<Box<dyn CacheLock>>> {
+    if *store == GrantStore::Memory || is_sudo() {
+        return Ok(None);
+    }
+    cache.mutation_lock()
+}
+
+// The caller holds the mutation lock across both the fence and the grant I/O.
+// Cache deletion failures do not prevent grant storage. Lock contention and
+// a failed generation fence must fail BEFORE modifying the grant.
+fn change_grant_while_locked<T>(
+    cache: &dyn AccessTokenCache,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    cache.rotate_generation()?;
+    let result = operation();
+    // No producer can snapshot during this operation: all use the same lock.
+    // The successful pre-mutation rotation fences every earlier import/mint.
+    let _ = cache.delete();
+    result
+}
+
+fn cache_error() -> LpError {
+    // Backend errors can contain credential attributes; do not echo them.
+    LpError::HardwareToken("The hardware access-token cache is unavailable or busy.".into())
+}
+
+fn sudo_cache_disabled_error() -> LpError {
+    LpError::HardwareToken(
+        "The hardware access-token cache is disabled under sudo; tokens are kept in memory only."
+            .into(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+const CACHE_LOCK_WAIT_LIMIT: Duration = Duration::from_millis(100);
+#[cfg(target_os = "linux")]
+const CACHE_LOCK_RETRY_STEP: Duration = Duration::from_millis(5);
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockFailure {
+    Busy,
+    Unavailable,
+}
+
+impl AccessTokenCache for KeyringAccessTokenCache {
+    fn lock(&self) -> Result<Box<dyn CacheLock>> {
+        if is_sudo() {
+            return Err(sudo_cache_disabled_error());
+        }
+        // Do not follow a malicious symlink or lock a device/FIFO. The lock
+        // contains no credentials and must be owned exclusively by this user.
+        #[cfg(target_os = "linux")]
+        {
+            let directory = trusted_coordination_directory()?;
+            lock_directory_with_retry(&directory).map_err(|_| cache_error())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // This Ubuntu client only enables persistence where we can verify
+            // the lock's ownership and reject symlinks securely.
+            Err(cache_error())
+        }
+    }
+
+    fn mutation_lock(&self) -> Result<Option<Box<dyn CacheLock>>> {
+        #[cfg(target_os = "linux")]
+        {
+            let Ok(directory) = trusted_coordination_directory() else {
+                return Ok(None);
+            };
+            // Only an unavailable/unsafe coordination directory proceeds uncached.
+            // Contention in a checked coordination directory MUST fail cleanly.
+            match lock_directory_with_retry(&directory) {
+                Ok(lock) => Ok(Some(lock)),
+                Err(LockFailure::Unavailable) => Ok(None),
+                Err(LockFailure::Busy) => Err(cache_error()),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(None)
+        }
+    }
+
+    fn read(&self) -> Result<Option<Zeroizing<String>>> {
+        let entry = auth::keyring_entry_for(ACCESS_CACHE_USER).map_err(|_| cache_error())?;
+        match entry.get_password() {
+            Ok(raw) => Ok(Some(Zeroizing::new(raw))),
+            Err(keyring_core::Error::NoEntry) => Ok(None),
+            Err(_) => Err(cache_error()),
+        }
+    }
+
+    fn write(&self, record: &str) -> Result<()> {
+        auth::keyring_entry_for(ACCESS_CACHE_USER)
+            .and_then(|entry| entry.set_password(record))
+            .map_err(|_| cache_error())
+    }
+
+    fn delete(&self) -> Result<()> {
+        match auth::keyring_entry_for(ACCESS_CACHE_USER).and_then(|entry| entry.delete_credential())
+        {
+            Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
+            Err(_) => Err(cache_error()),
+        }
+    }
+
+    fn generation(&self) -> Result<String> {
+        #[cfg(target_os = "linux")]
+        {
+            let directory = trusted_coordination_directory()?;
+            let path = directory.join("hardware-access-token.generation");
+            match std::fs::read_to_string(&path) {
+                Ok(value) if valid_generation(&value) => Ok(value),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    self.rotate_generation()
+                }
+                _ => Err(cache_error()),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(cache_error())
+        }
+    }
+
+    fn rotate_generation(&self) -> Result<String> {
+        #[cfg(target_os = "linux")]
+        {
+            let directory = trusted_coordination_directory()?;
+            let value = new_cache_generation();
+            // Only a random, non-secret fence is written to disk. Tokens
+            // remain keyring-only. Rotate while holding the shared lock.
+            write_private_file(
+                &directory.join("hardware-access-token.generation"),
+                value.as_bytes(),
+            )?;
+            Ok(value)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(cache_error())
+        }
+    }
+}
+
+fn new_cache_generation() -> String {
+    hex::encode(rand::random::<[u8; 32]>())
+}
+
+fn valid_generation(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(target_os = "linux")]
+fn trusted_coordination_directory() -> Result<PathBuf> {
+    if is_sudo() {
+        return Err(sudo_cache_disabled_error());
+    }
+    // SAFETY: geteuid has no memory safety requirements.
+    let uid = unsafe { libc::geteuid() };
+    let home = passwd_home_directory(uid).ok();
+    trusted_coordination_directory_in(home.as_deref(), Path::new("/run/user"), 0, uid)
+}
+
+#[cfg(target_os = "linux")]
+fn trusted_coordination_directory_in(
+    passwd_home: Option<&Path>,
+    run_user_root: &Path,
+    expected_run_user_parent_uid: u32,
+    uid: u32,
+) -> Result<PathBuf> {
+    if is_sudo() {
+        return Err(sudo_cache_disabled_error());
+    }
+    // Prefer the user's canonical passwd home cache (`~/.cache/lpcli`), independent
+    // of HOME/XDG/TMPDIR overrides, so systemd and non-systemd sessions share one
+    // namespace without requiring `/run/user/<uid>`. Fall back to `/run/user/<uid>`
+    // when home is unavailable or unwritable (e.g. read-only home).
+    if let Some(home) = passwd_home
+        && let Ok(directory) = trusted_home_cache_directory(home, uid)
+    {
+        return Ok(directory);
+    }
+    trusted_runtime_directory_in(run_user_root, expected_run_user_parent_uid, uid)
+}
+
+#[cfg(target_os = "linux")]
+fn passwd_home_directory(uid: u32) -> Result<PathBuf> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    // SAFETY: sysconf(_SC_GETPW_R_SIZE_MAX) has no memory safety requirements.
+    let initial = match unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) } {
+        n if n > 0 => n as usize,
+        _ => 1024,
+    };
+    let mut buf = vec![0u8; initial];
+    let mut pwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut result = std::ptr::null_mut();
+
+    loop {
+        // SAFETY: `pwd` holds uninitialized `passwd` storage, `buf` is valid
+        // for `buf.len()` bytes, and `result` receives either `&mut pwd` or null.
+        let rc = unsafe {
+            libc::getpwuid_r(
+                uid as libc::uid_t,
+                pwd.as_mut_ptr(),
+                buf.as_mut_ptr().cast::<libc::c_char>(),
+                buf.len(),
+                &mut result,
+            )
+        };
+        if rc == 0 {
+            if result.is_null() {
+                return Err(cache_error());
+            }
+            // SAFETY: `rc == 0` and `result` is non-null, so `pw_dir` points to
+            // a NUL-terminated path inside `buf`.
+            let pw_dir = unsafe { (*result).pw_dir };
+            if pw_dir.is_null() {
+                return Err(cache_error());
+            }
+            // SAFETY: `pw_dir` is a valid C string inside `buf`.
+            let path = PathBuf::from(OsStr::from_bytes(
+                unsafe { std::ffi::CStr::from_ptr(pw_dir) }.to_bytes(),
+            ));
+            if path.as_os_str().is_empty() || path == Path::new("/") {
+                return Err(cache_error());
+            }
+            return Ok(path);
+        }
+        if rc == libc::ERANGE && buf.len() < 65_536 {
+            buf.resize(buf.len() * 2, 0);
+            continue;
+        }
+        return Err(cache_error());
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn trusted_home_cache_directory(home: &Path, uid: u32) -> Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    if home.as_os_str().is_empty() || home == Path::new("/") {
+        return Err(cache_error());
+    }
+    let home_meta = std::fs::symlink_metadata(home).map_err(|_| cache_error())?;
+    if !home_meta.is_dir() || home_meta.uid() != uid || home_meta.mode() & 0o022 != 0 {
+        return Err(cache_error());
+    }
+    let cache_root = home.join(".cache");
+    match std::fs::DirBuilder::new().mode(0o700).create(&cache_root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(cache_error()),
+    }
+    let cache_meta = std::fs::symlink_metadata(&cache_root).map_err(|_| cache_error())?;
+    if !cache_meta.is_dir() || cache_meta.uid() != uid || cache_meta.mode() & 0o022 != 0 {
+        return Err(cache_error());
+    }
+    let directory = cache_root.join("lpcli");
+    match std::fs::DirBuilder::new().mode(0o700).create(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(cache_error()),
+    }
+    validate_runtime_directory(&directory, uid)?;
+    Ok(directory)
+}
+
+#[cfg(target_os = "linux")]
+fn trusted_runtime_directory_in(
+    run_user_root: &Path,
+    expected_parent_uid: u32,
+    uid: u32,
+) -> Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    if is_sudo() {
+        return Err(sudo_cache_disabled_error());
+    }
+    // Never create `/run/user` or fall back to `/tmp`.
+    let parent = std::fs::symlink_metadata(run_user_root).map_err(|_| cache_error())?;
+    if !parent.is_dir() || parent.uid() != expected_parent_uid || parent.mode() & 0o022 != 0 {
+        return Err(cache_error());
+    }
+    let path = run_user_root.join(uid.to_string());
+    validate_runtime_directory(&path, uid)?;
+    Ok(path)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_runtime_directory(path: &Path, uid: u32) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| cache_error())?;
+    if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {
+        return Err(cache_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn lock_directory_with_retry(
+    directory: &Path,
+) -> std::result::Result<Box<dyn CacheLock>, LockFailure> {
+    let deadline = std::time::Instant::now() + CACHE_LOCK_WAIT_LIMIT;
+    loop {
+        match secure_cache_lock_checked(directory) {
+            Ok(lock) => return Ok(lock),
+            Err(LockFailure::Unavailable) => return Err(LockFailure::Unavailable),
+            Err(LockFailure::Busy) if std::time::Instant::now() >= deadline => {
+                return Err(LockFailure::Busy);
+            }
+            Err(LockFailure::Busy) => std::thread::sleep(CACHE_LOCK_RETRY_STEP),
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", test))]
+fn secure_cache_lock(directory: &Path) -> Result<Box<dyn CacheLock>> {
+    secure_cache_lock_checked(directory).map_err(|_| cache_error())
+}
+
+#[cfg(target_os = "linux")]
+fn secure_cache_lock_checked(
+    directory: &Path,
+) -> std::result::Result<Box<dyn CacheLock>, LockFailure> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(LockFailure::Unavailable),
+    }
+    // SAFETY: geteuid has no arguments or memory safety requirements.
+    let uid = unsafe { libc::geteuid() };
+    let metadata = std::fs::symlink_metadata(directory).map_err(|_| LockFailure::Unavailable)?;
+    if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {
+        return Err(LockFailure::Unavailable);
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(directory.join("hardware-access-token.lock"))
+        .map_err(|_| LockFailure::Unavailable)?;
+    let metadata = file.metadata().map_err(|_| LockFailure::Unavailable)?;
+    if !metadata.is_file()
+        || metadata.uid() != uid
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err(LockFailure::Unavailable);
+    }
+    match file.try_lock() {
+        Ok(()) => Ok(Box::new(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Err(LockFailure::Busy),
+        Err(std::fs::TryLockError::Error(_)) => Err(LockFailure::Unavailable),
+    }
+}
+
+/// Remove the cross-process hardware access-token cache (not the grant).
+/// Missing entries succeed. Busy locks, unavailable keyrings and deletion
+/// failures are reported; there is no file fallback. Refuses to run under sudo.
+/// This does not revoke tokens on Launchpad or discard in-process tokens;
+/// ongoing sessions retain their tokens until their fixed deadlines. Tokens
+/// minted before a successful clear cannot become reusable through a late
+/// publication: every record must match the current generation. A fresh mint
+/// may populate the cache again. Grant deletion also attempts to clear it.
+pub fn clear_cached_access_token() -> Result<()> {
+    clear_access_cache(&KeyringAccessTokenCache)
+}
+
+fn clear_access_cache(cache: &dyn AccessTokenCache) -> Result<()> {
+    let _lock = cache.lock()?;
+    cache.rotate_generation()?;
+    cache.delete()
+}
+
+trait CacheClock: Send + Sync {
+    fn now(&self) -> DateTime<Utc>;
+}
+
+struct SystemCacheClock;
+impl CacheClock for SystemCacheClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
+fn load_cache_grant(store: &GrantStore) -> Result<Option<HardwareTokenCredentials>> {
+    if *store != GrantStore::Keyring {
+        return store.load();
+    }
+    // Unlike GrantStore::load, distinguish backend failure from an absent
+    // grant. An unavailable keyring must disable persistence, not falsely
+    // report logout and prevent this already-loaded session minting locally.
+    match auth::keyring_entry_for(KEYRING_USER).and_then(|entry| entry.get_password()) {
+        Ok(raw) => HardwareTokenCredentials::from_json(&Zeroizing::new(raw)).map(Some),
+        Err(keyring_core::Error::NoEntry) => load_file(&fallback_path()?),
+        Err(_) => Err(cache_error()),
+    }
+}
+
+struct CachePolicy {
+    backend: Arc<dyn AccessTokenCache>,
+    ttl: Duration,
+    // Checking the live store while holding the lock prevents an old session
+    // from repopulating the cache after logout or grant replacement.
+    store: GrantStore,
+    // Imported grants must authenticate before any cache access is enabled.
+    enabled: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccessCacheRecord {
+    version: u32,
+    binding: String,
+    token: String,
+    secret: String,
+    minted_at: DateTime<Utc>,
+    server_expires_at: DateTime<Utc>,
+    deadline: DateTime<Utc>,
+    ttl: Duration,
+    generation: String,
+}
+
+impl Drop for AccessCacheRecord {
+    fn drop(&mut self) {
+        self.token.zeroize();
+        self.secret.zeroize();
+    }
+}
+
+fn cache_binding(credentials: &HardwareTokenCredentials) -> String {
+    // Length-delimited canonical JSON binds the account, both grant secrets,
+    // credential restriction, consumer, service root and WebAuthn origin.
+    let raw = credentials
+        .to_json()
+        .expect("validated hardware credentials");
+    hex::encode(Sha256::digest(raw.as_bytes()))
+}
+
+fn check_cache_ttl(ttl: Duration) -> Result<()> {
+    if ttl > MAX_ACCESS_TOKEN_CACHE_TTL {
+        return Err(LpError::HardwareToken(
+            "Hardware access-token cache lifetime must be at most 86400 seconds.".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn token_deadline(
+    minted_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    ttl: Duration,
+) -> Option<DateTime<Utc>> {
+    let lifetime = expires_at.signed_duration_since(minted_at);
+    if lifetime <= TimeDelta::zero() || ttl.is_zero() || check_cache_ttl(ttl).is_err() {
+        return None;
+    }
+    let margin = std::cmp::min(TimeDelta::seconds(60), lifetime / 10);
+    Some(std::cmp::min(
+        minted_at.checked_add_signed(TimeDelta::from_std(ttl).ok()?)?,
+        expires_at.checked_sub_signed(margin)?,
+    ))
+}
+
+impl AccessCacheRecord {
+    fn credentials(
+        &self,
+        owner: &HardwareTokenCredentials,
+        ttl: Duration,
+        now: DateTime<Utc>,
+    ) -> Option<CachedToken> {
+        let deadline = token_deadline(self.minted_at, self.server_expires_at, self.ttl)?;
+        let requested_deadline = token_deadline(self.minted_at, self.server_expires_at, ttl)?;
+        let deadline = std::cmp::min(deadline, requested_deadline);
+        if self.version != 2
+            || self.binding != cache_binding(owner)
+            || !valid_generation(&self.generation)
+            || self.token.is_empty()
+            || self.secret.is_empty()
+            || self.minted_at > now
+            || self.deadline != token_deadline(self.minted_at, self.server_expires_at, self.ttl)?
+            || now >= deadline
+        {
+            return None;
+        }
+        Some(CachedToken {
+            credentials: Credentials::new(owner.consumer(), &self.token, &self.secret),
+            renew_at: deadline,
+            minted_at: self.minted_at,
+            expires_at: self.server_expires_at,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
 
@@ -972,6 +1567,28 @@ fn parse_minted_token(body: &str) -> Result<MintedAccessToken> {
 struct CachedToken {
     credentials: Credentials,
     renew_at: DateTime<Utc>,
+    minted_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+#[derive(Default)]
+struct SessionCache {
+    token: Option<CachedToken>,
+    // Fingerprints, not secrets: a failed keyring deletion must not cause this
+    // session to reload a rejected generation, but newer tokens remain usable.
+    rejected: std::collections::HashSet<String>,
+}
+
+fn token_generation(credentials: &Credentials) -> String {
+    let raw = Zeroizing::new(
+        serde_json::to_string(&(
+            &credentials.consumer_key,
+            &credentials.access_token.token,
+            &credentials.access_token.secret,
+        ))
+        .expect("OAuth credentials serialize as strings"),
+    );
+    hex::encode(Sha256::digest(raw.as_bytes()))
 }
 
 /// Signs Launchpad API requests with short-lived access tokens minted from a
@@ -984,7 +1601,12 @@ pub struct HardwareTokenSession {
     credentials: HardwareTokenCredentials,
     transport: MintingTransport,
     authenticator: Arc<dyn Authenticator>,
-    cached: tokio::sync::Mutex<Option<CachedToken>>,
+    cached: tokio::sync::Mutex<SessionCache>,
+    cache_policy: Option<CachePolicy>,
+    cache_timeout: Duration,
+    clock: Arc<dyn CacheClock>,
+    #[cfg(test)]
+    before_grant_write: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl std::fmt::Debug for HardwareTokenSession {
@@ -1016,8 +1638,35 @@ impl HardwareTokenSession {
             credentials,
             transport,
             authenticator,
-            cached: tokio::sync::Mutex::new(None),
+            cached: tokio::sync::Mutex::new(SessionCache::default()),
+            cache_policy: None,
+            cache_timeout: Duration::ZERO,
+            clock: Arc::new(SystemCacheClock),
+            #[cfg(test)]
+            before_grant_write: std::sync::Mutex::new(None),
         }
+    }
+
+    fn configure_cache(&mut self, store: &GrantStore, timeout: Duration, enabled: bool) {
+        self.cache_timeout = timeout;
+        if !timeout.is_zero()
+            && !is_sudo()
+            && *store != GrantStore::Memory
+            && cfg!(target_os = "linux")
+        {
+            self.cache_policy = Some(CachePolicy {
+                backend: Arc::new(KeyringAccessTokenCache),
+                ttl: timeout,
+                store: store.clone(),
+                enabled: std::sync::atomic::AtomicBool::new(enabled),
+            });
+        }
+    }
+
+    fn active_cache_policy(&self) -> Option<&CachePolicy> {
+        self.cache_policy
+            .as_ref()
+            .filter(|policy| policy.enabled.load(std::sync::atomic::Ordering::SeqCst))
     }
 
     /// The grant and consumer this session mints tokens for.
@@ -1030,15 +1679,77 @@ impl HardwareTokenSession {
     /// or it is about to expire.
     pub async fn access_credentials(&self) -> Result<Credentials> {
         let mut cached = self.cached.lock().await;
-        if let Some(token) = cached.as_ref()
-            && Utc::now() < token.renew_at
+        if let Some(token) = cached.token.as_ref()
+            && self.clock.now() >= token.minted_at
+            && self.clock.now() < token.renew_at
         {
+            // Never refresh a persisted record from this fast path. In-memory
+            // reuse survives keyring failures and cannot undo a cache clear.
             return Ok(token.credentials.clone());
         }
-        *cached = None;
+        cached.token = None;
+        let policy = self.active_cache_policy();
+        let mut persistence_lock = policy.and_then(|policy| policy.backend.lock().ok());
+        let mut generation = policy.and_then(|policy| {
+            persistence_lock.as_ref()?;
+            policy.backend.generation().ok()
+        });
+        if generation.is_none() {
+            persistence_lock = None;
+        }
+        if let (Some(policy), Some(_)) = (policy, &persistence_lock) {
+            if policy.store != GrantStore::Memory {
+                match load_cache_grant(&policy.store) {
+                    Ok(Some(live)) if cache_binding(&live) == cache_binding(&self.credentials) => {}
+                    Ok(_) => {
+                        return Err(LpError::HardwareToken(
+                            "The hardware grant was removed or replaced; load a new session."
+                                .into(),
+                        ));
+                    }
+                    Err(_) => persistence_lock = None,
+                }
+            }
+            if persistence_lock.is_some() {
+                match policy.backend.read() {
+                    Ok(Some(raw)) => {
+                        let record = serde_json::from_str::<AccessCacheRecord>(&raw).ok();
+                        let token = record
+                            .as_ref()
+                            .filter(|record| Some(&record.generation) == generation.as_ref())
+                            .and_then(|record| {
+                                record.credentials(&self.credentials, policy.ttl, self.clock.now())
+                            });
+                        if let Some(token) = token
+                            && !cached
+                                .rejected
+                                .contains(&token_generation(&token.credentials))
+                        {
+                            let credentials = token.credentials.clone();
+                            cached.token = Some(token);
+                            return Ok(credentials);
+                        }
+                        // Never use an invalid/rejected record, but leave
+                        // deletion to explicit or request-aware invalidation.
+                        // A fresh mint may replace it under this same lock.
+                    }
+                    Ok(None) => {}
+                    Err(_) => persistence_lock = None,
+                }
+            }
+        }
 
+        // No OS lock spans an await. The generation fences publication after
+        // a clear/logout even if they run while minting or verifying.
+        if persistence_lock.is_none() {
+            generation = None;
+        }
+        drop(persistence_lock);
+        // Start the TTL before the exchange, not at cache write time. Time
+        // spent awaiting a touch can only shorten the cache's lifetime.
+        let minted_at = self.clock.now();
         let minted = self.mint().await?;
-        let remaining = minted.expires_at - Utc::now();
+        let remaining = minted.expires_at - self.clock.now();
         if remaining <= TimeDelta::zero() {
             return Err(LpError::HardwareToken(
                 "The server returned an already expired token.".to_string(),
@@ -1052,16 +1763,224 @@ impl HardwareTokenSession {
             minted.key,
             minted.secret.as_str(),
         );
-        *cached = Some(CachedToken {
+        if cached.rejected.contains(&token_generation(&credentials)) {
+            return Err(LpError::HardwareToken(
+                "The server returned a previously rejected access token.".into(),
+            ));
+        }
+        let mut renew_at = minted.expires_at - margin;
+        if let Some(deadline) = token_deadline(minted_at, minted.expires_at, self.cache_timeout) {
+            renew_at = std::cmp::min(renew_at, deadline);
+        }
+        let token = CachedToken {
             credentials: credentials.clone(),
-            renew_at: minted.expires_at - margin,
-        });
+            renew_at,
+            minted_at,
+            expires_at: minted.expires_at,
+        };
+        if let (Some(policy), Some(generation)) = (policy, generation.as_deref())
+            && let Ok(_lock) = policy.backend.lock()
+        {
+            let _ = self.publish_token(policy, &token, generation);
+        }
+        cached.token = Some(token);
         Ok(credentials)
     }
 
-    /// Discard the current access token, e.g. after Launchpad rejected it.
+    fn snapshot_grant_generation(&self, store: &GrantStore) -> Result<Option<String>> {
+        let backend: &dyn AccessTokenCache = self
+            .cache_policy
+            .as_ref()
+            .map(|policy| policy.backend.as_ref())
+            .unwrap_or(&KeyringAccessTokenCache);
+        let lock = grant_mutation_lock(store, backend)?;
+        if lock.is_none() {
+            return Ok(None);
+        }
+        backend.generation().map(Some)
+    }
+
+    #[cfg(test)]
+    fn snapshot_generation(&self) -> Option<String> {
+        let policy = self.cache_policy.as_ref()?;
+        let _lock = policy.backend.lock().ok()?;
+        policy.backend.generation().ok()
+    }
+
+    // Caller holds the shared mutation/cache lock through the generation and
+    // live-grant checks and the write. Ordinary mints retain their snapshot;
+    // a verified replacement uses its new commit epoch. Neither can publish
+    // across an intervening clear/logout.
+    fn publish_token(
+        &self,
+        policy: &CachePolicy,
+        token: &CachedToken,
+        generation: &str,
+    ) -> Result<()> {
+        if policy.backend.generation()? != generation {
+            return Ok(());
+        }
+        if policy.store != GrantStore::Memory
+            && load_cache_grant(&policy.store)?
+                .is_none_or(|live| cache_binding(&live) != cache_binding(&self.credentials))
+        {
+            return Ok(());
+        }
+        let Some(deadline) = token_deadline(token.minted_at, token.expires_at, policy.ttl) else {
+            return Ok(());
+        };
+        if self.clock.now() < token.minted_at || self.clock.now() >= deadline {
+            return Ok(());
+        }
+        let record = AccessCacheRecord {
+            version: 2,
+            binding: cache_binding(&self.credentials),
+            token: token.credentials.access_token.token.clone(),
+            secret: token.credentials.access_token.secret.clone(),
+            minted_at: token.minted_at,
+            server_expires_at: token.expires_at,
+            deadline,
+            ttl: policy.ttl,
+            generation: generation.to_owned(),
+        };
+        let raw = Zeroizing::new(serde_json::to_string(&record).map_err(|_| cache_error())?);
+        policy.backend.write(&raw)
+    }
+
+    // This is called ONLY after current_person has verified the account.
+    async fn commit_verified_login(
+        &self,
+        changed: bool,
+        store: &GrantStore,
+        generation: Option<&str>,
+    ) -> Result<Option<StoredIn>> {
+        let cached = self.cached.lock().await;
+        let policy = self.cache_policy.as_ref();
+        let backend: &dyn AccessTokenCache = policy
+            .map(|policy| policy.backend.as_ref())
+            .unwrap_or(&KeyringAccessTokenCache);
+        // Also required when cache_timeout is zero: an uncached import must
+        // not bypass another process's checked grant commit or logout.
+        // No OS lock spans an await; this guard covers the entire sync commit.
+        let lock = grant_mutation_lock(store, backend)?;
+        let current = if lock.is_some() {
+            backend.generation().ok()
+        } else {
+            None
+        };
+        let unchanged = current
+            .as_deref()
+            .zip(generation)
+            .is_some_and(|(current, generation)| current == generation);
+        let persisting_import = changed && *store != GrantStore::Memory;
+        let coordination_changed = lock.is_some() != generation.is_some();
+        if persisting_import && (coordination_changed || (lock.is_some() && !unchanged)) {
+            return Err(LpError::HardwareToken(
+                "The cache or grant changed during login; retry the verified import.".into(),
+            ));
+        }
+        #[cfg(test)]
+        {
+            // Deterministically exercise logout at the check/write boundary.
+            let hook = self.before_grant_write.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let (stored, publication_generation) = if persisting_import && lock.is_some() {
+            // Consume the checked snapshot before writing: any other import
+            // verified against that epoch must now retry, even for the same
+            // account. Keep the lock through rotation, grant write and seeding.
+            let committed_generation = backend.rotate_generation()?;
+            let result = store.save_raw(&self.credentials);
+            let _ = backend.delete();
+            (Some(result?), Some(committed_generation))
+        } else if persisting_import {
+            // Coordination is unavailable (e.g. under sudo with an explicit
+            // grant file, or read-only home without /run/user/<uid>): save
+            // uncached without publishing to the cross-process keyring cache.
+            (Some(store.save_raw(&self.credentials)?), None)
+        } else if changed {
+            // A memory-only login authenticates without committing any grant.
+            (Some(StoredIn::Memory), None)
+        } else {
+            (None, generation.filter(|_| unchanged).map(str::to_owned))
+        };
+        if let (Some(policy), Some(generation), Some(token)) = (
+            policy,
+            publication_generation.as_deref(),
+            cached.token.as_ref(),
+        ) {
+            let _ = self.publish_token(policy, token, generation);
+        }
+        if let Some(policy) = policy {
+            policy
+                .enabled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(stored)
+    }
+
+    /// Discard this session's current token locally, without deleting any
+    /// persisted record. The token will not be reloaded by this session.
+    /// This legacy API has no rejected-request identity: a delayed 401 could
+    /// discard a newer *local* token. For HTTP rejection handling, use
+    /// [`Self::invalidate_rejected_access_token`] with the exact credentials
+    /// used to sign the rejected request, not the session's current token.
     pub async fn invalidate(&self) {
-        *self.cached.lock().await = None;
+        let mut cached = self.cached.lock().await;
+        if let Some(token) = cached.token.take() {
+            cached.rejected.insert(token_generation(&token.credentials));
+        }
+    }
+
+    /// Conditionally invalidate the OAuth token used by a rejected request.
+    /// Consumer/key/secret identify its generation; the persisted record must
+    /// also match this session's complete grant binding. Newer local tokens
+    /// and persisted tokens for other grants/generations are left untouched.
+    ///
+    /// Returns true if a matching local or persisted token was removed, false
+    /// if neither matched. Keyring/lock/deletion failures are reported *after*
+    /// local invalidation; this session remembers the rejected generation so
+    /// a failed deletion cannot cause it to reload that token. Missing entries
+    /// succeed. Other running sessions may still hold the rejected token until
+    /// their own request is rejected; this method does not revoke on Launchpad.
+    ///
+    /// Client integration must retain the credentials used for each signed
+    /// request and pass them here on 401, even when a different request has
+    /// already renewed the session. Do not call `access_credentials()` merely
+    /// to obtain the argument, since that could return a newer generation.
+    pub async fn invalidate_rejected_access_token(&self, rejected: &Credentials) -> Result<bool> {
+        if rejected.consumer_key != self.credentials.consumer() {
+            return Ok(false);
+        }
+        let mut cached = self.cached.lock().await;
+        cached.rejected.insert(token_generation(rejected));
+        let removed_local = cached
+            .token
+            .as_ref()
+            .is_some_and(|token| token.credentials == *rejected);
+        if removed_local {
+            cached.token = None;
+        }
+        let Some(policy) = self.active_cache_policy() else {
+            return Ok(removed_local);
+        };
+        let _lock = policy.backend.lock()?;
+        let Some(raw) = policy.backend.read()? else {
+            return Ok(removed_local);
+        };
+        let matching = serde_json::from_str::<AccessCacheRecord>(&raw)
+            .ok()
+            .is_some_and(|record| {
+                record.binding == cache_binding(&self.credentials)
+                    && record.token == rejected.access_token.token
+                    && record.secret == rejected.access_token.secret
+            });
+        if matching {
+            policy.backend.delete()?;
+        }
+        Ok(removed_local || matching)
     }
 
     /// Run the exchange: fetch a challenge, have the key sign it and trade
@@ -1127,13 +2046,27 @@ impl HardwareTokenSession {
 /// With [`HardwareLogin::grant`], a newly issued grant is imported and, once
 /// it has authenticated a request, stored.  Without it, the stored grant is
 /// used.  There is no fallback to browser authorisation.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct HardwareLogin {
     grant: Option<HardwareTokenGrant>,
     account: Option<String>,
     consumer: Option<String>,
     credential_id: Option<String>,
     store: GrantStore,
+    cache_timeout: Duration,
+}
+
+impl Default for HardwareLogin {
+    fn default() -> Self {
+        Self {
+            grant: None,
+            account: None,
+            consumer: None,
+            credential_id: None,
+            store: GrantStore::default(),
+            cache_timeout: DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+        }
+    }
 }
 
 impl HardwareLogin {
@@ -1172,6 +2105,23 @@ impl HardwareLogin {
         self
     }
 
+    /// Set the fixed cache TTL, defaulting to five minutes. Zero disables
+    /// persistence, and values above 86400 seconds are rejected by
+    /// [`login_with_hardware_token`] before any authentication or storage.
+    /// There is no environment-variable override.
+    ///
+    /// Login always mints fresh and seeds the keyring only AFTER verifying the
+    /// account. When cross-process coordination is available, its original
+    /// generation must still be current; a clear/logout or another import
+    /// during verification forces the persisted import to retry, and successful
+    /// replacement rotates to a new epoch and seeds the verified token without
+    /// extending its deadline. Cache write failures retain the token locally
+    /// until its fixed deadline.
+    pub fn cache_timeout(mut self, timeout: Duration) -> Self {
+        self.cache_timeout = timeout;
+        self
+    }
+
     /// Where to load and store the grant.
     pub fn store(mut self, store: GrantStore) -> Self {
         self.store = store;
@@ -1195,23 +2145,43 @@ pub struct HardwareLoginOutcome {
 /// The login mints an access token straight away, so expect to touch the
 /// key.  A new grant is only stored once it has authenticated a request as
 /// its account, so a failed import never replaces a working stored grant.
+/// When a trusted coordination directory is available, persisted imports and
+/// replacements require a mutation lock and matching generation snapshot, even
+/// with caching disabled, so competing imports, clears or logouts fail safely
+/// instead of overwriting or restoring a grant. Under sudo (with an explicit
+/// grant file) or when no coordination directory is available, persisted
+/// grants still save uncached. Coordination contention or mid-login changes
+/// require retrying the login.
 ///
 /// # Errors
 ///
-/// [`LpError::HardwareToken`] when no grant is stored, or the grant belongs
-/// to another account or consumer; [`LpError::HardwareTokenGrantRejected`]
+/// [`LpError::HardwareToken`] when no grant is stored, the grant belongs to
+/// another account or consumer, or coordination is contended or changed;
+/// [`LpError::HardwareTokenGrantRejected`]
 /// when Launchpad refuses the grant; [`LpError::HardwareKey`] and friends
 /// when the security key fails.
 pub async fn login_with_hardware_token(
     login: HardwareLogin,
     authenticator: Arc<dyn Authenticator>,
 ) -> Result<HardwareLoginOutcome> {
+    check_cache_ttl(login.cache_timeout)?;
     let (credentials, grant_changed) = resolve_credentials(&login)?;
 
     let account = credentials.grant().account().to_string();
-    let session = HardwareTokenSession::new(credentials.clone(), authenticator)?;
-    let client = LaunchpadClient::with_hardware_token(Arc::new(session));
-    let stored_in = verify_and_store(&client, &credentials, grant_changed, &login.store).await?;
+    let mut session = HardwareTokenSession::new(credentials.clone(), authenticator)?;
+    session.configure_cache(&login.store, login.cache_timeout, false);
+    let generation = session.snapshot_grant_generation(&login.store)?;
+    let session = Arc::new(session);
+    let client = LaunchpadClient::with_hardware_token(Arc::clone(&session));
+    let stored_in = verify_and_store(
+        &client,
+        &credentials,
+        grant_changed,
+        &login.store,
+        &session,
+        generation.as_deref(),
+    )
+    .await?;
 
     Ok(HardwareLoginOutcome {
         client,
@@ -1280,6 +2250,8 @@ async fn verify_and_store(
     credentials: &HardwareTokenCredentials,
     grant_changed: bool,
     store: &GrantStore,
+    session: &HardwareTokenSession,
+    generation: Option<&str>,
 ) -> Result<Option<StoredIn>> {
     let me = current_person(client).await?;
     if me.name != credentials.grant().account() {
@@ -1287,19 +2259,42 @@ async fn verify_and_store(
             "The grant belongs to a different account.".to_string(),
         ));
     }
-    grant_changed.then(|| store.save(credentials)).transpose()
+    session
+        .commit_verified_login(grant_changed, store, generation)
+        .await
 }
 
-/// Load the stored grant, if any, as a session for
-/// [`LaunchpadClient::with_hardware_token`].  Nothing is minted until the
-/// first signed request.
+/// Load the stored grant with keyring caching enabled by default (five
+/// minutes). Use [`load_session_with_cache`] for an explicit TTL; there is no
+/// environment-variable override. Nothing is minted until the first signed
+/// request. Under sudo, or for
+/// [`GrantStore::Memory`], persistence is always disabled.
 pub fn load_session(
     store: &GrantStore,
     authenticator: Arc<dyn Authenticator>,
 ) -> Result<Option<HardwareTokenSession>> {
+    load_session_with_cache(store, authenticator, DEFAULT_ACCESS_TOKEN_CACHE_TTL)
+}
+
+/// Load a session with a fixed cross-process cache lifetime. `timeout` is the
+/// cache TTL, not the WebAuthn ceremony timeout. Zero disables persistence;
+/// values above 86400 seconds are rejected. Shortening the TTL applies to the
+/// original mint time, never the time the record is loaded. Tokens are stored
+/// only in the keyring, even when the grant itself uses a file store.
+/// [`HardwareTokenSession::new`] remains memory-only.
+pub fn load_session_with_cache(
+    store: &GrantStore,
+    authenticator: Arc<dyn Authenticator>,
+    timeout: Duration,
+) -> Result<Option<HardwareTokenSession>> {
+    check_cache_ttl(timeout)?;
     store
         .load()?
-        .map(|credentials| HardwareTokenSession::new(credentials, authenticator))
+        .map(|credentials| {
+            let mut session = HardwareTokenSession::new(credentials, authenticator)?;
+            session.configure_cache(store, timeout, true);
+            Ok(session)
+        })
         .transpose()
 }
 
@@ -1534,7 +2529,8 @@ pub async fn issue_hardware_bound_oauth_token(
 /// Revoke one of the authenticated account's hardware-bound grants by its
 /// token key.  Access tokens already minted from it expire as well.
 ///
-/// This does not remove a stored copy; see [`GrantStore::delete`].
+/// This does not remove a stored grant; see [`GrantStore::delete`]. On success
+/// it also attempts to clear the local access-token cache.
 pub async fn revoke_hardware_bound_oauth_token(
     client: &LaunchpadClient,
     token_key: &str,
@@ -1549,7 +2545,9 @@ pub async fn revoke_hardware_bound_oauth_token(
                 ("token_key", token_key),
             ],
         )
-        .await
+        .await?;
+    let _ = clear_cached_access_token();
+    Ok(())
 }
 
 /// Build a `Cookie` header from a response's `Set-Cookie` headers.
@@ -1655,6 +2653,1865 @@ mod tests {
         )
     }
 
+    // -- Cross-process cache -------------------------------------------------
+
+    #[derive(Default)]
+    struct FakeAccessCache {
+        raw: Mutex<Option<Zeroizing<String>>>,
+        locked: Arc<std::sync::atomic::AtomicBool>,
+        fail_read: std::sync::atomic::AtomicBool,
+        fail_write: std::sync::atomic::AtomicBool,
+        fail_delete: std::sync::atomic::AtomicBool,
+        writes: AtomicUsize,
+        epoch: Mutex<Option<String>>,
+        fail_generation: std::sync::atomic::AtomicBool,
+        fail_rotation: std::sync::atomic::AtomicBool,
+        runtime_unavailable: std::sync::atomic::AtomicBool,
+    }
+
+    struct FakeCacheLock(Arc<std::sync::atomic::AtomicBool>);
+    impl CacheLock for FakeCacheLock {}
+    impl Drop for FakeCacheLock {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+
+    impl AccessTokenCache for FakeAccessCache {
+        fn lock(&self) -> Result<Box<dyn CacheLock>> {
+            if self.runtime_unavailable.load(Ordering::SeqCst) {
+                return Err(cache_error());
+            }
+            self.locked
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .map_err(|_| cache_error())?;
+            Ok(Box::new(FakeCacheLock(Arc::clone(&self.locked))))
+        }
+        fn mutation_lock(&self) -> Result<Option<Box<dyn CacheLock>>> {
+            if self.runtime_unavailable.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+            self.lock().map(Some)
+        }
+        fn read(&self) -> Result<Option<Zeroizing<String>>> {
+            if self.fail_read.load(Ordering::SeqCst) {
+                return Err(cache_error());
+            }
+            Ok(self.raw.lock().unwrap().clone())
+        }
+        fn write(&self, raw: &str) -> Result<()> {
+            if self.fail_write.load(Ordering::SeqCst) {
+                return Err(cache_error());
+            }
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            *self.raw.lock().unwrap() = Some(Zeroizing::new(raw.to_owned()));
+            Ok(())
+        }
+        fn delete(&self) -> Result<()> {
+            if self.fail_delete.load(Ordering::SeqCst) {
+                return Err(cache_error());
+            }
+            *self.raw.lock().unwrap() = None;
+            Ok(())
+        }
+        fn generation(&self) -> Result<String> {
+            if self.runtime_unavailable.load(Ordering::SeqCst)
+                || self.fail_generation.load(Ordering::SeqCst)
+            {
+                return Err(cache_error());
+            }
+            Ok(self
+                .epoch
+                .lock()
+                .unwrap()
+                .get_or_insert_with(|| "0".repeat(64))
+                .clone())
+        }
+        fn rotate_generation(&self) -> Result<String> {
+            if self.fail_rotation.load(Ordering::SeqCst) {
+                return Err(cache_error());
+            }
+            if self.runtime_unavailable.load(Ordering::SeqCst)
+                || self.fail_generation.load(Ordering::SeqCst)
+            {
+                return Err(cache_error());
+            }
+            let value = new_cache_generation();
+            *self.epoch.lock().unwrap() = Some(value.clone());
+            Ok(value)
+        }
+    }
+
+    struct FakeCacheClock(Mutex<DateTime<Utc>>);
+    impl FakeCacheClock {
+        fn new() -> Self {
+            Self(Mutex::new(Utc::now()))
+        }
+        fn advance(&self, delta: TimeDelta) {
+            *self.0.lock().unwrap() += delta;
+        }
+    }
+    impl CacheClock for FakeCacheClock {
+        fn now(&self) -> DateTime<Utc> {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    fn cache_test_record(
+        owner: &HardwareTokenCredentials,
+        now: DateTime<Utc>,
+    ) -> AccessCacheRecord {
+        let ttl = DEFAULT_ACCESS_TOKEN_CACHE_TTL;
+        let expiry = now + TimeDelta::hours(1);
+        AccessCacheRecord {
+            version: 2,
+            binding: cache_binding(owner),
+            token: "cached-access".into(),
+            secret: "cached-secret".into(),
+            minted_at: now,
+            server_expires_at: expiry,
+            deadline: token_deadline(now, expiry, ttl).unwrap(),
+            ttl,
+            generation: "0".repeat(64),
+        }
+    }
+
+    fn cache_test_session(
+        server: &mockito::ServerGuard,
+        cache: &Arc<FakeAccessCache>,
+        clock: &Arc<FakeCacheClock>,
+        authenticator: &Arc<FakeAuthenticator>,
+        ttl: Duration,
+    ) -> HardwareTokenSession {
+        let mut session = session(server, Arc::clone(authenticator), grant());
+        session.cache_timeout = ttl;
+        if !ttl.is_zero() {
+            session.cache_policy = Some(CachePolicy {
+                backend: cache.clone(),
+                ttl,
+                store: GrantStore::Memory,
+                enabled: std::sync::atomic::AtomicBool::new(true),
+            });
+        }
+        session.clock = clock.clone();
+        session
+    }
+
+    async fn cache_mint_mocks(server: &mut mockito::ServerGuard, clock: &Arc<FakeCacheClock>) {
+        server
+            .mock("POST", "/+hw-challenge")
+            .with_body(challenge_body("launchpad.net", "discouraged"))
+            .create_async()
+            .await;
+        let clock = Arc::clone(clock);
+        let counter = AtomicUsize::new(0);
+        server
+            .mock("POST", "/+hw-access-token")
+            .with_body_from_request(move |_| {
+                let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("oauth_token", &format!("access-{n}"))
+                    .append_pair("oauth_token_secret", &format!("secret-{n}"))
+                    .append_pair(
+                        "expires_at",
+                        &(clock.now() + TimeDelta::hours(1)).to_rfc3339(),
+                    )
+                    .finish()
+                    .into_bytes()
+            })
+            .create_async()
+            .await;
+    }
+
+    #[test]
+    fn cache_deadlines_are_fixed_and_conservatively_validated() {
+        let owner = HardwareTokenCredentials::new(grant(), HARDWARE_CONSUMER_KEY).unwrap();
+        let now = Utc::now();
+        let mut record = cache_test_record(&owner, now);
+        let ttl = DEFAULT_ACCESS_TOKEN_CACHE_TTL;
+        assert_eq!(record.deadline, now + TimeDelta::seconds(300));
+        assert!(
+            record
+                .credentials(&owner, ttl, now + TimeDelta::seconds(299))
+                .is_some()
+        );
+        assert!(record.credentials(&owner, ttl, record.deadline).is_none());
+        assert!(
+            record
+                .credentials(&owner, ttl, now - TimeDelta::seconds(1))
+                .is_none()
+        );
+        assert!(record.credentials(&owner, Duration::ZERO, now).is_none());
+        assert!(
+            record
+                .credentials(
+                    &owner,
+                    Duration::from_secs(100),
+                    now + TimeDelta::seconds(100)
+                )
+                .is_none()
+        );
+        assert!(
+            record
+                .credentials(&owner, MAX_ACCESS_TOKEN_CACHE_TTL, record.deadline)
+                .is_none()
+        );
+        assert_eq!(
+            token_deadline(now, now + TimeDelta::seconds(100), ttl),
+            Some(now + TimeDelta::seconds(90))
+        );
+        assert_eq!(
+            token_deadline(now, now + TimeDelta::hours(1), MAX_ACCESS_TOKEN_CACHE_TTL),
+            Some(now + TimeDelta::seconds(3540))
+        );
+        assert_eq!(token_deadline(now, now, ttl), None);
+        record.deadline += TimeDelta::seconds(1);
+        assert!(record.credentials(&owner, ttl, now).is_none());
+        record.deadline -= TimeDelta::seconds(1);
+        record.version = 3;
+        assert!(record.credentials(&owner, ttl, now).is_none());
+        record.version = 2;
+        record.ttl = Duration::from_secs(86401);
+        assert!(record.credentials(&owner, ttl, now).is_none());
+        assert!(check_cache_ttl(Duration::from_secs(86401)).is_err());
+        assert!(check_cache_ttl(MAX_ACCESS_TOKEN_CACHE_TTL).is_ok());
+    }
+
+    #[test]
+    fn cache_binds_every_grant_context_field() {
+        let owner = HardwareTokenCredentials::new(grant(), HARDWARE_CONSUMER_KEY).unwrap();
+        let now = Utc::now();
+        let record = cache_test_record(&owner, now);
+        let mut variants = Vec::new();
+        for grant in [
+            HardwareTokenGrant::new("other-token", "refresh-secret", "example-user").unwrap(),
+            HardwareTokenGrant::new("refresh-token", "other-secret", "example-user").unwrap(),
+            HardwareTokenGrant::new("refresh-token", "refresh-secret", "other-account").unwrap(),
+            grant().with_credential_id("AAAA").unwrap(),
+        ] {
+            variants.push(HardwareTokenCredentials::new(grant, HARDWARE_CONSUMER_KEY).unwrap());
+        }
+        let mut changed = owner.clone();
+        changed.consumer = "other-consumer".into();
+        variants.push(changed);
+        let mut changed = owner.clone();
+        changed.origin = "https://staging.launchpad.net".into();
+        variants.push(changed);
+        let mut changed = owner.clone();
+        changed.service_root = "https://api.staging.launchpad.net/".into();
+        variants.push(changed);
+        for changed in variants {
+            assert!(
+                record
+                    .credentials(&changed, DEFAULT_ACCESS_TOKEN_CACHE_TTL, now)
+                    .is_none()
+            );
+        }
+        let raw = serde_json::to_string(&record).unwrap();
+        for forbidden in [
+            "refresh-token",
+            "refresh-secret",
+            "example-user",
+            "assertion",
+            "PIN",
+        ] {
+            assert!(!raw.contains(forbidden));
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_reuses_without_sliding_and_clear_preserves_in_process_tokens() {
+        let mut server = mockito::Server::new_async().await;
+        let clock = Arc::new(FakeCacheClock::new());
+        let cache = Arc::new(FakeAccessCache::default());
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        cache_mint_mocks(&mut server, &clock).await;
+        let ttl = DEFAULT_ACCESS_TOKEN_CACHE_TTL;
+        let first = cache_test_session(&server, &cache, &clock, &authenticator, ttl);
+        assert_eq!(
+            first.access_credentials().await.unwrap().access_token.token,
+            "access-1"
+        );
+        let raw = cache.read().unwrap().unwrap();
+        clock.advance(TimeDelta::seconds(299));
+        let second = cache_test_session(&server, &cache, &clock, &authenticator, ttl);
+        assert_eq!(
+            second
+                .access_credentials()
+                .await
+                .unwrap()
+                .access_token
+                .token,
+            "access-1"
+        );
+        assert_eq!(*cache.read().unwrap().unwrap(), *raw);
+        assert_eq!(cache.writes.load(Ordering::SeqCst), 1);
+        clock.advance(TimeDelta::seconds(1));
+        assert_eq!(
+            second
+                .access_credentials()
+                .await
+                .unwrap()
+                .access_token
+                .token,
+            "access-2"
+        );
+        clear_access_cache(cache.as_ref()).unwrap();
+        let retained = second.access_credentials().await.unwrap();
+        assert_eq!(retained.access_token.token, "access-2");
+        assert!(cache.read().unwrap().is_none());
+        let third = cache_test_session(&server, &cache, &clock, &authenticator, ttl);
+        let fresh = third.access_credentials().await.unwrap();
+        assert_eq!(fresh.access_token.token, "access-3");
+        assert!(
+            third
+                .invalidate_rejected_access_token(&fresh)
+                .await
+                .unwrap()
+        );
+        assert!(cache.read().unwrap().is_none());
+        assert_eq!(
+            third.access_credentials().await.unwrap().access_token.token,
+            "access-4"
+        );
+        assert_eq!(authenticator.requests.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn cache_shorter_configuration_uses_original_mint_time_and_zero_is_memory_only() {
+        let mut server = mockito::Server::new_async().await;
+        let clock = Arc::new(FakeCacheClock::new());
+        let cache = Arc::new(FakeAccessCache::default());
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        cache_mint_mocks(&mut server, &clock).await;
+        let first = cache_test_session(
+            &server,
+            &cache,
+            &clock,
+            &authenticator,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+        );
+        first.access_credentials().await.unwrap();
+        clock.advance(TimeDelta::seconds(100));
+        let shorter = cache_test_session(
+            &server,
+            &cache,
+            &clock,
+            &authenticator,
+            Duration::from_secs(100),
+        );
+        assert_eq!(
+            shorter
+                .access_credentials()
+                .await
+                .unwrap()
+                .access_token
+                .token,
+            "access-2"
+        );
+        let raw = cache.read().unwrap().unwrap();
+        let disabled = cache_test_session(&server, &cache, &clock, &authenticator, Duration::ZERO);
+        assert_eq!(
+            disabled
+                .access_credentials()
+                .await
+                .unwrap()
+                .access_token
+                .token,
+            "access-3"
+        );
+        assert_eq!(
+            disabled
+                .access_credentials()
+                .await
+                .unwrap()
+                .access_token
+                .token,
+            "access-3"
+        );
+        assert_eq!(*cache.read().unwrap().unwrap(), *raw);
+    }
+
+    #[tokio::test]
+    async fn cache_backend_failures_and_malformed_records_mint_fresh() {
+        let mut server = mockito::Server::new_async().await;
+        let clock = Arc::new(FakeCacheClock::new());
+        let cache = Arc::new(FakeAccessCache::default());
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        cache_mint_mocks(&mut server, &clock).await;
+        let session = cache_test_session(
+            &server,
+            &cache,
+            &clock,
+            &authenticator,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+        );
+        for raw in ["{SECRET", r#"{"version":1,"token":"SECRET"}"#] {
+            cache.write(raw).unwrap();
+            let fresh_session = cache_test_session(
+                &server,
+                &cache,
+                &clock,
+                &authenticator,
+                DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+            );
+            fresh_session.access_credentials().await.unwrap();
+        }
+        cache.fail_read.store(true, Ordering::SeqCst);
+        let writes = cache.writes.load(Ordering::SeqCst);
+        assert_eq!(
+            session
+                .access_credentials()
+                .await
+                .unwrap()
+                .access_token
+                .token,
+            "access-3"
+        );
+        assert_eq!(cache.writes.load(Ordering::SeqCst), writes);
+        assert_eq!(
+            session
+                .access_credentials()
+                .await
+                .unwrap()
+                .access_token
+                .token,
+            "access-3"
+        );
+        cache.fail_read.store(false, Ordering::SeqCst);
+        cache.delete().unwrap();
+        cache.fail_write.store(true, Ordering::SeqCst);
+        let session = cache_test_session(
+            &server,
+            &cache,
+            &clock,
+            &authenticator,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+        );
+        assert_eq!(
+            session
+                .access_credentials()
+                .await
+                .unwrap()
+                .access_token
+                .token,
+            "access-4"
+        );
+        assert!(cache.read().unwrap().is_none());
+        assert_eq!(
+            session
+                .access_credentials()
+                .await
+                .unwrap()
+                .access_token
+                .token,
+            "access-4"
+        );
+        cache.fail_delete.store(true, Ordering::SeqCst);
+        assert!(clear_access_cache(cache.as_ref()).is_err());
+        cache.fail_delete.store(false, Ordering::SeqCst);
+        let lock = cache.lock().unwrap();
+        assert!(clear_access_cache(cache.as_ref()).is_err());
+        let session = cache_test_session(
+            &server,
+            &cache,
+            &clock,
+            &authenticator,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+        );
+        assert_eq!(
+            session
+                .access_credentials()
+                .await
+                .unwrap()
+                .access_token
+                .token,
+            "access-5"
+        );
+        assert!(cache.read().unwrap().is_none());
+        assert_eq!(
+            session
+                .access_credentials()
+                .await
+                .unwrap()
+                .access_token
+                .token,
+            "access-5"
+        );
+        clock.advance(TimeDelta::seconds(300));
+        assert_eq!(
+            session
+                .access_credentials()
+                .await
+                .unwrap()
+                .access_token
+                .token,
+            "access-6"
+        );
+        assert_eq!(
+            session
+                .access_credentials()
+                .await
+                .unwrap()
+                .access_token
+                .token,
+            "access-6"
+        );
+        assert_eq!(authenticator.requests.lock().unwrap().len(), 6);
+        drop(lock);
+        clear_access_cache(cache.as_ref()).unwrap();
+        clear_access_cache(cache.as_ref()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_cached_token_is_not_reloaded_when_deletion_fails() {
+        let mut server = mockito::Server::new_async().await;
+        let clock = Arc::new(FakeCacheClock::new());
+        let cache = Arc::new(FakeAccessCache::default());
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        let owner = HardwareTokenCredentials::new(grant(), HARDWARE_CONSUMER_KEY).unwrap();
+        cache
+            .write(&serde_json::to_string(&cache_test_record(&owner, clock.now())).unwrap())
+            .unwrap();
+        let session = cache_test_session(
+            &server,
+            &cache,
+            &clock,
+            &authenticator,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+        );
+        assert_eq!(
+            session
+                .access_credentials()
+                .await
+                .unwrap()
+                .access_token
+                .token,
+            "cached-access"
+        );
+        let rejected = session.access_credentials().await.unwrap();
+        cache.fail_delete.store(true, Ordering::SeqCst);
+        assert!(
+            session
+                .invalidate_rejected_access_token(&rejected)
+                .await
+                .is_err()
+        );
+        let challenge = server
+            .mock("POST", "/+hw-challenge")
+            .with_status(410)
+            .expect(2)
+            .create_async()
+            .await;
+        for _ in 0..2 {
+            assert!(matches!(
+                session.access_credentials().await,
+                Err(LpError::HardwareTokenGrantRejected)
+            ));
+        }
+        challenge.assert_async().await;
+        assert!(authenticator.requests.lock().unwrap().is_empty());
+        assert_eq!(cache.writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn replaced_or_deleted_live_grant_cannot_repopulate_cache() {
+        let mut server = mockito::Server::new_async().await;
+        let clock = Arc::new(FakeCacheClock::new());
+        let cache = Arc::new(FakeAccessCache::default());
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        cache_mint_mocks(&mut server, &clock).await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("grant.json");
+        let mut session = cache_test_session(
+            &server,
+            &cache,
+            &clock,
+            &authenticator,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+        );
+        write_private_file(&path, session.credentials.to_json().unwrap().as_bytes()).unwrap();
+        session.cache_policy.as_mut().unwrap().store = GrantStore::File(path.clone());
+        session.access_credentials().await.unwrap();
+        let replacement = HardwareTokenCredentials::new(
+            HardwareTokenGrant::new("replacement", "replacement-secret", "example-user").unwrap(),
+            HARDWARE_CONSUMER_KEY,
+        )
+        .unwrap();
+        write_private_file(&path, replacement.to_json().unwrap().as_bytes()).unwrap();
+        // Local tokens survive grant deletion/replacement too. They cannot
+        // repopulate the cache; after their deadline the live store is checked.
+        assert!(session.access_credentials().await.is_ok());
+        clock.advance(TimeDelta::seconds(300));
+        assert!(session.access_credentials().await.is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(session.access_credentials().await.is_err());
+        assert_eq!(authenticator.requests.lock().unwrap().len(), 1);
+        assert_eq!(cache.writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn expired_future_and_wrong_binding_records_never_reuse() {
+        let mut server = mockito::Server::new_async().await;
+        let clock = Arc::new(FakeCacheClock::new());
+        let cache = Arc::new(FakeAccessCache::default());
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        cache_mint_mocks(&mut server, &clock).await;
+        let session = cache_test_session(
+            &server,
+            &cache,
+            &clock,
+            &authenticator,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+        );
+        let mut expired =
+            cache_test_record(&session.credentials, clock.now() - TimeDelta::seconds(300));
+        let future = cache_test_record(&session.credentials, clock.now() + TimeDelta::seconds(1));
+        let mut wrong_binding = cache_test_record(&session.credentials, clock.now());
+        wrong_binding.binding = "wrong-grant".into();
+        // Empty credentials are invalid even if all timestamps/binding match.
+        let mut empty = cache_test_record(&session.credentials, clock.now());
+        empty.secret.clear();
+        for record in [&mut expired, &mut wrong_binding, &mut empty] {
+            cache
+                .write(&serde_json::to_string(record).unwrap())
+                .unwrap();
+            let session = cache_test_session(
+                &server,
+                &cache,
+                &clock,
+                &authenticator,
+                DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+            );
+            assert_ne!(
+                session
+                    .access_credentials()
+                    .await
+                    .unwrap()
+                    .access_token
+                    .token,
+                "cached-access"
+            );
+        }
+        cache
+            .write(&serde_json::to_string(&future).unwrap())
+            .unwrap();
+        session.access_credentials().await.unwrap();
+        assert_eq!(authenticator.requests.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn cache_policy_child() {
+        let Some(path) = std::env::var_os("LPCLI_TEST_CACHE_POLICY_GRANT") else {
+            return;
+        };
+        let store = GrantStore::File(PathBuf::from(path));
+        let authenticator: Arc<dyn Authenticator> = Arc::new(FakeAuthenticator::default());
+        let expected = std::env::var("LPCLI_TEST_CACHE_POLICY_EXPECT").unwrap();
+        let loaded = match std::env::var("LPCLI_TEST_CACHE_TIMEOUT") {
+            Ok(value) => load_session_with_cache(
+                &store,
+                Arc::clone(&authenticator),
+                Duration::from_secs(value.parse().unwrap()),
+            ),
+            Err(_) => load_session(&store, Arc::clone(&authenticator)),
+        };
+        if expected == "invalid" {
+            assert!(loaded.is_err());
+            return;
+        }
+        let session = loaded.unwrap().unwrap();
+        if expected == "disabled" {
+            assert!(session.cache_policy.is_none());
+        } else {
+            assert_eq!(
+                session.cache_policy.as_ref().unwrap().ttl.as_secs(),
+                expected.parse::<u64>().unwrap()
+            );
+        }
+        let disabled = load_session_with_cache(&store, Arc::clone(&authenticator), Duration::ZERO)
+            .unwrap()
+            .unwrap();
+        assert!(disabled.cache_policy.is_none());
+        assert!(
+            load_session_with_cache(
+                &store,
+                Arc::clone(&authenticator),
+                Duration::from_secs(86401)
+            )
+            .is_err()
+        );
+        let owner = HardwareTokenCredentials::new(grant(), HARDWARE_CONSUMER_KEY).unwrap();
+        assert!(
+            HardwareTokenSession::new(owner, authenticator)
+                .unwrap()
+                .cache_policy
+                .is_none()
+        );
+        if is_sudo() {
+            assert!(clear_cached_access_token().is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn default_configurable_cache_policy_and_sudo_are_enforced() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("grant.json");
+        let owner = HardwareTokenCredentials::new(grant(), HARDWARE_CONSUMER_KEY).unwrap();
+        write_private_file(&path, owner.to_json().unwrap().as_bytes()).unwrap();
+        // Child processes avoid mutating the environment of parallel tests.
+        for (value, sudo, expected) in [
+            (None, false, "300"),
+            (Some("0"), false, "disabled"),
+            (Some("42"), false, "42"),
+            (Some("86400"), false, "86400"),
+            (Some("86401"), false, "invalid"),
+            (None, true, "disabled"),
+            (Some("86400"), true, "disabled"),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", "hardware_tokens::tests::cache_policy_child"])
+                .env("LPCLI_TEST_CACHE_POLICY_GRANT", &path)
+                .env("LPCLI_TEST_CACHE_POLICY_EXPECT", expected)
+                .env_remove("SUDO_USER")
+                .env_remove("SUDO_UID")
+                .env_remove("SUDO_GID")
+                // A former TTL environment variable must never override the
+                // explicit Duration or the library's default.
+                .env("LP_HARDWARE_TOKEN_CACHE_TTL", "invalid-unused-value")
+                .env_remove("LPCLI_TEST_CACHE_TIMEOUT");
+            if let Some(value) = value {
+                child.env("LPCLI_TEST_CACHE_TIMEOUT", value);
+            }
+            if sudo {
+                child.env("SUDO_UID", "1000");
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn login_cache_timeout_defaults_and_validation() {
+        assert_eq!(
+            HardwareLogin::default().cache_timeout,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL
+        );
+        assert_eq!(
+            HardwareLogin::new().cache_timeout,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL
+        );
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        let invalid = HardwareLogin::new()
+            .store(GrantStore::Memory)
+            .cache_timeout(Duration::from_secs(86401));
+        let error = login_with_hardware_token(invalid, authenticator.clone())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("86400"));
+        assert!(authenticator.requests.lock().unwrap().is_empty());
+        for ttl in [
+            Duration::ZERO,
+            Duration::from_secs(42),
+            MAX_ACCESS_TOKEN_CACHE_TTL,
+        ] {
+            let login = HardwareLogin::default().cache_timeout(ttl);
+            assert_eq!(login.cache_timeout, ttl);
+            assert!(check_cache_ttl(login.cache_timeout).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_clear_login_token_is_not_published_but_later_mints_can_persist() {
+        let mut server = mockito::Server::new_async().await;
+        let cache = Arc::new(FakeAccessCache::default());
+        let clock = Arc::new(FakeCacheClock::new());
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        cache_mint_mocks(&mut server, &clock).await;
+        let ttl = Duration::from_secs(42);
+        let login = cache_test_session(&server, &cache, &clock, &authenticator, ttl);
+        let policy = login.cache_policy.as_ref().unwrap();
+        policy.enabled.store(false, Ordering::SeqCst);
+        let generation = login.snapshot_generation().unwrap();
+        cache
+            .write(
+                &serde_json::to_string(&cache_test_record(&login.credentials, clock.now()))
+                    .unwrap(),
+            )
+            .unwrap();
+        // Login must mint fresh without reading, modifying, or publishing to
+        // the cache before verification. Model clear during account verification.
+        assert_eq!(
+            login.access_credentials().await.unwrap().access_token.token,
+            "access-1"
+        );
+        assert_eq!(cache.writes.load(Ordering::SeqCst), 1);
+        clear_access_cache(cache.as_ref()).unwrap();
+        login
+            .commit_verified_login(false, &GrantStore::Memory, Some(&generation))
+            .await
+            .unwrap();
+        assert_eq!(
+            login.access_credentials().await.unwrap().access_token.token,
+            "access-1"
+        );
+        assert!(cache.read().unwrap().is_none());
+        assert_eq!(cache.writes.load(Ordering::SeqCst), 1);
+        // The cleared login token is not visible to another invocation.
+        let other = cache_test_session(&server, &cache, &clock, &authenticator, ttl);
+        assert_eq!(
+            other.access_credentials().await.unwrap().access_token.token,
+            "access-2"
+        );
+        clear_access_cache(cache.as_ref()).unwrap();
+        clock.advance(TimeDelta::seconds(42));
+        assert_eq!(
+            login.access_credentials().await.unwrap().access_token.token,
+            "access-3"
+        );
+        assert!(cache.read().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn verified_import_seeds_cache_and_failed_verification_preserves_grant() {
+        for verified in [false, true] {
+            let mut server = mockito::Server::new_async().await;
+            let cache = Arc::new(FakeAccessCache::default());
+            let clock = Arc::new(FakeCacheClock::new());
+            let authenticator = Arc::new(FakeAuthenticator::default());
+            cache_mint_mocks(&mut server, &clock).await;
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("grant.json");
+            let store = GrantStore::File(path.clone());
+            let previous = HardwareTokenCredentials::new(
+                HardwareTokenGrant::new("previous", "previous-secret", "example-user").unwrap(),
+                HARDWARE_CONSUMER_KEY,
+            )
+            .unwrap();
+            write_private_file(&path, previous.to_json().unwrap().as_bytes()).unwrap();
+            let mut session = cache_test_session(
+                &server,
+                &cache,
+                &clock,
+                &authenticator,
+                DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+            );
+            let policy = session.cache_policy.as_mut().unwrap();
+            policy.store = store.clone();
+            policy.enabled.store(false, Ordering::SeqCst);
+            let generation = session.snapshot_generation().unwrap();
+            let session = Arc::new(session);
+            server
+                .mock("GET", Matcher::Regex("^/devel/?$".into()))
+                .with_body(json!({"me_link": format!("{}/me", server.url())}).to_string())
+                .create_async()
+                .await;
+            server.mock("GET", "/me")
+                .with_body(json!({"name": if verified { "example-user" } else { "wrong-account" }, "self_link": format!("{}/me", server.url())}).to_string())
+                .create_async().await;
+            let client = LaunchpadClient::with_hardware_token(session.clone())
+                .with_base_url(format!("{}/devel", server.url()));
+            let result = verify_and_store(
+                &client,
+                &session.credentials,
+                true,
+                &store,
+                &session,
+                Some(&generation),
+            )
+            .await;
+            if verified {
+                assert!(result.is_ok());
+                assert_eq!(store.load().unwrap().unwrap(), session.credentials);
+                let committed_generation = cache.generation().unwrap();
+                assert_ne!(committed_generation, generation);
+                let record: AccessCacheRecord =
+                    serde_json::from_str(&cache.read().unwrap().unwrap()).unwrap();
+                assert_eq!(record.generation, committed_generation);
+                let mut next = cache_test_session(
+                    &server,
+                    &cache,
+                    &clock,
+                    &authenticator,
+                    DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+                );
+                next.cache_policy.as_mut().unwrap().store = store.clone();
+                assert_eq!(
+                    next.access_credentials().await.unwrap().access_token.token,
+                    "access-1"
+                );
+                assert_eq!(cache.writes.load(Ordering::SeqCst), 1);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(cache.generation().unwrap(), generation);
+                assert_eq!(store.load().unwrap().unwrap(), previous);
+                assert!(cache.read().unwrap().is_none());
+            }
+            assert_eq!(authenticator.requests.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_verified_imports_consume_snapshot_and_seed_commit_epoch() {
+        for first_wins in [true, false] {
+            let mut server = mockito::Server::new_async().await;
+            let cache = Arc::new(FakeAccessCache::default());
+            let clock = Arc::new(FakeCacheClock::new());
+            let authenticator = Arc::new(FakeAuthenticator::default());
+            cache_mint_mocks(&mut server, &clock).await;
+            let directory = tempfile::tempdir().unwrap();
+            let store = GrantStore::File(directory.path().join("grant.json"));
+            let previous = HardwareTokenCredentials::new(
+                HardwareTokenGrant::new("previous", "previous-secret", "example-user").unwrap(),
+                HARDWARE_CONSUMER_KEY,
+            )
+            .unwrap();
+            store.save_raw(&previous).unwrap();
+            let mut first = cache_test_session(
+                &server,
+                &cache,
+                &clock,
+                &authenticator,
+                DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+            );
+            let mut second = cache_test_session(
+                &server,
+                &cache,
+                &clock,
+                &authenticator,
+                DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+            );
+            second.credentials = HardwareTokenCredentials::new(
+                HardwareTokenGrant::new("second-refresh", "second-refresh-secret", "example-user")
+                    .unwrap(),
+                HARDWARE_CONSUMER_KEY,
+            )
+            .unwrap();
+            for session in [&mut first, &mut second] {
+                let policy = session.cache_policy.as_mut().unwrap();
+                policy.store = store.clone();
+                policy.enabled.store(false, Ordering::SeqCst);
+            }
+            let original = first.snapshot_grant_generation(&store).unwrap().unwrap();
+            assert_eq!(
+                second.snapshot_grant_generation(&store).unwrap().unwrap(),
+                original
+            );
+            let first = Arc::new(first);
+            let second = Arc::new(second);
+            let root = server
+                .mock("GET", Matcher::Regex("^/devel/?$".into()))
+                .with_body(json!({"me_link": format!("{}/me", server.url())}).to_string())
+                .expect(2)
+                .create_async()
+                .await;
+            let me = server
+                .mock("GET", "/me")
+                .with_body(
+                    json!({"name": "example-user", "self_link": format!("{}/me", server.url())})
+                        .to_string(),
+                )
+                .expect(2)
+                .create_async()
+                .await;
+            let minted_at = clock.now();
+            // Both imports authenticate before either commits, and both hold
+            // the same pre-verification epoch. No scheduling or sleeps needed.
+            for session in [&first, &second] {
+                let client = LaunchpadClient::with_hardware_token(session.clone())
+                    .with_base_url(format!("{}/devel", server.url()));
+                assert_eq!(current_person(&client).await.unwrap().name, "example-user");
+            }
+            root.assert_async().await;
+            me.assert_async().await;
+            assert_eq!(cache.writes.load(Ordering::SeqCst), 0);
+            clock.advance(TimeDelta::seconds(100));
+            let (winner, loser, expected_access) = if first_wins {
+                (&first, &second, "access-1")
+            } else {
+                (&second, &first, "access-2")
+            };
+            winner
+                .commit_verified_login(true, &store, Some(&original))
+                .await
+                .unwrap();
+            let committed = cache.generation().unwrap();
+            assert_ne!(committed, original);
+            let raw = cache.read().unwrap().unwrap();
+            let record: AccessCacheRecord = serde_json::from_str(&raw).unwrap();
+            assert_eq!(record.generation, committed);
+            assert_eq!(record.binding, cache_binding(&winner.credentials));
+            assert_eq!(record.token, expected_access);
+            assert_eq!(record.minted_at, minted_at);
+            assert_eq!(record.deadline, minted_at + TimeDelta::seconds(300));
+            assert!(
+                loser
+                    .commit_verified_login(true, &store, Some(&original))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(store.load().unwrap().unwrap(), winner.credentials);
+            assert_eq!(cache.generation().unwrap(), committed);
+            assert_eq!(*cache.read().unwrap().unwrap(), *raw);
+            assert_eq!(cache.writes.load(Ordering::SeqCst), 1);
+            // The very next invocation can reuse the winner's verified token.
+            let mut next = cache_test_session(
+                &server,
+                &cache,
+                &clock,
+                &authenticator,
+                DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+            );
+            next.credentials = winner.credentials.clone();
+            next.cache_policy.as_mut().unwrap().store = store.clone();
+            assert_eq!(
+                next.access_credentials().await.unwrap().access_token.token,
+                expected_access
+            );
+            assert_eq!(authenticator.requests.lock().unwrap().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn uncached_import_succeeds_without_coordination_and_publishes_no_cache() {
+        let mut server = mockito::Server::new_async().await;
+        let cache = Arc::new(FakeAccessCache::default());
+        cache.runtime_unavailable.store(true, Ordering::SeqCst);
+        let clock = Arc::new(FakeCacheClock::new());
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        cache_mint_mocks(&mut server, &clock).await;
+        let directory = tempfile::tempdir().unwrap();
+        let store = GrantStore::File(directory.path().join("grant.json"));
+        let mut login = cache_test_session(
+            &server,
+            &cache,
+            &clock,
+            &authenticator,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+        );
+        login.cache_policy.as_mut().unwrap().store = store.clone();
+        login
+            .cache_policy
+            .as_ref()
+            .unwrap()
+            .enabled
+            .store(false, Ordering::SeqCst);
+        assert!(login.snapshot_grant_generation(&store).unwrap().is_none());
+        let token = login.access_credentials().await.unwrap();
+        // When no coordination directory is available (e.g. sudo with an explicit
+        // grant file or read-only home without /run/user), verified persisted
+        // imports still save the grant uncached and publish nothing to keyring.
+        assert_eq!(
+            login
+                .commit_verified_login(true, &store, None)
+                .await
+                .unwrap(),
+            Some(StoredIn::File(directory.path().join("grant.json")))
+        );
+        assert_eq!(store.load().unwrap().as_ref(), Some(&login.credentials));
+        assert!(cache.read().unwrap().is_none());
+        assert_eq!(cache.writes.load(Ordering::SeqCst), 0);
+        // If coordination becomes available mid-login, an unfenced snapshot is
+        // rejected rather than bypassing concurrent fenced commits/logouts.
+        cache.runtime_unavailable.store(false, Ordering::SeqCst);
+        assert!(
+            login
+                .commit_verified_login(true, &store, None)
+                .await
+                .is_err()
+        );
+        cache.runtime_unavailable.store(true, Ordering::SeqCst);
+        // Non-mutating and memory-only logins also keep working uncached.
+        with_grant_cache_change(&store, cache.as_ref(), || store.delete_raw()).unwrap();
+        assert!(
+            login
+                .commit_verified_login(false, &store, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(login.access_credentials().await.unwrap(), token);
+        assert_eq!(
+            login
+                .commit_verified_login(true, &GrantStore::Memory, None)
+                .await
+                .unwrap(),
+            Some(StoredIn::Memory)
+        );
+        assert!(store.load().unwrap().is_none());
+        assert_eq!(cache.writes.load(Ordering::SeqCst), 0);
+        assert_eq!(authenticator.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn verified_import_rotation_failure_preserves_grant_and_cache() {
+        let server = mockito::Server::new_async().await;
+        let cache = Arc::new(FakeAccessCache::default());
+        let clock = Arc::new(FakeCacheClock::new());
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        let directory = tempfile::tempdir().unwrap();
+        let store = GrantStore::File(directory.path().join("grant.json"));
+        let previous = HardwareTokenCredentials::new(
+            HardwareTokenGrant::new("previous", "previous-secret", "example-user").unwrap(),
+            HARDWARE_CONSUMER_KEY,
+        )
+        .unwrap();
+        store.save_raw(&previous).unwrap();
+        let mut login = cache_test_session(
+            &server,
+            &cache,
+            &clock,
+            &authenticator,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+        );
+        login.cache_policy.as_mut().unwrap().store = store.clone();
+        cache
+            .write(&serde_json::to_string(&cache_test_record(&previous, clock.now())).unwrap())
+            .unwrap();
+        let original = login.snapshot_grant_generation(&store).unwrap().unwrap();
+        let raw = cache.read().unwrap().unwrap();
+        cache.fail_rotation.store(true, Ordering::SeqCst);
+        assert!(
+            login
+                .commit_verified_login(true, &store, Some(&original))
+                .await
+                .is_err()
+        );
+        assert_eq!(store.load().unwrap().unwrap(), previous);
+        assert_eq!(cache.generation().unwrap(), original);
+        assert_eq!(*cache.read().unwrap().unwrap(), *raw);
+        assert_eq!(cache.writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn pre_logout_verified_import_cannot_restore_grant_or_seed_cache() {
+        let mut server = mockito::Server::new_async().await;
+        let cache = Arc::new(FakeAccessCache::default());
+        let clock = Arc::new(FakeCacheClock::new());
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        cache_mint_mocks(&mut server, &clock).await;
+        let directory = tempfile::tempdir().unwrap();
+        let store = GrantStore::File(directory.path().join("grant.json"));
+        let mut login = cache_test_session(
+            &server,
+            &cache,
+            &clock,
+            &authenticator,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+        );
+        let policy = login.cache_policy.as_mut().unwrap();
+        policy.store = store.clone();
+        policy.enabled.store(false, Ordering::SeqCst);
+        store.save_raw(&login.credentials).unwrap();
+        let generation = login.snapshot_generation().unwrap();
+        login.access_credentials().await.unwrap();
+        // Model logout while current_person is verifying the new import.
+        with_grant_cache_change(&store, cache.as_ref(), || store.delete_raw()).unwrap();
+        assert!(
+            login
+                .commit_verified_login(true, &store, Some(&generation))
+                .await
+                .is_err()
+        );
+        assert!(store.load().unwrap().is_none());
+        assert!(cache.read().unwrap().is_none());
+        assert_eq!(cache.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn logout_after_verified_import_checks_cannot_resurrect_grant() {
+        let mut server = mockito::Server::new_async().await;
+        let cache = Arc::new(FakeAccessCache::default());
+        let clock = Arc::new(FakeCacheClock::new());
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        cache_mint_mocks(&mut server, &clock).await;
+        let directory = tempfile::tempdir().unwrap();
+        let store = GrantStore::File(directory.path().join("grant.json"));
+        let previous = HardwareTokenCredentials::new(
+            HardwareTokenGrant::new("previous", "previous-secret", "example-user").unwrap(),
+            HARDWARE_CONSUMER_KEY,
+        )
+        .unwrap();
+        store.save_raw(&previous).unwrap();
+        let mut login = cache_test_session(
+            &server,
+            &cache,
+            &clock,
+            &authenticator,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+        );
+        let policy = login.cache_policy.as_mut().unwrap();
+        policy.store = store.clone();
+        policy.enabled.store(false, Ordering::SeqCst);
+        let generation = login.snapshot_generation().unwrap();
+        login.access_credentials().await.unwrap();
+        let attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let attempted_hook = attempted.clone();
+        let cache_hook = cache.clone();
+        let store_hook = store.clone();
+        let previous_hook = previous.clone();
+        let generation_hook = generation.clone();
+        *login.before_grant_write.lock().unwrap() = Some(Box::new(move || {
+            // Exactly after login's generation checks, before save_raw: logout
+            // and replacement must fail before either grant or epoch changes.
+            assert!(
+                with_grant_cache_change(&store_hook, cache_hook.as_ref(), || store_hook
+                    .delete_raw())
+                .is_err()
+            );
+            assert!(
+                with_grant_cache_change(&store_hook, cache_hook.as_ref(), || store_hook
+                    .save_raw(&previous_hook))
+                .is_err()
+            );
+            assert_eq!(store_hook.load().unwrap().unwrap(), previous_hook);
+            assert_eq!(cache_hook.generation().unwrap(), generation_hook);
+            attempted_hook.store(true, Ordering::SeqCst);
+        }));
+        login
+            .commit_verified_login(true, &store, Some(&generation))
+            .await
+            .unwrap();
+        assert!(attempted.load(Ordering::SeqCst));
+        assert_eq!(store.load().unwrap().unwrap(), login.credentials);
+        assert!(cache.read().unwrap().is_some());
+        // Retry logout after the commit releases the lock. It now succeeds,
+        // and replaying the pre-logout verified import cannot restore the grant.
+        with_grant_cache_change(&store, cache.as_ref(), || store.delete_raw()).unwrap();
+        assert!(store.load().unwrap().is_none());
+        assert!(cache.read().unwrap().is_none());
+        assert!(
+            login
+                .commit_verified_login(true, &store, Some(&generation))
+                .await
+                .is_err()
+        );
+        assert!(store.load().unwrap().is_none());
+        assert!(cache.read().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn contended_verified_import_never_falls_back_to_unlocked_write() {
+        let server = mockito::Server::new_async().await;
+        let cache = Arc::new(FakeAccessCache::default());
+        let clock = Arc::new(FakeCacheClock::new());
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        let directory = tempfile::tempdir().unwrap();
+        let store = GrantStore::File(directory.path().join("grant.json"));
+        let previous = HardwareTokenCredentials::new(
+            HardwareTokenGrant::new("previous", "previous-secret", "example-user").unwrap(),
+            HARDWARE_CONSUMER_KEY,
+        )
+        .unwrap();
+        store.save_raw(&previous).unwrap();
+        let mut login = cache_test_session(
+            &server,
+            &cache,
+            &clock,
+            &authenticator,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+        );
+        login.cache_policy.as_mut().unwrap().store = store.clone();
+        let generation = login.snapshot_generation().unwrap();
+        let lock = cache.lock().unwrap();
+        assert!(login.snapshot_grant_generation(&store).is_err());
+        for snapshot in [None, Some(generation.as_str())] {
+            assert!(
+                login
+                    .commit_verified_login(true, &store, snapshot)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(store.load().unwrap().unwrap(), previous);
+            assert_eq!(cache.generation().unwrap(), generation);
+            assert!(cache.read().unwrap().is_none());
+        }
+        drop(lock);
+        // An import without a protected snapshot must not be promoted into a
+        // trusted mutation context after verification.
+        assert!(
+            login
+                .commit_verified_login(true, &store, None)
+                .await
+                .is_err()
+        );
+        assert_eq!(store.load().unwrap().unwrap(), previous);
+        // A failed fence cannot report successful logout while leaving the
+        // pre-logout generation valid for a later verified import.
+        cache.fail_generation.store(true, Ordering::SeqCst);
+        assert!(login.snapshot_grant_generation(&store).is_err());
+        assert!(with_grant_cache_change(&store, cache.as_ref(), || store.delete_raw()).is_err());
+        assert_eq!(store.load().unwrap().unwrap(), previous);
+        cache.fail_generation.store(false, Ordering::SeqCst);
+        // Losing coordination mid-login must abort rather than silently saving
+        // when the snapshot expected fencing. Existing-grant sessions still work.
+        cache.runtime_unavailable.store(true, Ordering::SeqCst);
+        assert!(
+            login
+                .commit_verified_login(true, &store, Some(&generation))
+                .await
+                .is_err()
+        );
+        assert_eq!(store.load().unwrap().unwrap(), previous);
+        assert!(
+            login
+                .commit_verified_login(false, &store, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.load().unwrap().unwrap(), previous);
+        assert!(cache.read().unwrap().is_none());
+        with_grant_cache_change(&store, cache.as_ref(), || store.delete_raw()).unwrap();
+        assert!(store.load().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn obsolete_publication_after_rotation_is_never_reused() {
+        let mut server = mockito::Server::new_async().await;
+        let cache = Arc::new(FakeAccessCache::default());
+        let clock = Arc::new(FakeCacheClock::new());
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        cache_mint_mocks(&mut server, &clock).await;
+        let owner = HardwareTokenCredentials::new(grant(), HARDWARE_CONSUMER_KEY).unwrap();
+        let obsolete = cache_test_record(&owner, clock.now());
+        clear_access_cache(cache.as_ref()).unwrap();
+        // Model a rotation between the producer's last comparison and its
+        // keyring write. The stale bytes are harmless because reads also fence.
+        cache
+            .write(&serde_json::to_string(&obsolete).unwrap())
+            .unwrap();
+        let next = cache_test_session(
+            &server,
+            &cache,
+            &clock,
+            &authenticator,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+        );
+        assert_eq!(
+            next.access_credentials().await.unwrap().access_token.token,
+            "access-1"
+        );
+        assert_eq!(authenticator.requests.lock().unwrap().len(), 1);
+    }
+
+    struct PausingAuthenticator {
+        ready: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        delegate: FakeAuthenticator,
+    }
+    impl Authenticator for PausingAuthenticator {
+        fn get_assertion(&self, request: &AssertionRequest) -> Result<Assertion> {
+            if let Some(ready) = self.ready.lock().unwrap().take() {
+                let _ = ready.send(());
+            }
+            self.release.lock().unwrap().recv().unwrap();
+            self.delegate.get_assertion(request)
+        }
+        fn make_credential(
+            &self,
+            request: &RegistrationRequest,
+        ) -> Result<crate::hardware_key::Registration> {
+            self.delegate.make_credential(request)
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn logout_during_touch_fences_producer_without_blocking_runtime() {
+        let mut server = mockito::Server::new_async().await;
+        let cache = Arc::new(FakeAccessCache::default());
+        let clock = Arc::new(FakeCacheClock::new());
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        cache_mint_mocks(&mut server, &clock).await;
+        let (ready_send, ready) = tokio::sync::oneshot::channel();
+        let (release, release_receive) = std::sync::mpsc::channel();
+        let mut session = cache_test_session(
+            &server,
+            &cache,
+            &clock,
+            &authenticator,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("grant.json");
+        write_private_file(&path, session.credentials.to_json().unwrap().as_bytes()).unwrap();
+        let store = GrantStore::File(path.clone());
+        session.cache_policy.as_mut().unwrap().store = store.clone();
+        session.authenticator = Arc::new(PausingAuthenticator {
+            ready: Mutex::new(Some(ready_send)),
+            release: Mutex::new(release_receive),
+            delegate: FakeAuthenticator::default(),
+        });
+        let session = Arc::new(session);
+        let producer = session.clone();
+        let pending = tokio::spawn(async move { producer.access_credentials().await });
+        ready.await.unwrap();
+        // A touch does not hold the OS cache lock. Also deliberately model a
+        // busy lock owned by another process during synchronous grant deletion.
+        let lock = cache.lock().unwrap();
+        let start = std::time::Instant::now();
+        let generation = cache.generation().unwrap();
+        assert!(with_grant_cache_change(&store, cache.as_ref(), || store.delete_raw()).is_err());
+        assert!(start.elapsed() < Duration::from_millis(500));
+        assert!(path.exists());
+        assert_eq!(cache.generation().unwrap(), generation);
+        drop(lock);
+        with_grant_cache_change(&store, cache.as_ref(), || store.delete_raw()).unwrap();
+        assert!(!path.exists());
+        release.send(()).unwrap();
+        let credentials = tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(credentials.access_token.token, "access-1");
+        assert!(cache.read().unwrap().is_none());
+        assert_eq!(session.access_credentials().await.unwrap(), credentials);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unsafe_or_missing_runtime_does_not_break_grant_changes() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = directory.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        // SAFETY: geteuid has no memory safety requirements.
+        let uid = unsafe { libc::geteuid() };
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(validate_runtime_directory(&runtime, uid).is_ok());
+        assert!(validate_runtime_directory(&runtime, uid.wrapping_add(1)).is_err());
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(validate_runtime_directory(&runtime, uid).is_err());
+        std::fs::remove_dir(&runtime).unwrap();
+        assert!(validate_runtime_directory(&runtime, uid).is_err());
+        symlink(directory.path(), &runtime).unwrap();
+        assert!(validate_runtime_directory(&runtime, uid).is_err());
+        let cache = FakeAccessCache::default();
+        cache.runtime_unavailable.store(true, Ordering::SeqCst);
+        let store = GrantStore::File(directory.path().join("grant.json"));
+        let owner = HardwareTokenCredentials::new(grant(), HARDWARE_CONSUMER_KEY).unwrap();
+        with_grant_cache_change(&store, &cache, || store.save_raw(&owner)).unwrap();
+        assert_eq!(store.load().unwrap().unwrap(), owner);
+        with_grant_cache_change(&store, &cache, || store.delete_raw()).unwrap();
+        assert!(store.load().unwrap().is_none());
+        assert!(clear_access_cache(&cache).is_err());
+    }
+
+    #[tokio::test]
+    async fn delayed_rejection_preserves_newer_local_and_persisted_generations() {
+        let mut server = mockito::Server::new_async().await;
+        let cache = Arc::new(FakeAccessCache::default());
+        let clock = Arc::new(FakeCacheClock::new());
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        cache_mint_mocks(&mut server, &clock).await;
+        let ttl = DEFAULT_ACCESS_TOKEN_CACHE_TTL;
+        let session = cache_test_session(&server, &cache, &clock, &authenticator, ttl);
+        let rejected = session.access_credentials().await.unwrap();
+        clock.advance(TimeDelta::seconds(300));
+        let newer = session.access_credentials().await.unwrap();
+        let raw = cache.read().unwrap().unwrap();
+        assert!(
+            !session
+                .invalidate_rejected_access_token(&rejected)
+                .await
+                .unwrap()
+        );
+        assert_eq!(session.access_credentials().await.unwrap(), newer);
+        assert_eq!(*cache.read().unwrap().unwrap(), *raw);
+        // Another process publishes a newer token while this process still
+        // holds its older token. Only this process's matching token is removed.
+        let other = cache_test_session(&server, &cache, &clock, &authenticator, ttl);
+        other.access_credentials().await.unwrap();
+        clear_access_cache(cache.as_ref()).unwrap();
+        let third = cache_test_session(&server, &cache, &clock, &authenticator, ttl);
+        let newest = third.access_credentials().await.unwrap();
+        let raw = cache.read().unwrap().unwrap();
+        assert!(
+            other
+                .invalidate_rejected_access_token(&newer)
+                .await
+                .unwrap()
+        );
+        assert_eq!(*cache.read().unwrap().unwrap(), *raw);
+        assert_eq!(other.access_credentials().await.unwrap(), newest);
+        // Same token identity in a record bound to another grant is untouched.
+        let mut different_grant = cache_test_record(&session.credentials, clock.now());
+        different_grant.binding = "different-grant".into();
+        different_grant.token = newest.access_token.token.clone();
+        different_grant.secret = newest.access_token.secret.clone();
+        cache
+            .write(&serde_json::to_string(&different_grant).unwrap())
+            .unwrap();
+        let raw = cache.read().unwrap().unwrap();
+        assert!(
+            third
+                .invalidate_rejected_access_token(&newest)
+                .await
+                .unwrap()
+        );
+        assert_eq!(*cache.read().unwrap().unwrap(), *raw);
+        assert_eq!(authenticator.requests.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn conditional_invalidation_reports_busy_and_legacy_is_local_only() {
+        let mut server = mockito::Server::new_async().await;
+        let cache = Arc::new(FakeAccessCache::default());
+        let clock = Arc::new(FakeCacheClock::new());
+        let authenticator = Arc::new(FakeAuthenticator::default());
+        cache_mint_mocks(&mut server, &clock).await;
+        let session = cache_test_session(
+            &server,
+            &cache,
+            &clock,
+            &authenticator,
+            DEFAULT_ACCESS_TOKEN_CACHE_TTL,
+        );
+        let rejected = session.access_credentials().await.unwrap();
+        let lock = cache.lock().unwrap();
+        assert!(
+            session
+                .invalidate_rejected_access_token(&rejected)
+                .await
+                .is_err()
+        );
+        drop(lock);
+        // The rejected generation is remembered even if the backend deletion
+        // failed, but a fresh mint is reused locally even if its write fails.
+        cache.fail_write.store(true, Ordering::SeqCst);
+        let fresh = session.access_credentials().await.unwrap();
+        assert_ne!(fresh, rejected);
+        assert_eq!(session.access_credentials().await.unwrap(), fresh);
+        cache.fail_write.store(false, Ordering::SeqCst);
+        let raw = cache.read().unwrap();
+        session.invalidate().await;
+        assert_eq!(cache.read().unwrap(), raw);
+        let fresh = session.access_credentials().await.unwrap();
+        let mut wrong_consumer = fresh.clone();
+        wrong_consumer.consumer_key = "other-consumer".into();
+        assert!(
+            !session
+                .invalidate_rejected_access_token(&wrong_consumer)
+                .await
+                .unwrap()
+        );
+        assert_eq!(session.access_credentials().await.unwrap(), fresh);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cache_namespace_child() {
+        let Some(home_dir) = std::env::var_os("LPCLI_TEST_HOME_DIR") else {
+            return;
+        };
+        let run_user_root = std::env::var_os("LPCLI_TEST_RUN_USER_ROOT").unwrap();
+        let expected_passwd_home = std::env::var_os("LPCLI_TEST_PASSWD_HOME");
+        // SAFETY: geteuid has no memory safety requirements.
+        let uid = unsafe { libc::geteuid() };
+        if let Some(expected_passwd_home) = expected_passwd_home {
+            assert_eq!(
+                passwd_home_directory(uid).unwrap().as_os_str(),
+                expected_passwd_home
+            );
+        }
+        let dir = trusted_coordination_directory_in(
+            Some(Path::new(&home_dir)),
+            Path::new(&run_user_root),
+            uid,
+            uid,
+        )
+        .unwrap();
+        assert_eq!(dir, Path::new(&home_dir).join(".cache").join("lpcli"));
+        assert!(secure_cache_lock(&dir).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cache_lock_namespace_ignores_xdg_home_and_tmpdir() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        if is_sudo() {
+            return;
+        }
+        // SAFETY: geteuid has no memory safety requirements.
+        let uid = unsafe { libc::geteuid() };
+        let passwd_home = passwd_home_directory(uid).ok();
+
+        // Isolated home and /run/user fixtures so parallel tests never contend
+        // on host locks or mutate user directories.
+        let home_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(home_dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let missing_run_user = tempfile::tempdir().unwrap();
+        let missing_run_user_path = missing_run_user.path().join("missing-run-user");
+
+        // Primary home-cache path works with no `/run/user` at all.
+        let trusted = trusted_coordination_directory_in(
+            Some(home_dir.path()),
+            &missing_run_user_path,
+            uid,
+            uid,
+        )
+        .unwrap();
+        assert_eq!(trusted, home_dir.path().join(".cache").join("lpcli"));
+
+        // Falls back to `/run/user/<uid>` if home is untrusted or unavailable.
+        let run_user_root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(run_user_root.path(), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let runtime = run_user_root.path().join(uid.to_string());
+        std::fs::create_dir(&runtime).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let bad_home = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(bad_home.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(trusted_home_cache_directory(bad_home.path(), uid).is_err());
+        assert!(trusted_home_cache_directory(Path::new("/"), uid).is_err());
+        let symlink_home_root = tempfile::tempdir().unwrap();
+        let symlink_home = symlink_home_root.path().join("home-link");
+        symlink(home_dir.path(), &symlink_home).unwrap();
+        assert!(trusted_home_cache_directory(&symlink_home, uid).is_err());
+
+        assert_eq!(
+            trusted_coordination_directory_in(
+                Some(bad_home.path()),
+                run_user_root.path(),
+                uid,
+                uid,
+            )
+            .unwrap(),
+            runtime
+        );
+        assert_eq!(
+            trusted_coordination_directory_in(None, run_user_root.path(), uid, uid).unwrap(),
+            runtime
+        );
+
+        assert!(
+            trusted_runtime_directory_in(run_user_root.path(), uid.wrapping_add(1), uid).is_err()
+        );
+        std::fs::set_permissions(run_user_root.path(), std::fs::Permissions::from_mode(0o775))
+            .unwrap();
+        assert!(trusted_runtime_directory_in(run_user_root.path(), uid, uid).is_err());
+        std::fs::set_permissions(run_user_root.path(), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let symlink_root = tempfile::tempdir().unwrap();
+        let symlink_path = symlink_root.path().join("run-user-link");
+        symlink(run_user_root.path(), &symlink_path).unwrap();
+        assert!(trusted_runtime_directory_in(&symlink_path, uid, uid).is_err());
+
+        let lock = secure_cache_lock(&trusted).unwrap();
+        for _ in 0..2 {
+            let env_root = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(env_root.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.args(["--exact", "hardware_tokens::tests::cache_namespace_child"])
+                .env("LPCLI_TEST_HOME_DIR", home_dir.path())
+                .env("LPCLI_TEST_RUN_USER_ROOT", &missing_run_user_path)
+                .env("XDG_CONFIG_HOME", env_root.path())
+                .env("XDG_RUNTIME_DIR", env_root.path())
+                .env("HOME", env_root.path())
+                .env("TMPDIR", env_root.path());
+            if let Some(ref pw_home) = passwd_home {
+                cmd.env("LPCLI_TEST_PASSWD_HOME", pw_home);
+            } else {
+                cmd.env_remove("LPCLI_TEST_PASSWD_HOME");
+            }
+            let output = cmd.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(std::fs::read_dir(env_root.path()).unwrap().count(), 0);
+        }
+        drop(lock);
+        drop(wait_for_cache_lock_in_test(&trusted));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lock_directory_with_retry_tolerates_brief_contention_and_fails_unavailable_immediately() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing-parent").join("lpcli");
+        let start = std::time::Instant::now();
+        assert_eq!(
+            lock_directory_with_retry(&missing).err(),
+            Some(LockFailure::Unavailable)
+        );
+        assert!(start.elapsed() < Duration::from_millis(50));
+
+        let runtime = directory.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let lock = secure_cache_lock(&runtime).unwrap();
+        let runtime_bg = runtime.clone();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(lock);
+        });
+        let reacquired = lock_directory_with_retry(&runtime_bg);
+        assert!(reacquired.is_ok());
+        drop(reacquired);
+        releaser.join().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cache_lock_child() {
+        let Some(path) = std::env::var_os("LPCLI_TEST_CACHE_LOCK") else {
+            return;
+        };
+        if std::env::var_os("LPCLI_TEST_CACHE_LOCK_EXPECT_FREE").is_some() {
+            drop(wait_for_cache_lock_in_test(Path::new(&path)));
+        } else {
+            assert!(secure_cache_lock(Path::new(&path)).is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_cache_lock_in_test(directory: &Path) -> Box<dyn CacheLock> {
+        // flock belongs to the open file description. Parallel tests spawning
+        // children can transiently inherit it between fork and exec, even with
+        // O_CLOEXEC, so closing the parent's descriptor need not release it
+        // immediately. Only this valid-fixture test waits; `secure_cache_lock` stays
+        // nonblocking and every attempt still checks ownership and permissions.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match secure_cache_lock(directory) {
+                Ok(lock) => return lock,
+                Err(error) if std::time::Instant::now() >= deadline => {
+                    panic!("test fixture lock remained unavailable after two seconds: {error}");
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cache_lock_inherited_before_exec_releases_on_exec() {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixStream;
+        use std::os::unix::process::CommandExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let lock = secure_cache_lock(directory.path()).unwrap();
+        let (mut ready_reader, ready_writer) = UnixStream::pair().unwrap();
+        let (mut release_writer, release_reader) = UnixStream::pair().unwrap();
+        ready_reader
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        release_reader
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let path = directory.path().to_owned();
+        let child = std::thread::spawn(move || {
+            let ready_fd = ready_writer.as_raw_fd();
+            let release_fd = release_reader.as_raw_fd();
+            let mut command = std::process::Command::new(executable);
+            command
+                .args(["--exact", "hardware_tokens::tests::cache_lock_child"])
+                .env("LPCLI_TEST_CACHE_LOCK", path)
+                .env("LPCLI_TEST_CACHE_LOCK_EXPECT_FREE", "1");
+            // SAFETY: after fork the callback only performs async-signal-safe
+            // read/write syscalls with live socket descriptors and fixed-code
+            // I/O errors. It uses no locks, logging or allocation. The owning
+            // UnixStreams remain alive until the subprocess has finished.
+            unsafe {
+                command.pre_exec(move || {
+                    let ready = [1u8];
+                    if libc::write(ready_fd, ready.as_ptr().cast(), 1) != 1 {
+                        return Err(std::io::Error::from_raw_os_error(libc::EIO));
+                    }
+                    let mut release = [0u8];
+                    if libc::read(release_fd, release.as_mut_ptr().cast(), 1) != 1 {
+                        return Err(std::io::Error::from_raw_os_error(libc::EIO));
+                    }
+                    Ok(())
+                });
+            }
+            let output = command.output();
+            drop((ready_writer, release_reader));
+            output
+        });
+
+        // Freeze a real Command child after fork but before exec, then close
+        // the parent lock. This deterministically reproduces the transient
+        // retention which an unrelated parallel test can otherwise cause.
+        ready_reader.read_exact(&mut [0u8]).unwrap();
+        drop(lock);
+        let probe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(directory.path().join("hardware-access-token.lock"))
+            .unwrap();
+        assert!(matches!(
+            probe.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(probe);
+        assert!(secure_cache_lock(directory.path()).is_err());
+        release_writer.write_all(&[1]).unwrap();
+        let output = child.join().unwrap().unwrap();
+        // The exec'd child must acquire the lock before exiting: this also
+        // verifies production's CLOEXEC behavior, not just exit-time cleanup.
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        drop(wait_for_cache_lock_in_test(directory.path()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cache_lock_serializes_processes_and_rejects_unsafe_files() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let lock = secure_cache_lock(directory.path()).unwrap();
+        assert!(secure_cache_lock(directory.path()).is_err());
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "hardware_tokens::tests::cache_lock_child"])
+            .env("LPCLI_TEST_CACHE_LOCK", directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        drop(lock);
+        drop(wait_for_cache_lock_in_test(directory.path()));
+        let path = directory.path().join("hardware-access-token.lock");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        // Never lock this replacement inode: otherwise a transiently inherited
+        // lock could make the unsafe-permissions assertion pass for the wrong
+        // reason. Descriptors for the original inode cannot lock the new one.
+        std::fs::remove_file(&path).unwrap();
+        drop(std::fs::File::create(&path).unwrap());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(secure_cache_lock(directory.path()).is_err());
+        std::fs::remove_file(&path).unwrap();
+        symlink(directory.path().join("missing"), &path).unwrap();
+        assert!(secure_cache_lock(directory.path()).is_err());
+    }
+
     // -- Encoding and records ------------------------------------------------
 
     #[test]
@@ -1753,14 +4610,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("grant.json");
         let store = GrantStore::File(path.clone());
+        let cache = FakeAccessCache::default();
         assert_eq!(store.load().unwrap(), None);
 
         let credentials = HardwareTokenCredentials::new(grant(), HARDWARE_CONSUMER_KEY).unwrap();
+        let initial_epoch = cache.generation().unwrap();
+        cache.write("cached-before-save").unwrap();
         assert_eq!(
-            store.save(&credentials).unwrap(),
+            store.save_with_cache(&credentials, &cache).unwrap(),
             StoredIn::File(path.clone())
         );
         assert_eq!(store.load().unwrap(), Some(credentials));
+        let after_save_epoch = cache.generation().unwrap();
+        assert_ne!(after_save_epoch, initial_epoch);
+        assert!(cache.read().unwrap().is_none());
 
         #[cfg(unix)]
         {
@@ -1771,9 +4634,12 @@ mod tests {
         let leftovers = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
         assert_eq!(leftovers, 1, "no temporary files remain");
 
-        store.delete().unwrap();
+        cache.write("cached-before-delete").unwrap();
+        store.delete_with_cache(&cache).unwrap();
         assert_eq!(store.load().unwrap(), None);
-        store.delete().unwrap();
+        assert_ne!(cache.generation().unwrap(), after_save_epoch);
+        assert!(cache.read().unwrap().is_none());
+        store.delete_with_cache(&cache).unwrap();
     }
 
     #[test]
@@ -1935,7 +4801,7 @@ mod tests {
             HARDWARE_CONSUMER_KEY,
         )
         .unwrap();
-        store.save(&original).unwrap();
+        store.save_raw(&original).unwrap();
         let original_bytes = std::fs::read(&path).unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")

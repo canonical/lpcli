@@ -4,6 +4,630 @@
 use super::*;
 
 #[test]
+fn cli_hardware_clear_cache_parses_without_credentials_or_token_arguments() {
+    for args in [
+        vec!["lpcli", "hardware-token", "clear-cache"],
+        vec!["lpcli", "--authenticated", "hardware-token", "clear-cache"],
+    ] {
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::HardwareToken(HardwareTokenCommand::ClearCache)
+        ));
+        validate_cli(&cli).unwrap();
+    }
+    assert!(
+        Cli::try_parse_from([
+            "lpcli",
+            "hardware-token",
+            "clear-cache",
+            "--token",
+            "secret"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn cli_hardware_clear_cache_help_distinguishes_clearing_from_revoking() {
+    let help = Cli::try_parse_from(["lpcli", "hardware-token", "clear-cache", "--help"])
+        .unwrap_err()
+        .to_string();
+    let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(help.contains("without deleting the grant or revoking anything"));
+}
+
+#[tokio::test]
+async fn clear_cache_dispatch_skips_malformed_config_and_propagates_clear_failure() {
+    use lpcli::error::LpError;
+    for clear_fails in [false, true] {
+        let cli = Cli::try_parse_from(["lpcli", "hardware-token", "clear-cache"]).unwrap();
+        validate_cli(&cli).unwrap();
+        let config_reads = std::cell::Cell::new(0);
+        let clears = std::cell::Cell::new(0);
+        let result = run_command(
+            cli,
+            || {
+                config_reads.set(config_reads.get() + 1);
+                Err(LpError::Config("malformed config".into()))
+            },
+            || {
+                clears.set(clears.get() + 1);
+                if clear_fails {
+                    Err(LpError::HardwareToken("cache unavailable".into()))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        assert_eq!(config_reads.get(), 0);
+        assert_eq!(clears.get(), 1);
+        if clear_fails {
+            assert!(matches!(result, Err(LpError::HardwareToken(_))));
+        } else {
+            result.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn other_commands_still_require_valid_config_before_dispatch() {
+    let cli = Cli::try_parse_from(["lpcli", "hardware-token", "show"]).unwrap();
+    validate_cli(&cli).unwrap();
+    let result = run_command(
+        cli,
+        || Err(lpcli::error::LpError::Config("malformed config".into())),
+        || panic!("only clear-cache bypasses configuration"),
+    )
+    .await;
+    assert!(matches!(result, Err(lpcli::error::LpError::Config(_))));
+}
+
+#[test]
+fn hardware_cache_config_is_converted_without_overriding_zero() {
+    assert_eq!(
+        hardware_token_cache_timeout(&config::AppConfig::default()),
+        std::time::Duration::from_secs(300)
+    );
+    for seconds in [0, 1, 600, 86_400] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!("[authentication]\nhardware_token_cache_seconds = {seconds}\n"),
+        )
+        .unwrap();
+        let settings = config::load_from(&path).unwrap();
+        assert_eq!(
+            hardware_token_cache_timeout(&settings),
+            std::time::Duration::from_secs(seconds)
+        );
+    }
+}
+
+fn parsed_read_policy(args: &[&str]) -> ReadAuthPolicy {
+    let cli = Cli::try_parse_from(args).unwrap();
+    read_auth_policy(&cli.command, cli.authenticated, cli.public)
+}
+
+#[test]
+fn direct_reads_use_auth_by_default_and_support_explicit_public() {
+    for args in [
+        vec!["bug", "show", "--bug-id", "59"],
+        vec!["bug", "comments", "--bug-id", "59"],
+        vec!["bug", "tasks", "--bug-id", "59"],
+        vec!["bug", "attachments", "--bug-id", "59"],
+        vec!["bug", "watches", "--bug-id", "59"],
+        vec!["person", "show", "--name", "ubuntu"],
+        vec!["package", "ppa", "--owner", "ubuntu", "--ppa", "test"],
+        vec!["project", "show", "--name", "ubuntu"],
+        vec!["cve", "show", "--sequence", "2026-1234"],
+        vec!["git", "show", "--path", "~ubuntu/test/+git/test"],
+        vec!["git", "default", "--target", "ubuntu"],
+        vec!["spec", "show", "--target", "ubuntu", "--name", "test"],
+        vec!["question", "show", "--question-id", "59"],
+        vec!["snap", "show", "--owner", "ubuntu", "--name", "test"],
+    ] {
+        let mut full = vec!["lpcli"];
+        full.extend(args);
+        assert_eq!(
+            parsed_read_policy(&full),
+            ReadAuthPolicy::Authenticated,
+            "{full:?}"
+        );
+        let mut public = full.clone();
+        public.push("--public");
+        assert_eq!(parsed_read_policy(&public), ReadAuthPolicy::Anonymous);
+        full.push("--authenticated");
+        assert_eq!(
+            parsed_read_policy(&full),
+            ReadAuthPolicy::Authenticated,
+            "{full:?}"
+        );
+    }
+}
+
+#[test]
+fn private_inclusive_collections_and_identity_require_auth() {
+    for args in [
+        vec!["bug", "search", "--target", "ubuntu"],
+        vec!["bug", "subscriptions", "--bug-id", "59"],
+        vec!["person", "bugs", "--name", "ubuntu"],
+        vec!["person", "ppas", "--name", "ubuntu"],
+        vec!["person", "members", "--team", "ubuntu"],
+        vec!["person", "search", "--query", "ubuntu"],
+        vec!["person", "owned-teams", "--name", "ubuntu"],
+        vec![
+            "package",
+            "ppa-sources",
+            "--owner",
+            "ubuntu",
+            "--ppa",
+            "test",
+        ],
+        vec!["project", "search", "--query", "test"],
+        vec!["project", "list-series", "--project", "test"],
+        vec!["git", "list-person-repos", "--name", "ubuntu"],
+        vec!["git", "refs", "--path", "~ubuntu/test/+git/test"],
+        vec!["git", "proposals", "--path", "~ubuntu/test/+git/test"],
+        vec![
+            "git",
+            "comments",
+            "--path",
+            "~ubuntu/test/+git/test",
+            "--id",
+            "59",
+        ],
+        vec!["snap", "find", "--owner", "ubuntu"],
+        vec!["snap", "builds", "--owner", "ubuntu", "--name", "test"],
+        vec!["spec", "list", "--target", "test"],
+        vec!["question", "search", "--target", "ubuntu"],
+        vec!["webhook", "list", "--target", "ubuntu"],
+        vec!["status"],
+        vec!["hardware-token", "keys"],
+        vec!["access-token", "list", "--project", "test"],
+    ] {
+        let mut full = vec!["lpcli"];
+        full.extend(args);
+        assert_eq!(
+            parsed_read_policy(&full),
+            ReadAuthPolicy::Authenticated,
+            "{full:?}"
+        );
+    }
+}
+
+#[test]
+fn mutations_never_use_anonymous_fallback() {
+    for args in [
+        vec!["bug", "add-comment", "--bug-id", "59", "--message", "test"],
+        vec![
+            "bug",
+            "delete-comment",
+            "--bug-id",
+            "59",
+            "--comment-index",
+            "1",
+        ],
+        vec!["bug", "subscribe", "--bug-id", "59", "--name", "ubuntu"],
+        vec!["bug", "tag", "--bug-id", "59", "--add-tag", "test"],
+        vec!["queue", "accept", "--name", "test", "--arch", "source"],
+        vec!["queue", "reject", "--name", "test", "--arch", "source"],
+        vec![
+            "snap",
+            "request-builds",
+            "--owner",
+            "ubuntu",
+            "--name",
+            "test",
+        ],
+        vec![
+            "webhook",
+            "ping",
+            "--webhook-url",
+            "https://api.launchpad.net/devel/test",
+        ],
+    ] {
+        let mut full = vec!["lpcli"];
+        full.extend(args);
+        assert_eq!(
+            parsed_read_policy(&full),
+            ReadAuthPolicy::Authenticated,
+            "{full:?}"
+        );
+    }
+}
+
+#[test]
+fn public_distribution_reads_do_not_require_auth() {
+    for args in [
+        vec!["queue", "search", "--status", "New"],
+        vec![
+            "queue", "info", "--name", "test", "--arch", "source", "--status", "New",
+        ],
+        vec![
+            "queue", "download", "--name", "test", "--arch", "source", "--status", "New",
+        ],
+        vec!["package", "list-series"],
+        vec!["package", "search", "--series", "resolute"],
+        vec!["bug", "remote-bug-trackers"],
+    ] {
+        let mut full = vec!["lpcli"];
+        full.extend(args);
+        assert_eq!(
+            parsed_read_policy(&full),
+            ReadAuthPolicy::Anonymous,
+            "{full:?}"
+        );
+        full.insert(1, "--authenticated");
+        assert_eq!(parsed_read_policy(&full), ReadAuthPolicy::Authenticated);
+    }
+}
+
+fn mock_read_client(server: &mockito::Server, signed: bool) -> LaunchpadClient {
+    LaunchpadClient::new(signed.then(|| auth::Credentials::new("lpcli", "test-token", "secret")))
+        .with_base_url(server.url())
+}
+
+#[test]
+fn public_mode_conflicts_with_auth_and_rejects_mutations_and_identity() {
+    assert!(
+        Cli::try_parse_from([
+            "lpcli",
+            "--public",
+            "--authenticated",
+            "bug",
+            "show",
+            "--bug-id",
+            "59"
+        ])
+        .is_err()
+    );
+    for args in [
+        vec!["status"],
+        vec!["hardware-token", "keys"],
+        vec!["hardware-token", "clear-cache"],
+        vec!["bug", "add-comment", "--bug-id", "59", "--message", "test"],
+        vec!["queue", "accept", "--name", "test", "--arch", "source"],
+    ] {
+        let mut full = vec!["lpcli", "--public"];
+        full.extend(args);
+        let cli = Cli::try_parse_from(full).unwrap();
+        assert!(validate_cli(&cli).is_err());
+        assert_eq!(
+            read_auth_policy(&cli.command, false, true),
+            ReadAuthPolicy::Authenticated
+        );
+    }
+    let cli = Cli::try_parse_from(["lpcli", "--public", "bug", "search"]).unwrap();
+    assert!(validate_cli(&cli).is_ok());
+    assert_eq!(
+        parsed_read_policy(&[
+            "lpcli",
+            "queue",
+            "search",
+            "--status",
+            "New",
+            "--archive",
+            "~owner/+archive/private"
+        ]),
+        ReadAuthPolicy::Authenticated
+    );
+    assert_eq!(
+        parsed_read_policy(&[
+            "lpcli",
+            "queue",
+            "search",
+            "--status",
+            "New",
+            "--archive",
+            "primary"
+        ]),
+        ReadAuthPolicy::Anonymous
+    );
+    for args in [
+        vec![
+            "lpcli", "queue", "search", "--distro", "Ubuntu", "--status", "New",
+        ],
+        vec![
+            "lpcli",
+            "queue",
+            "search",
+            "--status",
+            "New",
+            "--archive",
+            "/ubuntu/+archive/primary/",
+        ],
+        vec![
+            "lpcli",
+            "queue",
+            "search",
+            "--status",
+            "New",
+            "--archive",
+            "https://api.launchpad.net/devel/ubuntu/+archive/primary/",
+        ],
+        vec![
+            "lpcli", "queue", "info", "--distro", "Ubuntu", "--name", "test", "--arch", "source",
+            "--status", "New",
+        ],
+    ] {
+        assert_eq!(
+            parsed_read_policy(&args),
+            ReadAuthPolicy::Anonymous,
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn private_direct_reads_never_downgrade_missing_or_failed_credentials() {
+    use lpcli::error::LpError;
+    for authenticated in [false, true] {
+        let mut args = vec!["lpcli", "bug", "show", "--bug-id", "59"];
+        if authenticated {
+            args.push("--authenticated");
+        }
+        let policy = parsed_read_policy(&args);
+        assert!(matches!(
+            read_client_with_auth(policy, || Err(LpError::NotAuthenticated)),
+            Err(LpError::NotAuthenticated)
+        ));
+        for error in [
+            LpError::HardwareKeyCancelled,
+            LpError::Config("bad grant".into()),
+            LpError::Keyring("unavailable".into()),
+            LpError::HardwareTokenGrantRejected,
+        ] {
+            let expected = error.to_string();
+            let result = read_client_with_auth(policy, || Err(error));
+            assert_eq!(result.err().unwrap().to_string(), expected);
+        }
+    }
+    assert!(
+        read_client_with_auth(ReadAuthPolicy::Anonymous, || panic!(
+            "--public must not load credentials"
+        ))
+        .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn private_capable_metadata_is_signed_from_the_first_request() {
+    for authenticated in [false, true] {
+        let mut args = vec!["lpcli", "bug", "comments", "--bug-id", "59"];
+        if authenticated {
+            args.push("--authenticated");
+        }
+        let policy = parsed_read_policy(&args);
+        let mut server = mockito::Server::new_async().await;
+        let signed = server
+            .mock("GET", "/bugs/59/messages")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("oauth_token=\"test-token\"".into()),
+            )
+            .with_body(r#"{"entries":[{"content":"private"}]}"#)
+            .create_async()
+            .await;
+        let attachments = server
+            .mock("GET", "/bugs/59/attachments")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("oauth_token=\"test-token\"".into()),
+            )
+            .with_body(r#"{"entries":[]}"#)
+            .create_async()
+            .await;
+        let loads = std::cell::Cell::new(0);
+        let client = read_client_with_auth(policy, || {
+            loads.set(loads.get() + 1);
+            Ok(mock_read_client(&server, true))
+        })
+        .unwrap();
+        let read = fetch_bug_comments(&client, 59).await.unwrap();
+        assert_eq!(loads.get(), 1);
+        assert_eq!(read.comments[0].content.as_deref(), Some("private"));
+        signed.assert_async().await;
+        attachments.assert_async().await;
+    }
+}
+
+#[tokio::test]
+async fn public_comments_do_not_load_auth_or_retry_on_denial() {
+    for status in [200, 401, 403, 404, 500] {
+        let mut server = mockito::Server::new_async().await;
+        let comments = server
+            .mock("GET", "/bugs/59/messages")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_status(status)
+            .with_body(r#"{"entries":[{"content":"public"}]}"#)
+            .create_async()
+            .await;
+        let attachments = server
+            .mock("GET", "/bugs/59/attachments")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_body(r#"{"entries":[]}"#)
+            .create_async()
+            .await;
+        let client = read_client_with_auth(ReadAuthPolicy::Anonymous, || panic!("must not prompt"))
+            .unwrap()
+            .with_base_url(server.url());
+        let result = fetch_bug_comments(&client, 59).await;
+        assert_eq!(result.is_ok(), status == 200);
+        comments.assert_async().await;
+        attachments.assert_async().await;
+    }
+}
+
+#[tokio::test]
+async fn failed_page_exposes_no_partial_data_and_is_not_replayed() {
+    let mut server = mockito::Server::new_async().await;
+    let first = server.mock("GET", "/bugs/59/messages")
+        .with_body(serde_json::json!({"entries":[{"content":"must not render"}], "next_collection_link":format!("{}/next",server.url())}).to_string()).create_async().await;
+    let next = server
+        .mock("GET", "/next")
+        .with_status(401)
+        .create_async()
+        .await;
+    let attachments = server
+        .mock("GET", "/bugs/59/attachments")
+        .with_body(r#"{"entries":[]}"#)
+        .create_async()
+        .await;
+    let client = mock_read_client(&server, true);
+    let result = fetch_bug_comments(&client, 59).await;
+    assert!(matches!(
+        result,
+        Err(lpcli::error::LpError::Api { status: 401, .. })
+    ));
+    first.assert_async().await;
+    next.assert_async().await;
+    attachments.assert_async().await;
+}
+
+#[tokio::test]
+async fn optional_url_enrichment_is_tolerant_and_off_origin_unsigned() {
+    let mut api = mockito::Server::new_async().await;
+    let mut files = mockito::Server::new_async().await;
+    let signed = mock_read_client(&api, true);
+    let local = api
+        .mock("GET", "/attachment")
+        .match_header(
+            "authorization",
+            mockito::Matcher::Regex("oauth_token=\"test-token\"".into()),
+        )
+        .with_status(302)
+        .with_header("location", &format!("{}/file", files.url()))
+        .create_async()
+        .await;
+    let external = files
+        .mock("GET", "/denied")
+        .match_header("authorization", mockito::Matcher::Missing)
+        .with_status(403)
+        .create_async()
+        .await;
+    let attachments: Vec<bugs::BugAttachment> = serde_json::from_value(serde_json::json!([
+        {"data_link":format!("{}/attachment",api.url())},
+        {"data_link":format!("{}/denied",files.url())},
+        {"data_link":"not a URL"}, {}
+    ]))
+    .unwrap();
+    let urls = resolve_all_attachment_urls(&signed, &attachments).await;
+    assert_eq!(
+        urls,
+        vec![
+            format!("{}/file", files.url()),
+            "—".into(),
+            "—".into(),
+            "—".into()
+        ]
+    );
+    local.assert_async().await;
+    external.assert_async().await;
+}
+
+#[tokio::test]
+async fn metadata_auth_is_not_sent_to_transfers_or_redirected_hosts() {
+    let mut api = mockito::Server::new_async().await;
+    let mut files = mockito::Server::new_async().await;
+    let metadata = api
+        .mock("GET", "/metadata")
+        .match_header(
+            "authorization",
+            mockito::Matcher::Regex("oauth_token=\"test-token\"".into()),
+        )
+        .with_body(
+            serde_json::json!([
+                format!("{}/source.dsc", api.url()),
+                format!("{}/direct.tar", files.url())
+            ])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let redirect = api
+        .mock("GET", "/source.dsc")
+        .match_header("authorization", mockito::Matcher::Missing)
+        .with_status(302)
+        .with_header("location", &format!("{}/source.dsc", files.url()))
+        .create_async()
+        .await;
+    let transfer = files
+        .mock("GET", "/source.dsc")
+        .match_header("authorization", mockito::Matcher::Missing)
+        .with_body("source")
+        .create_async()
+        .await;
+    let direct = files
+        .mock("GET", "/direct.tar")
+        .match_header("authorization", mockito::Matcher::Missing)
+        .with_body("archive")
+        .create_async()
+        .await;
+    let client = mock_read_client(&api, true);
+    let urls: Vec<String> = client.get("/metadata").await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let outcomes = download_public_files(&urls, dir.path()).await.unwrap();
+    assert!(
+        outcomes
+            .iter()
+            .all(|o| matches!(o, download::DownloadOutcome::Success(_)))
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("source.dsc")).unwrap(),
+        "source"
+    );
+    metadata.assert_async().await;
+    redirect.assert_async().await;
+    transfer.assert_async().await;
+    direct.assert_async().await;
+}
+
+#[tokio::test]
+async fn queue_info_restricts_archive_only_for_anonymous_reads() {
+    for primary_archive_only in [true, false] {
+        let mut server = mockito::Server::new_async().await;
+        let query_matcher = if primary_archive_only {
+            mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getPackageUploads".into()),
+                mockito::Matcher::UrlEncoded(
+                    "archive".into(),
+                    format!("{}/ubuntu/+archive/primary", server.url()),
+                ),
+            ])
+        } else {
+            mockito::Matcher::Exact(
+                "ws.op=getPackageUploads&status=New&name=curl&exact_match=true&ws.size=30".into(),
+            )
+        };
+        let uploads = server
+            .mock("GET", "/ubuntu/noble")
+            .match_query(query_matcher)
+            .with_body(r#"{"entries":[]}"#)
+            .create_async()
+            .await;
+        let client = mock_read_client(&server, !primary_archive_only);
+        let err = handle_queue_info(
+            &Display::from_width(100),
+            &client,
+            "curl".into(),
+            None,
+            "New".into(),
+            QueueArch::Source,
+            "ubuntu".into(),
+            Some("noble".into()),
+            primary_archive_only,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, lpcli::error::LpError::NotFound(_)));
+        uploads.assert_async().await;
+    }
+}
+
+#[test]
 fn cli_hardware_registration_can_use_classic_credentials() {
     for classic in [false, true] {
         let mut args = vec!["lpcli", "hardware-token", "register", "Backup key"];
