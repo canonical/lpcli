@@ -76,7 +76,9 @@ pub struct QueueSearchParams<'a> {
     pub version: Option<&'a str>,
     /// Whether to filter name and version by exact matching.
     pub exact_match: bool,
-    /// Archive link to filter by (full API URL of the archive).
+    /// Archive link to filter by (full API URL of the archive), e.g.
+    /// `https://api.launchpad.net/devel/ubuntu/+archive/primary` or
+    /// `https://api.launchpad.net/devel/~owner/+archive/ubuntu/ppa`.
     pub archive: Option<&'a str>,
     /// Maximum number of results to return.
     pub limit: Option<u32>,
