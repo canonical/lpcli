@@ -1510,7 +1510,8 @@ enum QueueCommand {
         #[arg(short, long, conflicts_with = "ppa")]
         archive: Option<String>,
         /// PPA to query as OWNER/NAME (e.g. "your-username/my-ppa").
-        /// Resolves to ~OWNER/+archive/ubuntu/NAME.
+        /// Resolves to ~OWNER/+archive/ubuntu/NAME; conflicts with --archive.
+        /// PPA uploads are normally auto-accepted, so use --status done.
         #[arg(long, value_parser = parse_ppa_ref, conflicts_with = "archive")]
         ppa: Option<PpaRef>,
         /// Distribution name (default: "ubuntu").
@@ -1528,7 +1529,7 @@ enum QueueCommand {
         /// Source package name (required).
         #[arg(short, long)]
         name: String,
-        /// Package version (optional; downloads the first match if not given).
+        /// Exact package version (optional; downloads the first match if not given).
         #[arg(short, long)]
         version: Option<String>,
         /// Filter by upload status: new, unapproved, accepted, done, or rejected
@@ -1539,9 +1540,11 @@ enum QueueCommand {
         #[arg(short, long, value_parser = parse_queue_arch)]
         arch: QueueArch,
         /// Archive containing the upload (see `queue search --help`).
+        /// Defaults to the distribution's primary archive.
         #[arg(long, conflicts_with = "ppa")]
         archive: Option<String>,
         /// PPA containing the upload as OWNER/NAME (e.g. "your-username/my-ppa").
+        /// Conflicts with --archive; PPA uploads are normally auto-accepted.
         #[arg(long, value_parser = parse_ppa_ref, conflicts_with = "archive")]
         ppa: Option<PpaRef>,
         /// Distribution name (default: "ubuntu").
@@ -1554,12 +1557,12 @@ enum QueueCommand {
         #[arg(short, long, default_value = ".")]
         output: String,
     },
-    /// Display binary package (.deb/.ddeb) details for a package in the queue.
+    /// Display upload details, including binary .deb/.ddeb information, for a queue item.
     Info {
         /// Source package name (required).
         #[arg(short, long)]
         name: String,
-        /// Package version (optional; shows the first match if not given).
+        /// Exact package version (optional; shows the first match if not given).
         #[arg(short, long)]
         version: Option<String>,
         /// Filter by upload status: new, unapproved, accepted, done, or rejected
@@ -1570,9 +1573,11 @@ enum QueueCommand {
         #[arg(short, long, value_parser = parse_queue_arch)]
         arch: QueueArch,
         /// Archive containing the upload (see `queue search --help`).
+        /// Defaults to the distribution's primary archive.
         #[arg(long, conflicts_with = "ppa")]
         archive: Option<String>,
         /// PPA containing the upload as OWNER/NAME (e.g. "your-username/my-ppa").
+        /// Conflicts with --archive; PPA uploads are normally auto-accepted.
         #[arg(long, value_parser = parse_ppa_ref, conflicts_with = "archive")]
         ppa: Option<PpaRef>,
         /// Distribution name (default: "ubuntu").
@@ -1589,7 +1594,7 @@ enum QueueCommand {
         /// Source package name (required).
         #[arg(short, long)]
         name: String,
-        /// Package version (optional; accepts the first match if not given).
+        /// Exact package version (optional; required when multiple uploads match).
         #[arg(short, long)]
         version: Option<String>,
         /// Filter by upload status, e.g. new or unapproved (case-insensitive).
@@ -1599,9 +1604,11 @@ enum QueueCommand {
         #[arg(short, long, value_parser = parse_queue_arch)]
         arch: QueueArch,
         /// Archive containing the upload (see `queue search --help`).
+        /// Defaults to the distribution's primary archive.
         #[arg(long, conflicts_with = "ppa")]
         archive: Option<String>,
         /// PPA containing the upload as OWNER/NAME (e.g. "your-username/my-ppa").
+        /// Conflicts with --archive; PPA uploads are normally auto-accepted.
         #[arg(long, value_parser = parse_ppa_ref, conflicts_with = "archive")]
         ppa: Option<PpaRef>,
         /// Distribution name (default: "ubuntu").
@@ -1618,7 +1625,7 @@ enum QueueCommand {
         /// Source package name (required).
         #[arg(short, long)]
         name: String,
-        /// Package version (optional; rejects the first match if not given).
+        /// Exact package version (optional; required when multiple uploads match).
         #[arg(short, long)]
         version: Option<String>,
         /// Filter by upload status, e.g. new or unapproved (case-insensitive).
@@ -1628,9 +1635,11 @@ enum QueueCommand {
         #[arg(short, long, value_parser = parse_queue_arch)]
         arch: QueueArch,
         /// Archive containing the upload (see `queue search --help`).
+        /// Defaults to the distribution's primary archive.
         #[arg(long, conflicts_with = "ppa")]
         archive: Option<String>,
         /// PPA containing the upload as OWNER/NAME (e.g. "your-username/my-ppa").
+        /// Conflicts with --archive; PPA uploads are normally auto-accepted.
         #[arg(long, value_parser = parse_ppa_ref, conflicts_with = "archive")]
         ppa: Option<PpaRef>,
         /// Rejection comment explaining why the package is being rejected.

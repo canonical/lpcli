@@ -678,13 +678,14 @@ lpcli queue reject --name curl --version 8.5.0-2ubuntu10 --status "New" \
     --arch source --series noble --comment "Needs a bug fix."
 ```
 
-PPAs are archives too. Use `--ppa OWNER/NAME` (or `--archive
-ppa:OWNER/NAME`) with any queue command to target one. Without either flag,
-queue commands query the distribution's primary archive. The queried archive is
-shown in the search header, e.g. `for tenacious (~your-username/my-ppa)`.
-Launchpad normally auto-accepts PPA uploads, so use `--status done` to find
-them; accepting or rejecting a PPA upload requires queue-admin permissions and
-a genuinely queued upload.
+PPAs are archives too. Use `--ppa OWNER/NAME` or `--archive ppa:OWNER/NAME`
+with any queue command to target one; the two flags are mutually exclusive.
+Without either flag, queue commands query the distribution's primary archive.
+The queried archive is shown in the search header: the distribution name
+(`ubuntu`) for the primary archive, or `~owner/name` for a PPA, e.g.
+`for tenacious (~your-username/my-ppa)`. Launchpad normally auto-accepts PPA
+uploads, so use `--status done` to find them; accepting or rejecting a PPA
+upload requires queue-admin permissions and a genuinely queued upload.
 
 ```bash
 # Search a PPA queue (resolves to ~your-username/+archive/ubuntu/my-ppa)

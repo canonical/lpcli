@@ -218,9 +218,9 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 | Show binary details | `lpcli queue info --name curl --status "New" --arch amd64` |
 | Show PPA queue details | `lpcli queue info --name mutter --status done --arch source --ppa your-username/my-ppa --series tenacious` |
 | Accept a package | `lpcli queue accept --name curl --status "New" --arch source` |
-| Accept from a PPA | `lpcli queue accept --name mutter --status unapproved --arch source --ppa your-username/my-ppa --series tenacious` |
+| Accept from a PPA | `lpcli queue accept --name mutter --version 51.0-1ubuntu4 --status unapproved --arch source --ppa your-username/my-ppa --series tenacious` |
 | Reject a package | `lpcli queue reject --name curl --status "New" --arch source --comment "Reason"` |
-| Reject from a PPA | `lpcli queue reject --name mutter --status unapproved --arch source --ppa your-username/my-ppa --series tenacious --comment "Reason"` |
+| Reject from a PPA | `lpcli queue reject --name mutter --version 51.0-1ubuntu4 --status unapproved --arch source --ppa your-username/my-ppa --series tenacious --comment "Reason"` |
 
 ### Access Tokens
 
@@ -302,16 +302,18 @@ lpcli queue accept --name curl --status "New" --arch source
 
 ### Review a PPA upload queue
 
-Use `--ppa OWNER/NAME` (or `--archive ppa:OWNER/NAME`) to target a PPA. PPA
-uploads are normally auto-accepted, so search with `--status done`. The search
-header names the queried archive, for example `(~your-username/my-ppa)`.
+Use `--ppa OWNER/NAME` (or `--archive ppa:OWNER/NAME`) to target a PPA; the
+two flags are mutually exclusive. PPA uploads are normally auto-accepted, so
+search with `--status done`. The search header names the queried archive: a
+PPA label such as `(~your-username/my-ppa)`, or the distribution name for the
+primary archive, such as `(ubuntu)`.
 
 ```bash
 lpcli queue search --status done --ppa your-username/my-ppa --series tenacious
 lpcli queue info --name mutter --status done --arch source --ppa your-username/my-ppa --series tenacious
 lpcli queue download --name mutter --status done --arch source --ppa your-username/my-ppa --series tenacious
-lpcli queue accept --name mutter --status unapproved --arch source --ppa your-username/my-ppa --series tenacious
-lpcli queue reject --name mutter --status unapproved --arch source --ppa your-username/my-ppa --series tenacious --comment "Reason"
+lpcli queue accept --name mutter --version 51.0-1ubuntu4 --status unapproved --arch source --ppa your-username/my-ppa --series tenacious
+lpcli queue reject --name mutter --version 51.0-1ubuntu4 --status unapproved --arch source --ppa your-username/my-ppa --series tenacious --comment "Reason"
 ```
 
 ### Download source packages
