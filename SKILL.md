@@ -42,13 +42,13 @@ run the search and report the count.
 
 - `lpcli` must be on `$PATH` (install via `cargo install --path .` from the
   [lpcli repo](https://github.com/canonical/lpcli)).
-- Most **read** operations work **anonymously** (no login needed).
-- **Write** operations require `lpcli login` first.
+- Run `lpcli login` first. Many commands, including common reads such as
+  `bug show` and `bug search`, require authentication — do not assume any
+  command works anonymously.
 - If the user logged in with a **hardware-bound token** (`lpcli hardware-token
-  issue` or `lpcli login --hardware-token`), each authenticated `lpcli`
-  invocation needs a touch of their USB security key (and possibly its PIN).
-  Tell the user before running authenticated commands, and prefer anonymous
-  read commands where possible. `lpcli status` shows which login is in use.
+  issue` or `lpcli login --hardware-token`), each `lpcli` invocation needs a
+  touch of their USB security key (and possibly its PIN). Tell the user before
+  running commands. `lpcli status` shows which login is in use.
 
 ## CLI Reference
 
@@ -90,8 +90,12 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 | Add a bug task | `lpcli bug add-task --bug-id 123456 --target ubuntu --package curl --series noble --status new --importance undecided` |
 | Add a bug task with remote bug link | `lpcli bug add-task --bug-id 123456 --target debian --package curl --bug-tracker debbugs --remote-bug 654321` |
 | Link bug task to remote bug | `lpcli bug link-remote --bug-id 123456 --target debian --bug-tracker debbugs --remote-bug 654321` |
+| Link bug task to a GitHub issue/PR | `lpcli bug link-remote --bug-id 123456 --target ubuntu --package curl --github "owner/repo#658"` |
 | Unlink remote bug watch from task | `lpcli bug unlink-remote --bug-id 123456 --target debian` |
-| List bug watches | `lpcli bug watches --bug-id 123456` |
+| List bug watches (Linked Tasks column shows task links) | `lpcli bug watches --bug-id 123456` |
+| Find a remote bug tracker | `lpcli bug remote-bug-trackers --search "canonical/apport" --limit 20` |
+| Find remote bug trackers as JSON | `lpcli bug remote-bug-trackers --search "github" --json` |
+| Register a bug tracker | `lpcli bug tracker create --base-url https://github.com/OWNER/REPO/issues --type github` |
 | Delete a bug task | `lpcli bug delete-task --bug-id 123456 --target ubuntu --package curl --series noble` |
 | Add a tag | `lpcli bug tag --bug-id 123456 --add-tag regression` |
 | Add multiple tags | `lpcli bug tag --bug-id 123456 --add-many-tags "regression, oem, sru"` |
@@ -265,6 +269,31 @@ lpcli bug link-remote --bug-id 123456 --target debian --package curl \
 lpcli bug watches --bug-id 123456
 ```
 
+### Link a Launchpad bug to a GitHub issue or PR
+
+lpcli manages the repository tracker and bug watch automatically. It
+validates the configuration and resulting watch URL, reuses an existing
+matching watch instead of duplicating one, and prints the final watch URL.
+
+```bash
+# Documentation example (not executed):
+lpcli bug link-remote -b 2174521 -t ubuntu -p apport --github "canonical/apport#658"
+lpcli bug watches -b 2174521
+```
+
+- Name the task: `-t` (plus `-p` for a source-package task in a distribution)
+  or `-u/--task-url`; selector-less linking succeeds only for a single match.
+  `--github "OWNER/REPO#N"` takes a plain numeric N (issues and PRs share one
+  numbering sequence) and avoids the legacy mis-typed `github-issues` tracker.
+- Expected watch URL: https://github.com/canonical/apport/issues/658
+  (GitHub redirects /issues/N to /pull/N for PRs). Verify the expected URL
+  AND the intended task in Linked Tasks; listing a watch is not proof of
+  reachability — optionally probe anonymously:
+  `curl -IL https://github.com/canonical/apport/issues/658`
+- Wrong watch? `bug unlink-remote` detaches the selected task link only;
+  watch deletion is web-UI-only:
+  `https://bugs.launchpad.net/bugs/<bug>/+watch/<watch-id>`.
+
 ### Find packages in a series
 
 ```bash
@@ -313,10 +342,12 @@ lpcli person ppas --name jdoe
 
 ## Tips for Agents
 
-1. **Run in terminal** — all Launchpad operations use `lpcli` commands; no
-   browser or web scraping needed.
-2. **Read operations are anonymous** — bug searches, package lookups, etc. work
-   without `lpcli login`.
+1. **Run in terminal** — nearly all Launchpad operations use `lpcli`
+   commands; no browser or web scraping needed. The one known exception is
+   deleting a bug watch, which is web-UI-only (see the GitHub linking
+   workflow above).
+2. **Log in first** — run `lpcli login` before using `lpcli`; many commands
+   (bug searches, package lookups, etc.) require authentication.
 3. **Use `--help`** — every subcommand supports `--help` for full option details
    (e.g. `lpcli bug search --help`).
 4. **Counting results** — `lpcli` outputs human-readable tables. To count bugs,

@@ -1597,6 +1597,7 @@ fn cli_link_remote_full() {
         package,
         bug_tracker,
         remote_bug,
+        github,
         series,
         task_url,
     }) = cli.command
@@ -1606,8 +1607,9 @@ fn cli_link_remote_full() {
     assert_eq!(bug_id, 42);
     assert_eq!(target.as_deref(), Some("debian"));
     assert_eq!(package.as_deref(), Some("arctica-greeter"));
-    assert_eq!(bug_tracker, "debbugs");
-    assert_eq!(remote_bug, "12345");
+    assert_eq!(bug_tracker.as_deref(), Some("debbugs"));
+    assert_eq!(remote_bug.as_deref(), Some("12345"));
+    assert!(github.is_none(), "explicit form must not set --github");
     assert!(series.is_none());
     assert!(task_url.is_none());
 }
@@ -1628,17 +1630,17 @@ fn cli_link_remote_aliases() {
         ];
         let cli = Cli::try_parse_from(full).expect("CLI parsing failed for alias");
         let Command::Bug(BugCommand::LinkRemote {
-            bug_id,
             bug_tracker,
             remote_bug,
+            github,
             ..
         }) = cli.command
         else {
             panic!("Expected LinkRemote for alias {alias}");
         };
-        assert_eq!(bug_id, 42);
-        assert_eq!(bug_tracker, "debbugs");
-        assert_eq!(remote_bug, "12345");
+        assert_eq!(bug_tracker.as_deref(), Some("debbugs"));
+        assert_eq!(remote_bug.as_deref(), Some("12345"));
+        assert!(github.is_none(), "explicit form must not set --github");
     }
 }
 
@@ -1683,7 +1685,7 @@ fn cli_remote_bug_trackers_filters_and_limits() {
         "DebÜG",
     ])
     .expect("CLI parsing failed");
-    let Command::Bug(BugCommand::RemoteBugTrackers { limit, search }) = cli.command else {
+    let Command::Bug(BugCommand::RemoteBugTrackers { limit, search, .. }) = cli.command else {
         panic!("Expected RemoteBugTrackers");
     };
     assert_eq!(limit, Some(2));
@@ -1702,7 +1704,7 @@ fn cli_remote_bug_trackers_accepts_short_options() {
         "debian",
     ])
     .expect("CLI parsing failed");
-    let Command::Bug(BugCommand::RemoteBugTrackers { limit, search }) = cli.command else {
+    let Command::Bug(BugCommand::RemoteBugTrackers { limit, search, .. }) = cli.command else {
         panic!("Expected RemoteBugTrackers");
     };
     assert_eq!(limit, Some(3));
@@ -1908,4 +1910,517 @@ fn find_task_to_link_not_found_fails() {
     };
     let res = find_task_to_link(&tasks, 42, &selector);
     assert!(res.is_err());
+}
+// Remote bug linking / tracker registration — test additions. Compact argv
+// strings are split on ASCII whitespace; values with embedded whitespace
+// (title/summary/name, bad-whitespace refs) keep explicit argv form.
+
+use TrackerType::{Debbugs, Github, Gitlab, GoogleCode};
+
+const WATCH_LINKED_URL: &str = "https://api.launchpad.net/devel/bugs/2174521/+watch/167246";
+
+#[rustfmt::skip]
+#[test]
+fn cli_link_remote_github_shorthand_and_explicit_pair_parse() {
+    // The shorthand targets tasks with the same selectors as the explicit
+    // form (-t/-p, and the -u task-url form); the paired explicit form
+    // keeps working unchanged now that both arguments are optional.
+    let parse = |argv: &str| Cli::try_parse_from(argv.split_ascii_whitespace()).expect("CLI parsing failed");
+    let cli = parse("lpcli bug link-remote -b 42 -t ubuntu -p apport --github canonical/apport#658");
+    let Command::Bug(BugCommand::LinkRemote { bug_id, target, package, github, bug_tracker, remote_bug, .. }) = cli.command else { panic!("Expected LinkRemote") };
+    assert_eq!(bug_id, 42);
+    assert_eq!(target.as_deref(), Some("ubuntu"));
+    assert_eq!(package.as_deref(), Some("apport"));
+    let github = github.expect("--github must parse into owner/repo/number");
+    assert_eq!((github.owner(), github.repo(), github.number()), ("canonical", "apport", 658));
+    assert!(bug_tracker.is_none() && remote_bug.is_none());
+    let task_url = "https://api.launchpad.net/devel/ubuntu/+source/apport/+bug/42";
+    let cli = parse("lpcli bug link-remote -b 42 -u https://api.launchpad.net/devel/ubuntu/+source/apport/+bug/42 --github canonical/apport#658");
+    let Command::Bug(BugCommand::LinkRemote { task_url: parsed_url, target, github, .. }) = cli.command else { panic!("Expected LinkRemote") };
+    assert_eq!(parsed_url.as_deref(), Some(task_url));
+    assert!(target.is_none(), "the task-url form needs no -t target");
+    assert_eq!(github.expect("--github must parse").number(), 658);
+    let cli = parse("lpcli bug link-remote -b 42 -g debbugs -r 1150409");
+    let Command::Bug(BugCommand::LinkRemote { bug_tracker, remote_bug, github, .. }) = cli.command else { panic!("Expected LinkRemote") };
+    assert_eq!(bug_tracker.as_deref(), Some("debbugs"));
+    assert_eq!(remote_bug.as_deref(), Some("1150409"));
+    assert!(github.is_none());
+}
+
+#[test]
+fn cli_link_remote_github_group_conflicts() {
+    // --github and the --bug-tracker/--remote-bug pair are mutually
+    // exclusive, each pair member requires the other, and with neither
+    // there is nothing to link to.
+    let rejected = [
+        (
+            "--github canonical/apport#658 --bug-tracker debbugs",
+            "--github mutex --bug-tracker",
+        ),
+        (
+            "--github canonical/apport#658 --remote-bug 658",
+            "--github mutex --remote-bug",
+        ),
+        (
+            "--github canonical/apport#658 -g debbugs -r 1",
+            "--github mutex explicit pair",
+        ),
+        (
+            "--bug-tracker debbugs",
+            "--bug-tracker requires --remote-bug",
+        ),
+        ("--remote-bug 658", "--remote-bug requires --bug-tracker"),
+        ("", "--github or --bug-tracker is required"),
+    ];
+    for (extra, reason) in rejected {
+        let argv = format!("lpcli bug link-remote -b 42 {extra}");
+        assert!(
+            Cli::try_parse_from(argv.split_ascii_whitespace()).is_err(),
+            "link-remote '{extra}' must be rejected ({reason})"
+        );
+    }
+}
+
+#[rustfmt::skip]
+#[test]
+fn cli_link_remote_github_ref_grammar() {
+    // CLI-only strictness on top of the library parser (which tolerates
+    // surrounding whitespace and accepts github.com URLs for programmatic
+    // use): whitespace and URLs are rejected outright at the value parser.
+    for reference in [
+        "canonical/apport#0", "canonical/apport", "canonical#658",
+        "canonical/apport#six", "canonical/apport #658", "canonical/apport#658 ",
+    ] {
+        assert!(parse_github_ref(reference).is_err(), "GitHub ref '{reference}' must be rejected");
+    }
+    let url_error = parse_github_ref("https://github.com/canonical/apport/issues/658")
+        .expect_err("full URLs are rejected");
+    assert!(url_error.contains("not a URL"), "URL rejection must name the expected form: {url_error}");
+    // Owner/repo are canonicalised to lower case by the library's
+    // GitHubBugRef; leading zeros collapse to the canonical decimal.
+    let parsed = parse_github_ref("Canonical/Apport#007").expect("must parse");
+    assert_eq!((parsed.owner(), parsed.repo(), parsed.number()), ("canonical", "apport", 7));
+}
+
+#[test]
+fn cli_remote_bug_trackers_json_output_flag() {
+    // Table output is the default; --json combines with the search/limit
+    // filters for machine-readable output.
+    let parse = |argv: &str| {
+        Cli::try_parse_from(argv.split_ascii_whitespace()).expect("CLI parsing failed")
+    };
+    let Command::Bug(BugCommand::RemoteBugTrackers { json, .. }) =
+        parse("lpcli bug remote-bug-trackers").command
+    else {
+        panic!("Expected RemoteBugTrackers")
+    };
+    assert!(!json, "default output must stay the compact table");
+    let Command::Bug(BugCommand::RemoteBugTrackers {
+        limit,
+        search,
+        json,
+    }) = parse("lpcli bug remote-bug-trackers --json --search canonical/apport --limit 5").command
+    else {
+        panic!("Expected RemoteBugTrackers")
+    };
+    assert!(json);
+    assert_eq!(limit, Some(5));
+    assert_eq!(search.as_deref(), Some("canonical/apport"));
+}
+
+/// A representative [`bugs::BugTracker`] for serialization tests (sparse
+/// JSON fixture: absent optional fields deserialise as `None`).
+#[rustfmt::skip]
+fn make_tracker(name: &str) -> bugs::BugTracker {
+    serde_json::from_value(serde_json::json!({
+        "self_link": format!("https://api.launchpad.net/devel/bugs/bugtrackers/{name}"),
+        "name": name,
+        "title": format!("{name} tracker"),
+        "summary": format!("Summary of {name}"),
+        "base_url": "https://example.org/issues",
+        "bug_tracker_type": "GitHub Issues",
+        "web_link": format!("https://bugs.launchpad.net/bugs/bugtrackers/{name}"),
+    }))
+    .expect("tracker fixture must deserialise")
+}
+
+#[rustfmt::skip]
+#[test]
+fn trackers_to_json_shape() {
+    // The output is a JSON array sorted by name with a fixed key set:
+    // optional fields always serialize (null when unset), identical input
+    // gives identical bytes, and the caller's data stays untouched.
+    let trackers = vec![make_tracker("debbugs"), make_tracker("auto-github-canonical-apport")];
+    let text = trackers_to_json(&trackers).expect("serialization should not fail");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("output must be valid JSON");
+    let entries = value.as_array().expect("JSON output must be an array");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["name"], "auto-github-canonical-apport");
+    assert_eq!(entries[1]["name"], "debbugs");
+    for entry in entries {
+        for key in ["self_link", "title", "bug_tracker_type", "base_url"] {
+            assert!(entry.get(key).is_some(), "key '{key}' must always be present");
+        }
+    }
+    assert_eq!(
+        trackers.iter().map(|t| t.name.as_deref()).collect::<Vec<_>>(),
+        vec![Some("debbugs"), Some("auto-github-canonical-apport")],
+        "the caller's input must stay untouched"
+    );
+    assert_eq!(trackers_to_json(&[]).expect("serialization should not fail"), "[]", "an empty result must stay an empty JSON array");
+    let all_null: serde_json::Value = serde_json::from_str(
+        &trackers_to_json(std::slice::from_ref(&bugs::BugTracker::default())).expect("serialization should not fail"),
+    ).expect("output must be valid JSON");
+    for key in ["self_link", "name", "title", "summary", "base_url", "bug_tracker_type", "web_link"] {
+        assert!(all_null[0].get(key).is_some_and(|v| v.is_null()), "key '{key}' must stay null");
+    }
+    let again = trackers_to_json(&trackers).expect("serialization should not fail");
+    assert_eq!(text, again, "same input must produce identical bytes");
+}
+
+#[rustfmt::skip]
+#[test]
+fn bug_task_display_name_prefers_display_name_then_target_link_then_self_link() {
+    // Sparse task fixture (absent optional fields deserialise as `None`):
+    // the display name falls back display_name -> target_link -> self_link
+    // -> a stable placeholder.
+    let mut task: bugs::BugTask = serde_json::from_value(serde_json::json!({
+        "self_link": "https://api.launchpad.net/devel/ubuntu/+source/curl/+bug/42",
+        "target_link": "https://api.launchpad.net/devel/ubuntu/+source/curl",
+        "bug_target_display_name": "curl (Ubuntu)",
+    })).expect("task fixture must deserialise");
+    assert_eq!(bug_task_display_name(&task), "curl (Ubuntu)");
+    task.bug_target_display_name = None;
+    assert_eq!(bug_task_display_name(&task), "https://api.launchpad.net/devel/ubuntu/+source/curl", "falls back to target_link");
+    task.target_link = None;
+    assert_eq!(bug_task_display_name(&task), "https://api.launchpad.net/devel/ubuntu/+source/curl/+bug/42", "falls back to self_link");
+    task.self_link = None;
+    assert_eq!(bug_task_display_name(&task), "unknown task", "all-absent fields fall back to a stable placeholder");
+}
+
+#[rustfmt::skip]
+#[test]
+fn cli_bug_tracker_create_parses_options() {
+    // Without --type parsing succeeds and leaves the type unset (inference
+    // happens in validate_cli/resolve_tracker_create); the optional metadata
+    // parses as given (whitespace values keep explicit argv); required
+    // arguments and unknown values fail at parse time.
+    let parse = |argv: &str| Cli::try_parse_from(argv.split_ascii_whitespace()).expect("CLI parsing failed");
+    let Command::Bug(BugCommand::Tracker { command: TrackerCommand::Create { base_url, tracker_type, name, title, summary } }) = parse("lpcli bug tracker create --base-url https://github.com/canonical/apport/issues").command else { panic!("Expected Tracker Create") };
+    assert_eq!(base_url, "https://github.com/canonical/apport/issues");
+    assert!(tracker_type.is_none() && name.is_none() && title.is_none() && summary.is_none());
+    let cli = Cli::try_parse_from([
+        "lpcli", "bug", "tracker", "create", "--base-url", "https://bugs.debian.org/",
+        "--type", "debbugs", "--name", "debbugs", "--title", "Debian Bug tracker",
+        "--summary", "Debian's bug tracking system",
+    ]).expect("CLI parsing failed");
+    let Command::Bug(BugCommand::Tracker { command: TrackerCommand::Create { base_url, tracker_type, name, title, summary } }) = cli.command else { panic!("Expected Tracker Create") };
+    assert_eq!(base_url, "https://bugs.debian.org/");
+    assert_eq!(tracker_type, Some(Debbugs));
+    assert_eq!(
+        (name.as_deref(), title.as_deref(), summary.as_deref()),
+        (Some("debbugs"), Some("Debian Bug tracker"), Some("Debian's bug tracking system"))
+    );
+    for argv in [
+        "lpcli bug tracker create",
+        "lpcli bug tracker",
+        "lpcli bug tracker create --base-url https://example.org/issues --type google-plus",
+    ] {
+        assert!(Cli::try_parse_from(argv.split_ascii_whitespace()).is_err(), "'{argv}' must be rejected at parse time");
+    }
+}
+
+#[rustfmt::skip]
+#[test]
+fn cli_bug_tracker_create_type_aliases_map_to_launchpad_strings() {
+    // Every CLI alias parses to the expected enum variant whose
+    // launchpad_name is the literal human string ensureBugTracker expects;
+    // GitHub shares the library constant. The argv prefix is shared; only
+    // the alias rows vary.
+    let argv_prefix = ["lpcli", "bug", "tracker", "create", "--base-url", "https://example.org/issues", "--type"];
+    let cases = [
+        ("github", Github, "GitHub Issues"),
+        ("gh", Github, "GitHub Issues"),
+        ("gitlab", Gitlab, "GitLab Issues"),
+        ("gl", Gitlab, "GitLab Issues"),
+        ("bugzilla", TrackerType::Bugzilla, "Bugzilla"),
+        ("debbugs", Debbugs, "Debbugs"),
+        ("trac", TrackerType::Trac, "Trac"),
+        ("google-code", GoogleCode, "Google Code"),
+        ("googlecode", GoogleCode, "Google Code"),
+        ("roundup", TrackerType::Roundup, "Roundup"),
+        ("sourceforge", TrackerType::Sourceforge, "SourceForge or SourceForge derivative"),
+        ("mantis", TrackerType::Mantis, "Mantis"),
+        ("rt", TrackerType::Rt, "Request Tracker (RT)"),
+        ("request-tracker", TrackerType::Rt, "Request Tracker (RT)"),
+        ("savane", TrackerType::Savane, "Savane"),
+        ("php-project", TrackerType::PhpProject, "PHP Project Bugtracker"),
+        ("phpproject", TrackerType::PhpProject, "PHP Project Bugtracker"),
+        ("email", TrackerType::Email, "Email Address"),
+    ];
+    for (value, expected, launchpad_name) in cases {
+        let cli = Cli::try_parse_from(argv_prefix.iter().copied().chain(std::iter::once(value)))
+            .unwrap_or_else(|e| panic!("--type {value} must parse: {e}"));
+        let Command::Bug(BugCommand::Tracker { command: TrackerCommand::Create { tracker_type, .. } }) = cli.command else { panic!("Expected Tracker Create for --type {value}") };
+        assert_eq!(tracker_type, Some(expected), "--type {value}");
+        assert_eq!(tracker_type.unwrap().launchpad_name(), launchpad_name, "--type {value}");
+    }
+    assert_eq!(TrackerType::Github.launchpad_name(), bugs::BUG_TRACKER_TYPE_GITHUB);
+}
+
+#[rustfmt::skip]
+#[test]
+fn resolve_tracker_create_inference_and_name_rules() {
+    // A canonical GitHub issues URL (owner/repo case-insensitive) infers
+    // "GitHub Issues" with no name — Launchpad owns the auto-github- name;
+    // non-GitHub URLs use the requested type; the name is only sent when
+    // given.
+    let debian = "https://bugs.debian.org/";
+    for (base_url, tracker_type, name, expected) in [
+        ("https://github.com/canonical/apport/issues", None, None, ("GitHub Issues", None)),
+        ("https://github.com/Canonical/Apport/issues", None, None, ("GitHub Issues", None)),
+        (debian, Some(Debbugs), Some("debbugs"), ("Debbugs", Some("debbugs"))),
+        (debian, Some(Debbugs), None, ("Debbugs", None)),
+    ] {
+        let resolved = resolve_tracker_create(base_url, tracker_type, name)
+            .unwrap_or_else(|e| panic!("{base_url} with {tracker_type:?} must resolve: {e}"));
+        assert_eq!((resolved.bug_tracker_type, resolved.name.as_deref()), expected);
+        assert_eq!(resolved.base_url, base_url);
+    }
+    let message = resolve_tracker_create(debian, None, None)
+        .expect_err("non-GitHub base URLs require an explicit --type");
+    assert!(
+        message.contains("cannot infer --type") && message.contains("bugs.debian.org"),
+        "error must name the cause and the offending URL: {message}"
+    );
+    for name in ["", "   ", "two words", "slash/name"] {
+        assert!(
+            resolve_tracker_create(debian, Some(Debbugs), Some(name)).is_err(),
+            "tracker name '{name}' must be rejected"
+        );
+    }
+    // The same rules run through validate_cli, i.e. before authentication
+    // or any network access. (The invalid-name argv keeps its explicit
+    // form: the value contains whitespace.)
+    for (command, expected_ok, fragment) in [
+        ("lpcli bug tracker create --base-url https://github.com/canonical/apport/issues", true, ""),
+        ("lpcli bug tracker create --base-url https://gitlab.gnome.org/GNOME/mutter/issues --type gitlab", true, ""),
+        ("lpcli bug tracker create --base-url https://bugs.debian.org/", false, "cannot infer --type"),
+        ("lpcli bug tracker create --base-url https://github.com/canonical/apport --type github", false, "canonical GitHub repository issues base URL"),
+        ("lpcli bug tracker create --base-url https://github.com/ --type google-code", false, "github-issues"),
+    ] {
+        let cli = Cli::try_parse_from(command.split_ascii_whitespace()).expect("the configuration must parse");
+        let result = validate_cli(&cli);
+        assert_eq!(result.is_ok(), expected_ok, "tracker create '{command}'");
+        if let Err(error) = result {
+            assert!(error.to_string().contains(fragment), "unexpected error: {error}");
+        }
+    }
+    let cli = Cli::try_parse_from([
+        "lpcli", "bug", "tracker", "create", "--base-url", "https://bugs.debian.org/",
+        "--type", "debbugs", "--name", "two words",
+    ]).expect("the configuration must parse");
+    assert!(validate_cli(&cli).is_err(), "invalid names must fail validation");
+}
+
+#[rustfmt::skip]
+#[test]
+fn resolve_tracker_create_github_host_rules() {
+    // --type github requires the canonical issues form; another type on a
+    // github.com URL recreates the 'github-issues' (Google Code) trap; both
+    // paths refuse non-canonical github.com URLs, before any network.
+    for base_url in [
+        "https://github.com/canonical/apport",
+        "https://github.com/canonical/apport/pulls",
+        "https://github.com/canonical/apport/issues/658",
+        "https://github.com/canonical/apport/issues/extra",
+    ] {
+        let message = resolve_tracker_create(base_url, Some(Github), None)
+            .expect_err("--type github must require the canonical /issues form");
+        assert!(
+            message.contains("canonical GitHub repository issues base URL"),
+            "error must document the required shape for '{base_url}': {message}"
+        );
+    }
+    let message = resolve_tracker_create("https://github.com/", Some(GoogleCode), None)
+        .expect_err("github.com base URL must use --type github");
+    assert!(message.contains("github-issues"), "must mention the trap: {message}");
+    for base_url in [
+        "http://github.com/canonical/apport/issues",
+        "https://user@github.com/canonical/apport/issues",
+        "https://user:pass@github.com/canonical/apport/issues",
+        "https://github.com:8443/canonical/apport/issues",
+        "https://github.com//canonical/apport/issues",
+    ] {
+        let inferred = resolve_tracker_create(base_url, None, None)
+            .expect_err("inference must refuse a non-canonical GitHub URL");
+        assert!(inferred.contains("cannot infer --type"), "for '{base_url}': {inferred}");
+        let explicit = resolve_tracker_create(base_url, Some(Github), None)
+            .expect_err("--type github must refuse a non-canonical GitHub URL");
+        assert!(
+            explicit.contains("canonical GitHub repository issues base URL"),
+            "for '{base_url}': {explicit}"
+        );
+    }
+}
+
+#[rustfmt::skip]
+#[test]
+fn tracker_create_base_url_rejections_and_self_hosted_ports() {
+    // Malformed base URLs (including embedded credentials) are rejected by
+    // the clap value parser, before authentication or any network access.
+    for base_url in [
+        "not-a-url",
+        "github.com/canonical/apport/issues",
+        "ftp://bugs.debian.org/",
+        "https://github.com/canonical/apport/issues?shard=1",
+        "https://bugs.debian.org/#fragment",
+        "",
+        "https://user:pass@bugs.example.org/trac/proj",
+        "https://user@bugs.example.org/trac/proj",
+        "https://:pass@bugs.example.org/trac/proj",
+    ] {
+        let argv = format!("lpcli bug tracker create --base-url {base_url}");
+        assert!(Cli::try_parse_from(argv.split_ascii_whitespace()).is_err(), "--base-url '{base_url}' must be rejected at parse time");
+    }
+    // Custom ports are legitimate for self-hosted trackers (only github.com
+    // URLs are restricted to the canonical shape) and keep their exact value.
+    for base_url in ["https://bugs.example.com:8443/trac/proj", "http://localhost:8080/bugs/"] {
+        assert_eq!(parse_tracker_base_url(base_url).ok().as_deref(), Some(base_url), "self-hosted '{base_url}' must stay accepted unchanged");
+        let argv = format!("lpcli bug tracker create --base-url {base_url}");
+        assert!(Cli::try_parse_from(argv.split_ascii_whitespace()).is_ok(), "self-hosted '{base_url}' must parse for tracker create");
+    }
+    // Non-canonical github.com URLs parse but must fail validate_cli for
+    // both inference and explicit --type github (custom ports and repeated
+    // path segments included).
+    for extra in ["", "--type github"] {
+        for base_url in [
+            "https://github.com:8443/canonical/apport/issues",
+            "https://github.com//canonical/apport/issues",
+            "http://github.com/canonical/apport/issues",
+        ] {
+            let argv = format!("lpcli bug tracker create --base-url {base_url} {extra}");
+            let cli = Cli::try_parse_from(argv.split_ascii_whitespace()).expect("the URL shape must still parse");
+            assert!(validate_cli(&cli).is_err(), "tracker create with '{base_url}' (extra '{extra}') must fail validation");
+        }
+    }
+}
+
+#[rustfmt::skip]
+#[test]
+fn format_ensure_tracker_result_prints_returned_identity_and_state() {
+    // The printed identity comes from the returned entry, not the request,
+    // and the created/reused state is visible.
+    let tracker = bugs::BugTracker {
+        name: Some("auto-github-canonical-apport".to_string()),
+        bug_tracker_type: Some("GitLab Issues".to_string()),
+        base_url: Some("https://gitlab.gnome.org/GNOME/mutter/issues".to_string()),
+        ..Default::default()
+    };
+    let joined = format_ensure_tracker_result(&tracker, false).join("\n");
+    assert!(
+        joined.contains("auto-github-canonical-apport")
+            && joined.contains("reused (already existed)")
+            && joined.contains("GitLab Issues")
+            && joined.contains("https://gitlab.gnome.org/GNOME/mutter/issues"),
+        "the returned identity and state must be printed: {joined}"
+    );
+    assert!(
+        format_ensure_tracker_result(&tracker, true).join("\n").contains("created"),
+        "a newly registered tracker must be reported as created"
+    );
+}
+
+#[rustfmt::skip]
+#[test]
+fn format_ensure_tracker_result_survives_missing_fields() {
+    let lines = format_ensure_tracker_result(&bugs::BugTracker::default(), true);
+    assert!(lines.join("\n").contains("(unknown name)"), "a nameless returned tracker must still produce readable output");
+}
+
+#[rustfmt::skip]
+#[test]
+fn watch_url_line_prints_url_and_stays_visible_when_missing() {
+    // The final watch URL is printed unconditionally for both link forms: a
+    // missing URL must stay visible rather than be silently skipped.
+    let watch = bugs::BugWatch { url: Some("https://github.com/canonical/apport/issues/658".to_string()), ..Default::default() };
+    assert_eq!(watch_url_line(&watch), "  URL: https://github.com/canonical/apport/issues/658");
+    assert!(watch_url_line(&bugs::BugWatch::default()).contains("no watch URL"), "a missing watch URL must stay visible");
+}
+
+#[rustfmt::skip]
+#[test]
+fn watch_linked_tasks_cell_visibility() {
+    // Tasks are grouped by the final path segment of bug_watch_link (so a
+    // beta-namespace link still matches); unlinked tasks are ignored; names
+    // are joined; unknown-id watches are orphans (also with no tasks); a
+    // watch without a usable ID is "unknown".
+    let task = |display: Option<&str>, watch_link: Option<&str>| {
+        let mut t = make_test_task(
+            "https://api.launchpad.net/devel/ubuntu/noble/+source/curl/+bug/42",
+            "https://api.launchpad.net/devel/ubuntu/noble/+source/curl",
+            "curl (Ubuntu Noble)",
+            watch_link,
+        );
+        if let Some(display) = display {
+            t.bug_target_display_name = Some(display.to_string());
+        }
+        t
+    };
+    let links = collect_watch_task_links(&[
+        task(None, Some(WATCH_LINKED_URL)),
+        task(Some("curl (via beta)"), Some("https://api.launchpad.net/beta/bugs/2174521/+watch/167246")),
+        task(None, None),
+    ]);
+    assert_eq!(links.len(), 1, "tasks without a watch link are ignored");
+    assert_eq!(links["167246"].len(), 2);
+    let cell = watch_linked_tasks_cell(Some("167246"), &links);
+    assert!(cell.contains("curl (Ubuntu Noble)") && cell.contains("curl (via beta)"), "linked names listed: {cell}");
+    assert!(cell.contains(", "), "multiple tasks are joined with ', '");
+    assert_eq!(watch_linked_tasks_cell(Some("167245"), &links), "orphan");
+    assert_eq!(watch_linked_tasks_cell(Some("167245"), &collect_watch_task_links(&[])), "orphan");
+    assert_eq!(watch_linked_tasks_cell(None, &links), "unknown");
+}
+
+#[rustfmt::skip]
+#[test]
+fn cli_bug_watches_and_tasks_short_bug_id_flags() {
+    // -b 2174521 (space-separated) for watches and -b2174521 (attached
+    // value) for tasks parse identically to the long --bug-id form.
+    let Command::Bug(BugCommand::Watches { bug_id }) = Cli::try_parse_from("lpcli bug watches -b 2174521".split_ascii_whitespace()).expect("CLI parsing failed").command else { panic!("Expected Watches") };
+    assert_eq!(bug_id, 2174521);
+    let Command::Bug(BugCommand::Tasks { bug_id }) = Cli::try_parse_from("lpcli bug tasks -b2174521".split_ascii_whitespace()).expect("CLI parsing failed").command else { panic!("Expected Tasks") };
+    assert_eq!(bug_id, 2174521);
+}
+
+#[rustfmt::skip]
+#[test]
+fn find_task_to_link_without_selector_auto_links_single_task() {
+    // Current intended selection semantics for BOTH link forms: with no
+    // selector at all, a single remaining task is auto-selected; multiple
+    // candidates are refused rather than guessed between. (Sparse task
+    // fixture: absent optional fields deserialise as `None`.)
+    let task = |display: &str, target: &str| -> bugs::BugTask {
+        serde_json::from_value(serde_json::json!({
+            "self_link": format!("https://api.launchpad.net/devel{target}/+bug/2174521"),
+            "bug_link": "https://api.launchpad.net/devel/bugs/2174521",
+            "bug_target_display_name": display,
+            "target_link": format!("https://api.launchpad.net/devel{target}"),
+        }))
+        .expect("task fixture must deserialise")
+    };
+    let single = vec![task("apport (Ubuntu)", "/ubuntu/+source/apport")];
+    let found = find_task_to_link(&single, 2174521, &TaskLinkSelector::default())
+        .expect("a single task must be auto-selected when no selector is given");
+    assert_eq!(found.bug_target_display_name.as_deref(), Some("apport (Ubuntu)"));
+    let tasks = vec![
+        task("apport (Ubuntu)", "/ubuntu/+source/apport"),
+        task("apport (Debian)", "/debian/+source/apport"),
+    ];
+    match find_task_to_link(&tasks, 2174521, &TaskLinkSelector::default()) {
+        Err(lpcli::error::LpError::Other(msg)) => {
+            assert!(msg.contains("Multiple matching tasks"), "unexpected message: {msg}");
+        }
+        other => panic!("Expected the ambiguous-selection error, got {other:?}"),
+    }
 }

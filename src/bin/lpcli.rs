@@ -2,6 +2,7 @@
 //!
 //! Parse command-line arguments with `clap` and dispatch to the `lpcli` library.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -847,18 +848,64 @@ enum BugCommand {
         #[arg(long)]
         remove_all_tags: bool,
     },
-    /// Link a bug task to a remote bug (e.g. in Debian or an upstream bug tracker).
-    #[command(alias = "link-task")]
+    /// Link a bug task to a remote bug (e.g. in Debian or an upstream tracker).
+    ///
+    /// The remote bug is identified by a bug tracker (see
+    /// `lpcli bug remote-bug-trackers`) plus the bug's ID in that tracker.
+    /// Launchpad builds the watch URL from the tracker: watch URL =
+    /// tracker base_url + remote bug ID, shaped by the tracker's type. For
+    /// the "GitHub Issues" type the tracker is repo-specific, with base URL
+    /// https://github.com/<owner>/<repo>/issues, so the final watch URL is
+    /// https://github.com/<owner>/<repo>/issues/<N>; GitHub redirects that
+    /// to /pull/<N> for pull requests, so the same form covers issues and
+    /// PRs.
+    ///
+    /// Beware of mistyped trackers: a tracker whose type does not match its
+    /// base URL produces junk watch URLs silently (e.g. the tracker named
+    /// "github-issues" is registered as type "Google Code" and generates
+    /// URLs like https://github.com/detail?id=...). The final watch URL is
+    /// printed after linking; verify it and re-check `lpcli bug watches`.
+    ///
+    /// Either pass --bug-tracker and --remote-bug explicitly, or use
+    /// --github "owner/repo#N", which finds or creates the
+    /// auto-github-<owner>-<repo> tracker (type "GitHub Issues", base URL
+    /// https://github.com/<owner>/<repo>/issues) and links to issue/PR N
+    /// (issues and PRs share one numbering sequence). --github is mutually
+    /// exclusive with --bug-tracker and --remote-bug.
+    ///
+    /// In both forms the task to link is selected the same way, via
+    /// --target/--package/--series or a direct --task-url; the --github
+    /// shorthand never guesses which task to modify.
+    #[command(
+        alias = "link-task",
+        group(ArgGroup::new("remote_link_spec")
+            .required(true)
+            .args(["github", "bug_tracker"])),
+    )]
     LinkRemote {
         /// The Launchpad bug number.
         #[arg(short, long)]
         bug_id: u64,
+        /// GitHub issue or pull request to link, as "owner/repo#NUMBER"
+        /// (e.g. "canonical/apport#658"). Ensures the
+        /// auto-github-<owner>-<repo> tracker exists, links the selected
+        /// task, and prints the final watch URL. Mutually exclusive with
+        /// --bug-tracker and --remote-bug.
+        #[arg(
+            long,
+            value_name = "OWNER/REPO#N",
+            value_parser = parse_github_ref,
+            conflicts_with_all = ["bug_tracker", "remote_bug"]
+        )]
+        github: Option<bugs::GitHubBugRef>,
         /// Remote bug tracker name from 'lpcli bug remote-bug-trackers'.
-        #[arg(short = 'g', long, visible_alias = "tracker")]
-        bug_tracker: String,
+        /// Must be paired with --remote-bug; mutually exclusive with --github.
+        #[arg(short = 'g', long, visible_alias = "tracker", requires = "remote_bug")]
+        bug_tracker: Option<String>,
         /// Remote bug ID or number in the tracker (e.g. "1150409").
-        #[arg(short = 'r', long, visible_alias = "remote")]
-        remote_bug: String,
+        /// Must be paired with --bug-tracker; mutually exclusive with --github.
+        #[arg(short = 'r', long, visible_alias = "remote", requires = "bug_tracker")]
+        remote_bug: Option<String>,
         /// Project or distribution name to match (e.g. "debian", "ubuntu").
         #[arg(short, long)]
         target: Option<String>,
@@ -873,6 +920,14 @@ enum BugCommand {
         task_url: Option<String>,
     },
     /// Unlink a bug task from its remote bug watch.
+    ///
+    /// This only detaches the task from the watch (clears the task's
+    /// bug_watch_link); the watch object itself remains on the bug. Bug
+    /// watches cannot be deleted through the REST API: to fully remove a
+    /// watch, use the Launchpad web UI page
+    /// bugs.launchpad.net/bugs/<bug-id>/+watch/<watch-id>, which has a
+    /// "Delete Bug Watch" button. Use `lpcli bug watches` to list watches,
+    /// including orphaned ones left behind by unlinking.
     #[command(alias = "unlink-task", alias = "unlink-bug")]
     UnlinkRemote {
         /// The Launchpad bug number.
@@ -892,12 +947,26 @@ enum BugCommand {
         task_url: Option<String>,
     },
     /// List bug watches (links to remote bugs) for a bug.
+    ///
+    /// The "Linked Tasks" column shows the bug tasks that point at each
+    /// watch; a watch that no task links to is shown as "orphan". Orphan
+    /// means no *visible* task links: the task list is fetched with the
+    /// current authentication, so a watch whose only links are on tasks the
+    /// signed-in user cannot see (e.g. tasks of private bugs) may still be
+    /// reported as orphan. Bug watches cannot be deleted through the REST
+    /// API: `bug unlink-remote` only detaches the task link. To fully
+    /// remove a watch, use the Launchpad web UI page
+    /// bugs.launchpad.net/bugs/<bug-id>/+watch/<watch-id>, which has a
+    /// "Delete Bug Watch" button.
     Watches {
         /// The Launchpad bug number.
         #[arg(short, long)]
         bug_id: u64,
     },
     /// List remote bug trackers registered in Launchpad.
+    ///
+    /// By default a compact table is printed. Use --json for
+    /// machine-readable output.
     RemoteBugTrackers {
         /// Maximum number of remote bug trackers to return.
         #[arg(short, long, value_parser = parse_positive_limit)]
@@ -905,7 +974,345 @@ enum BugCommand {
         /// Case-insensitive substring to match against tracker metadata.
         #[arg(short, long)]
         search: Option<String>,
+        /// Print a JSON array of tracker objects instead of a table.
+        ///
+        /// The output is pure JSON: an array of tracker objects with stable
+        /// keys (self_link, name, title, summary, base_url, bug_tracker_type,
+        /// web_link), sorted by name. An empty result prints as []. No table
+        /// or summary prose is printed in this mode.
+        #[arg(long)]
+        json: bool,
     },
+    /// Manage remote bug trackers registered in Launchpad.
+    Tracker {
+        #[command(subcommand)]
+        command: TrackerCommand,
+    },
+}
+
+/// Sub-commands for managing remote bug trackers.
+#[derive(Debug, Subcommand)]
+enum TrackerCommand {
+    /// Create a remote bug tracker, or idempotently ensure it exists.
+    ///
+    /// This wraps Launchpad's ensureBugTracker operation. If a tracker with
+    /// the same base URL already exists, Launchpad returns that tracker and
+    /// ignores the requested name and type; this command therefore prints
+    /// the ACTUAL returned name, type and base URL, and whether the tracker
+    /// was newly created or reused.
+    ///
+    /// With no --type, the type is inferred only for a canonical GitHub
+    /// repository issues URL (https://github.com/<owner>/<repo>/issues); for
+    /// that URL shape Launchpad also derives the
+    /// auto-github-<owner>-<repo> tracker name when --name is omitted. Any
+    /// other base URL requires an explicit --type, so no accidental
+    /// mis-typed tracker can be registered.
+    ///
+    /// A tracker's watch URLs are built from its base URL, so a GitHub
+    /// tracker's base URL must be https://github.com/<owner>/<repo>/issues
+    /// for the resulting links (e.g. .../issues/658) to resolve. A
+    /// github.com base URL combined with any other type is rejected: the
+    /// tracker named "github-issues" is registered as "Google Code" and
+    /// generates broken URLs like https://github.com/detail?id=...
+    Create {
+        /// Base URL of the remote tracker (e.g.
+        /// "https://github.com/canonical/apport/issues" or
+        /// "https://bugs.debian.org/"). Watch URLs are built by appending
+        /// the remote bug ID to this URL, shaped by the tracker type.
+        #[arg(long, value_name = "URL", value_parser = parse_tracker_base_url)]
+        base_url: String,
+        /// Tracker type. Optional only for a canonical GitHub repository
+        /// issues URL (inferred as github); required for everything else.
+        /// Values: github, gitlab, bugzilla, debbugs, trac, google-code,
+        /// roundup, sourceforge, mantis, rt, savane, php-project, email.
+        #[arg(long = "type", value_name = "TYPE", value_enum)]
+        tracker_type: Option<TrackerType>,
+        /// Tracker name. For GitHub base URLs this defaults to Launchpad's
+        /// auto-github-<owner>-<repo> convention (lowercased). Note that if
+        /// a tracker with the same base URL already exists, Launchpad keeps
+        /// its existing name and ignores this value.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// Human-readable tracker title (e.g. "Debian Bug tracker").
+        #[arg(long, value_name = "TITLE")]
+        title: Option<String>,
+        /// Description of the tracker.
+        #[arg(long, value_name = "SUMMARY")]
+        summary: Option<String>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// GitHub shorthand and bug-tracker create argument parsing
+//
+// Everything in this section is strict and pure: malformed GitHub references
+// and tracker configurations are rejected at CLI parse/validation time,
+// before authentication or any network access. GitHub reference name rules
+// are delegated to the library ([`bugs::GitHubBugRef`]) so there is a single
+// source of truth; this section only adds CLI-level strictness.
+// ---------------------------------------------------------------------------
+
+/// clap value parser for `bug link-remote --github`.
+///
+/// Rejects the reference at CLI parse time — before authentication or any
+/// network access — so malformed input can never reach Launchpad. On top of
+/// the library parser ([`bugs::parse_github_bug_ref`]) the CLI is stricter:
+/// * whitespace anywhere is rejected (the library parser tolerates
+///   surrounding whitespace);
+/// * full URLs are rejected with a targeted message (the library parser
+///   also accepts `github.com` issue/PR URLs for programmatic use, but the
+///   CLI shorthand is `owner/repo#N` only).
+fn parse_github_ref(value: &str) -> Result<bugs::GitHubBugRef, String> {
+    if value.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "invalid GitHub reference '{value}': must not contain whitespace; \
+             expected 'owner/repo#NUMBER'"
+        ));
+    }
+    if value.contains("://") {
+        return Err(format!(
+            "invalid GitHub reference '{value}': pass 'owner/repo#NUMBER', not a URL"
+        ));
+    }
+    bugs::parse_github_bug_ref(value).map_err(|e| e.to_string())
+}
+
+/// Canonical GitHub issues URL check for `bug tracker create` type
+/// inference: returns the lowercased `(owner, repo)` pair when `base_url` is
+/// the strict canonical `https://github.com/<owner>/<repo>/issues` form
+/// (https only, exact github.com host, no user information, no explicit
+/// port, no query or fragment, no empty or repeated path segments).
+/// Delegates entirely to [`bugs::parse_github_issues_base_url`].
+fn parse_github_issues_base_url(base_url: &str) -> Option<(String, String)> {
+    bugs::parse_github_issues_base_url(base_url).ok()
+}
+
+/// Remote bug tracker types accepted by `bug tracker create --type`.
+///
+/// Each value maps via [`TrackerType::launchpad_name`] to the literal,
+/// human-readable `bug_tracker_type` string that Launchpad's ensureBugTracker
+/// operation expects (e.g. "GitHub Issues", also available as
+/// [`bugs::BUG_TRACKER_TYPE_GITHUB`]), and that `bug remote-bug-trackers`
+/// prints in its Type column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TrackerType {
+    /// GitHub Issues (github.com).
+    #[value(alias = "gh")]
+    Github,
+    /// GitLab Issues (gitlab.com or self-hosted GitLab).
+    #[value(alias = "gl")]
+    Gitlab,
+    /// Bugzilla instances.
+    Bugzilla,
+    /// Debian's Debbugs (e.g. bugs.debian.org).
+    Debbugs,
+    /// Trac instances.
+    Trac,
+    /// The legacy Google Code tracker type.
+    #[value(alias = "googlecode")]
+    GoogleCode,
+    /// Roundup instances.
+    Roundup,
+    /// SourceForge or SourceForge derivative.
+    Sourceforge,
+    /// Mantis instances.
+    Mantis,
+    /// Request Tracker instances.
+    #[value(alias = "request-tracker")]
+    Rt,
+    /// Savane instances.
+    Savane,
+    /// PHP Project Bugtracker instances.
+    #[value(alias = "phpproject")]
+    PhpProject,
+    /// An email-address tracker.
+    Email,
+}
+
+impl TrackerType {
+    /// The literal `bug_tracker_type` string Launchpad expects for this type
+    /// (GitHub shares the library constant as its single source of truth).
+    fn launchpad_name(self) -> &'static str {
+        match self {
+            TrackerType::Github => bugs::BUG_TRACKER_TYPE_GITHUB,
+            TrackerType::Gitlab => "GitLab Issues",
+            TrackerType::Bugzilla => "Bugzilla",
+            TrackerType::Debbugs => "Debbugs",
+            TrackerType::Trac => "Trac",
+            TrackerType::GoogleCode => "Google Code",
+            TrackerType::Roundup => "Roundup",
+            TrackerType::Sourceforge => "SourceForge or SourceForge derivative",
+            TrackerType::Mantis => "Mantis",
+            TrackerType::Rt => "Request Tracker (RT)",
+            TrackerType::Savane => "Savane",
+            TrackerType::PhpProject => "PHP Project Bugtracker",
+            TrackerType::Email => "Email Address",
+        }
+    }
+}
+
+impl std::fmt::Display for TrackerType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            TrackerType::Github => "github",
+            TrackerType::Gitlab => "gitlab",
+            TrackerType::Bugzilla => "bugzilla",
+            TrackerType::Debbugs => "debbugs",
+            TrackerType::Trac => "trac",
+            TrackerType::GoogleCode => "google-code",
+            TrackerType::Roundup => "roundup",
+            TrackerType::Sourceforge => "sourceforge",
+            TrackerType::Mantis => "mantis",
+            TrackerType::Rt => "rt",
+            TrackerType::Savane => "savane",
+            TrackerType::PhpProject => "php-project",
+            TrackerType::Email => "email",
+        };
+        f.write_str(name)
+    }
+}
+
+/// clap value parser for `bug tracker create --base-url`.
+///
+/// Accepts absolute http and https URLs (self-hosted trackers may use http
+/// and custom ports) without query strings, fragments or user information:
+/// a watch URL is built by appending the remote bug ID to this URL, so a
+/// query, fragment or embedded credentials would corrupt or leak into every
+/// generated watch URL.
+fn parse_tracker_base_url(value: &str) -> Result<String, String> {
+    let url = url::Url::parse(value).map_err(|e| format!("invalid base URL '{value}': {e}"))?;
+    match url.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(format!(
+                "invalid base URL '{value}': scheme must be http(s), got '{other}'"
+            ));
+        }
+    }
+    if url.host_str().is_none() {
+        return Err(format!("invalid base URL '{value}': missing host"));
+    }
+    // Any user information (a username, a password, or both) is rejected:
+    // credentials must not be embedded in a registered tracker base URL,
+    // from which Launchpad derives public watch URLs.
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(format!(
+            "invalid base URL '{value}': user information (username or password) \
+             is not allowed in a tracker base URL"
+        ));
+    }
+    if url.query().is_some() {
+        return Err(format!(
+            "invalid base URL '{value}': query strings are not allowed; watch URLs are \
+             built by appending the remote bug ID to the base URL"
+        ));
+    }
+    if url.fragment().is_some() {
+        return Err(format!(
+            "invalid base URL '{value}': URL fragments are not allowed"
+        ));
+    }
+    Ok(value.to_string())
+}
+
+/// The `bug tracker create` arguments after CLI-side resolution (pure, no
+/// network): the requested tracker type as Launchpad's literal
+/// `bug_tracker_type` string, and the tracker name to request (explicit
+/// `--name`; when omitted no name is sent and Launchpad derives one).
+#[derive(Debug)]
+struct ResolvedTrackerCreate {
+    base_url: String,
+    bug_tracker_type: &'static str,
+    name: Option<String>,
+}
+
+/// Resolve and validate `bug tracker create` arguments.
+///
+/// Runs both in [`validate_cli`] (so malformed configurations fail before
+/// authentication or any network access) and in the command handler (to
+/// obtain the resolved values for dispatch).
+///
+/// Rules:
+/// * No `--type`: the type is inferred only for a canonical GitHub
+///   repository issues URL; anything else is an error.
+/// * `--type github`: requires a canonical GitHub repository issues URL.
+/// * A github.com base URL combined with any other type is rejected: that
+///   combination recreates the broken `github-issues` (Google Code) trap.
+/// * `--name` must not be empty or contain whitespace or '/'. When omitted,
+///   no name is sent: Launchpad derives one from the base URL (for
+///   `github.com` URLs, its auto-github-<owner>-<repo> convention) and owns
+///   collision suffixing.
+fn resolve_tracker_create(
+    base_url: &str,
+    tracker_type: Option<TrackerType>,
+    name: Option<&str>,
+) -> Result<ResolvedTrackerCreate, String> {
+    let canonical_github = parse_github_issues_base_url(base_url);
+    let is_github_host = url::Url::parse(base_url)
+        .ok()
+        .is_some_and(|u| u.host_str() == Some("github.com"));
+
+    let bug_tracker_type = match tracker_type {
+        Some(tracker_type) => {
+            if is_github_host && tracker_type != TrackerType::Github {
+                return Err(format!(
+                    "base URL '{base_url}' is on github.com but --type {} was requested; \
+                     GitHub repositories must be registered with --type github and the \
+                     base URL https://github.com/<owner>/<repo>/issues so watch URLs \
+                     resolve (the tracker named 'github-issues' is typed Google Code and \
+                     generates broken URLs like https://github.com/detail?id=...)",
+                    tracker_type
+                ));
+            }
+            if tracker_type == TrackerType::Github && canonical_github.is_none() {
+                return Err(format!(
+                    "--type github requires a canonical GitHub repository issues base URL \
+                     'https://github.com/<owner>/<repo>/issues', got '{base_url}'"
+                ));
+            }
+            tracker_type.launchpad_name()
+        }
+        None => match &canonical_github {
+            Some(_) => TrackerType::Github.launchpad_name(),
+            None => {
+                return Err(format!(
+                    "cannot infer --type from base URL '{base_url}'; pass --type \
+                     (e.g. bugzilla, trac, gitlab; run \
+                     'lpcli bug tracker create --help' for all values)"
+                ));
+            }
+        },
+    };
+
+    let name = match name {
+        Some(name) => {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err("--name must not be empty".to_string());
+            }
+            if name.chars().any(char::is_whitespace) {
+                return Err(format!(
+                    "invalid tracker name '{name}': must not contain whitespace"
+                ));
+            }
+            if name.contains('/') {
+                return Err(format!(
+                    "invalid tracker name '{name}': must not contain '/'"
+                ));
+            }
+            Some(name.to_string())
+        }
+        // No default name is invented here: Launchpad derives the tracker
+        // name from the base URL (auto-github-<owner>-<repo> for GitHub URLs)
+        // and the command prints the actual returned name.
+        None => None,
+    };
+
+    Ok(ResolvedTrackerCreate {
+        base_url: base_url.to_string(),
+        bug_tracker_type,
+        name,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1755,6 +2162,15 @@ fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
             | BugCommand::UnlinkRemote { target, series, .. } => {
                 validate_series_for_target(target.as_deref().unwrap_or(""), series.as_deref())
             }
+            BugCommand::Tracker {
+                command:
+                    TrackerCommand::Create {
+                        base_url,
+                        tracker_type,
+                        name,
+                        ..
+                    },
+            } => resolve_tracker_create(base_url, *tracker_type, name.as_deref()).map(|_| ()),
             _ => Ok(()),
         },
         Command::Package(cmd) => match cmd {
@@ -2664,6 +3080,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
 
         BugCommand::LinkRemote {
             bug_id,
+            github,
             bug_tracker,
             remote_bug,
             target,
@@ -2680,6 +3097,10 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 series: series.clone(),
                 task_url: task_url.clone(),
             };
+            // Task selection is identical for the explicit tracker form and
+            // the --github shorthand: the shorthand only changes how the
+            // tracker and remote bug are resolved, it never guesses which
+            // task to modify.
             let task = find_task_to_link(&tasks, bug_id, &selector)?;
             let effective_task_url = task.self_link.as_deref().ok_or_else(|| {
                 lpcli::error::LpError::NotFound(format!(
@@ -2691,20 +3112,58 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 .as_deref()
                 .unwrap_or(effective_task_url);
 
-            let (_updated_task, watch) = bugs::link_bug_task_remote(
-                &client,
-                bug_id,
-                effective_task_url,
-                &bug_tracker,
-                &remote_bug,
-            )
-            .await?;
+            let (watch, remote_bug_label, url_line): (bugs::BugWatch, String, String) =
+                match &github {
+                    Some(github_ref) => {
+                        // Shorthand: one library call finds-or-registers the
+                        // correctly configured auto-github-<owner>-<repo>
+                        // tracker, reuses or creates the watch, validates the
+                        // watch URL shape before touching the task, and links
+                        // it. The tracker is validated (type + base URL) by
+                        // the library, so a mis-configured tracker fails
+                        // before any task mutation.
+                        let (_updated_task, watch) = bugs::link_github_bug_task(
+                            &client,
+                            bug_id,
+                            effective_task_url,
+                            github_ref,
+                        )
+                        .await?;
+                        let url_line = watch_url_line(&watch);
+                        (watch, github_ref.to_string(), url_line)
+                    }
+                    None => {
+                        // Clap's remote_link_spec group requires one of
+                        // --github/--bug-tracker, and --bug-tracker requires
+                        // --remote-bug, so both are present here.
+                        let tracker_name = bug_tracker.as_deref().ok_or_else(|| {
+                            lpcli::error::LpError::Other(
+                                "--bug-tracker is required when --github is not given".into(),
+                            )
+                        })?;
+                        let remote_bug_id = remote_bug.as_deref().ok_or_else(|| {
+                            lpcli::error::LpError::Other(
+                                "--remote-bug is required when --github is not given".into(),
+                            )
+                        })?;
+                        let (_updated_task, watch) = bugs::link_bug_task_remote(
+                            &client,
+                            bug_id,
+                            effective_task_url,
+                            tracker_name,
+                            remote_bug_id,
+                        )
+                        .await?;
+                        let url_line = watch_url_line(&watch);
+                        (watch, remote_bug_id.to_string(), url_line)
+                    }
+                };
 
             let watch_id = watch
                 .self_link
                 .as_deref()
                 .and_then(|u| u.rsplit('/').next())
-                .unwrap_or(&remote_bug);
+                .unwrap_or(&remote_bug_label);
             let watch_title = watch.title.as_deref().unwrap_or(watch_id);
 
             println!(
@@ -2713,9 +3172,11 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 display_name,
                 watch_title,
             );
-            if let Some(url) = &watch.url {
-                println!("  URL: {url}");
-            }
+            // The final watch URL is always printed: Launchpad derives it
+            // from the tracker, so a missing URL must stay visible rather
+            // than be silently skipped (mis-typed trackers generate junk
+            // URLs that otherwise only show up in `bug watches`).
+            println!("{url_line}");
         }
 
         BugCommand::UnlinkRemote {
@@ -2752,6 +3213,15 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 "✓".green().bold(),
                 display_name,
             );
+            // Unlinking only detaches the task; the watch object survives
+            // (the REST API cannot delete watches) and becomes an orphan
+            // that `bug watches` will report. Point at the web UI, which is
+            // the only place a watch can be deleted.
+            if let Some(watch_id) = task.bug_watch_id() {
+                println!(
+                    "  Note: the watch itself remains on bug #{bug_id}; delete it in the web UI at https://bugs.launchpad.net/bugs/{bug_id}/+watch/{watch_id}"
+                );
+            }
         }
 
         BugCommand::Watches { bug_id } => {
@@ -2760,7 +3230,22 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 println!("No bug watches found for bug #{bug_id}.");
                 return Ok(());
             }
-            let mut table = build_table(vec!["Watch ID", "Tracker", "Remote Bug", "Status", "URL"]);
+
+            // Map watch IDs to the bug tasks linking to them so orphaned
+            // watches are visible. A failure to fetch the tasks propagates:
+            // it must not be read as "nothing is linked" and render every
+            // watch as an orphan.
+            let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
+            let task_links = collect_watch_task_links(&tasks);
+
+            let mut table = build_table(vec![
+                "Watch ID",
+                "Tracker",
+                "Remote Bug",
+                "Status",
+                "URL",
+                "Linked Tasks",
+            ]);
             for w in &watches {
                 let watch_id = w
                     .self_link
@@ -2775,12 +3260,14 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 let remote_bug = w.remote_bug.as_deref().unwrap_or("—");
                 let status = w.remote_status.as_deref().unwrap_or("—");
                 let url = w.url.as_deref().unwrap_or("—");
+                let linked_tasks = watch_linked_tasks_cell(w.id(), &task_links);
                 table.add_row(vec![
                     watch_id.to_string(),
                     tracker.to_string(),
                     remote_bug.to_string(),
                     status.to_string(),
                     url.to_string(),
+                    linked_tasks,
                 ]);
             }
             println!("{}", "Bug Watches".bold());
@@ -2788,8 +3275,17 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             println!("{} bug watch(es).", watches.len());
         }
 
-        BugCommand::RemoteBugTrackers { limit, search } => {
+        BugCommand::RemoteBugTrackers {
+            limit,
+            search,
+            json,
+        } => {
             let trackers = bugs::search_bug_trackers(&client, search.as_deref(), limit).await?;
+            if json {
+                // Machine-readable mode: pure JSON, no table or summary prose.
+                println!("{}", trackers_to_json(&trackers)?);
+                return Ok(());
+            }
             if trackers.is_empty() {
                 if search.is_some() {
                     println!("No remote bug trackers matched the search.");
@@ -2818,8 +3314,90 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 trackers.len()
             );
         }
+
+        BugCommand::Tracker {
+            command:
+                TrackerCommand::Create {
+                    base_url,
+                    tracker_type,
+                    name,
+                    title,
+                    summary,
+                },
+        } => {
+            // validate_cli already rejected invalid combinations; re-resolve
+            // here (pure, no network) to obtain the requested tracker type
+            // and name for dispatch.
+            let resolved = resolve_tracker_create(&base_url, tracker_type, name.as_deref())
+                .map_err(lpcli::error::LpError::Other)?;
+            let params = bugs::EnsureBugTrackerParams {
+                base_url: &resolved.base_url,
+                bug_tracker_type: resolved.bug_tracker_type,
+                name: resolved.name.as_deref(),
+                title: title.as_deref(),
+                summary: summary.as_deref(),
+            };
+            // The library validates the tracker it returns against the
+            // request (exact type, matching base URL). The printed identity,
+            // type and base URL come from the tracker entry Launchpad
+            // returned — not from the requested arguments — together with
+            // whether the tracker was created or reused.
+            let bugs::EnsureBugTrackerOutcome { tracker, created } =
+                bugs::ensure_bug_tracker(&client, &params).await?;
+            for line in format_ensure_tracker_result(&tracker, created) {
+                println!("{line}");
+            }
+        }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Bug tracker registration output helpers
+// ---------------------------------------------------------------------------
+
+/// Build the output lines for `bug tracker create`.
+///
+/// The printed name, type and base URL come from the tracker entry
+/// Launchpad returned — ensureBugTracker may return an existing tracker
+/// found by base URL, silently ignoring the requested name and type — plus
+/// whether the tracker was created or reused.
+fn format_ensure_tracker_result(tracker: &bugs::BugTracker, created: bool) -> Vec<String> {
+    let name = tracker.name.as_deref().unwrap_or("(unknown name)");
+    let state = if created {
+        "created"
+    } else {
+        "reused (already existed)"
+    };
+    let mut lines = vec![format!(
+        "{} Bug tracker '{}' {state}.",
+        "✓".green().bold(),
+        name
+    )];
+    if let Some(tracker_type) = tracker.bug_tracker_type.as_deref() {
+        lines.push(format!("  Type:     {tracker_type}"));
+    }
+    if let Some(base_url) = tracker.base_url.as_deref() {
+        lines.push(format!("  Base URL: {base_url}"));
+    }
+    if let Some(self_link) = tracker.self_link.as_deref() {
+        lines.push(format!("  API:      {self_link}"));
+    }
+    lines
+}
+
+/// The final watch URL line printed after a successful link, for both the
+/// explicit tracker form and the --github shorthand.
+///
+/// The URL is printed unconditionally: Launchpad derives it from the
+/// tracker, so a missing URL must stay visible rather than be silently
+/// skipped (mis-typed trackers generate junk URLs that otherwise only show
+/// up in `bug watches`).
+fn watch_url_line(watch: &bugs::BugWatch) -> String {
+    match watch.url.as_deref() {
+        Some(url) => format!("  URL: {url}"),
+        None => "  URL: (Launchpad returned no watch URL; check `lpcli bug watches`)".to_string(),
+    }
 }
 
 fn parse_positive_limit(value: &str) -> Result<usize, String> {
@@ -5197,6 +5775,80 @@ fn build_table(headers: Vec<&str>) -> Table {
     table.load_style(UTF8_FULL_CONDENSED);
     table.set_header(headers);
     table
+}
+
+// ---------------------------------------------------------------------------
+// Bug watch and remote bug tracker display helpers
+// ---------------------------------------------------------------------------
+
+/// Serialize remote bug trackers as a pure JSON array for `--json` output.
+///
+/// The [`bugs::BugTracker`] fields serialize in declaration order with stable
+/// keys (absent fields serialize as null), and the array is sorted by tracker
+/// name so the output is deterministic across runs. Sorting borrows the
+/// trackers instead of cloning them. The result must be printed verbatim:
+/// callers must not add table or summary prose around it.
+fn trackers_to_json(trackers: &[bugs::BugTracker]) -> lpcli::error::Result<String> {
+    let mut sorted: Vec<&bugs::BugTracker> = trackers.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(serde_json::to_string_pretty(&sorted)?)
+}
+
+/// Best-effort display name for a bug task in watch-link listings.
+fn bug_task_display_name(task: &bugs::BugTask) -> String {
+    task.bug_target_display_name
+        .clone()
+        .or_else(|| task.target_link.clone())
+        .or_else(|| task.self_link.clone())
+        .unwrap_or_else(|| "unknown task".to_string())
+}
+
+/// Map each bug watch ID to the display names of the bug tasks linked to it.
+///
+/// Several tasks can share one watch (e.g. an Ubuntu series task and the
+/// upstream project task), so each watch ID maps to a set of task names.
+/// Tasks without a `bug_watch_link` are ignored. Matching is done on the
+/// watch ID (the final path segment of the task's `bug_watch_link`), which
+/// safely normalizes the API namespace, so links under any API version
+/// (e.g. `/devel/`, `/beta/`) match the same watch.
+fn collect_watch_task_links(tasks: &[bugs::BugTask]) -> BTreeMap<String, BTreeSet<String>> {
+    let mut links: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for task in tasks {
+        let Some(watch_id) = task.bug_watch_id() else {
+            continue;
+        };
+        links
+            .entry(watch_id.to_string())
+            .or_default()
+            .insert(bug_task_display_name(task));
+    }
+    links
+}
+
+/// Render the "Linked Tasks" cell for a row of `bug watches` output.
+///
+/// * A watch that tasks link to shows the display names of *all* linked
+///   task targets, joined with ", ".
+/// * A watch that no task links to shows "orphan".
+/// * A watch without a usable ID shows "unknown", because its linkage
+///   cannot be determined.
+fn watch_linked_tasks_cell(
+    watch_id: Option<&str>,
+    links: &BTreeMap<String, BTreeSet<String>>,
+) -> String {
+    let Some(id) = watch_id else {
+        return "unknown".to_string();
+    };
+    links
+        .get(id)
+        .map(|names| {
+            names
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_else(|| "orphan".to_string())
 }
 
 // ---------------------------------------------------------------------------
