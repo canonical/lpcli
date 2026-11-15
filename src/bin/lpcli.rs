@@ -4703,6 +4703,9 @@ fn resolve_queue_archive(
     }
     if value.starts_with("http://") || value.starts_with("https://") {
         let label = archive_label(value).unwrap_or_else(|| value.trim_end_matches('/').to_string());
+        if label.starts_with('~') {
+            validate_ppa_distro(distro)?;
+        }
         return Ok(QueueArchive {
             api_url: value.to_string(),
             label,
@@ -4711,6 +4714,9 @@ fn resolve_queue_archive(
     if value.contains("/+archive/") {
         let trimmed = value.trim_matches('/');
         let label = archive_label(trimmed).unwrap_or_else(|| trimmed.to_string());
+        if label.starts_with('~') {
+            validate_ppa_distro(distro)?;
+        }
         return Ok(QueueArchive {
             api_url: client.url(&format!("/{trimmed}")),
             label,
@@ -4733,17 +4739,24 @@ fn primary_queue_archive(client: &LaunchpadClient, distro: &str) -> QueueArchive
     }
 }
 
+/// Reject PPA-shaped archive targets for non-Ubuntu distributions.
+fn validate_ppa_distro(distro: &str) -> lpcli::error::Result<()> {
+    if distro.eq_ignore_ascii_case("ubuntu") {
+        Ok(())
+    } else {
+        Err(lpcli::error::LpError::Other(format!(
+            "PPA archives are only available for Ubuntu, not '{distro}'"
+        )))
+    }
+}
+
 /// A PPA archive; PPAs live under the Ubuntu distribution.
 fn ppa_queue_archive(
     client: &LaunchpadClient,
     distro: &str,
     ppa: &PpaRef,
 ) -> lpcli::error::Result<QueueArchive> {
-    if !distro.eq_ignore_ascii_case("ubuntu") {
-        return Err(lpcli::error::LpError::Other(format!(
-            "PPA archives are only available for Ubuntu, not '{distro}'"
-        )));
-    }
+    validate_ppa_distro(distro)?;
     Ok(QueueArchive {
         api_url: client.url(&ppa.api_path()),
         label: ppa.label(),
@@ -5144,16 +5157,18 @@ async fn handle_queue_download(
 
     if fail_count > 0 {
         println!(
-            "\n{} {} file(s) downloaded, {} failed.",
+            "\n{} {} file(s) downloaded from {}, {} failed.",
             "●".yellow().bold(),
             success_count,
+            archive.target_label(&distro, &series_name),
             fail_count,
         );
     } else {
         println!(
-            "\n{} Downloaded {} file(s) to '{}'.",
+            "\n{} Downloaded {} file(s) from {} to '{}'.",
             "●".green().bold(),
             success_count,
+            archive.target_label(&distro, &series_name),
             output_dir.display(),
         );
     }

@@ -309,7 +309,8 @@ normally auto-accepted, so search with `--status done` or `--status accepted`
 (a newly built binary can be accepted while it waits for publication). The
 search output names the queried archive: a PPA label such as
 `(~my-username/my-ppa)`, or the distribution name for the primary archive,
-such as `(ubuntu)`.
+such as `(ubuntu)`. PPA reads are authenticated by default; `--public` opts
+into an anonymous read of a public PPA and may omit private data.
 
 ```bash
 lpcli queue search --status done --ppa my-username/my-ppa --series tenacious

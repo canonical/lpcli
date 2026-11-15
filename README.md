@@ -687,7 +687,9 @@ header: the distribution name (`ubuntu`) for the primary archive, or
 Launchpad normally auto-accepts PPA uploads, so search with `--status done` or
 `--status accepted` (a newly built binary can be accepted while it waits for
 publication). Accepting or rejecting a PPA upload requires queue-admin
-permissions and a genuinely queued upload.
+permissions and a genuinely queued upload. PPA reads are authenticated by
+default; `--public` explicitly opts into an anonymous read of a public PPA and
+may omit private data.
 
 ```bash
 # Search a PPA queue (resolves to ~my-username/+archive/ubuntu/my-ppa)

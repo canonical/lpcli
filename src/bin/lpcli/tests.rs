@@ -790,6 +790,20 @@ fn public_mode_conflicts_with_auth_and_rejects_mutations_and_identity() {
             "{args:?}"
         );
     }
+    assert_eq!(
+        parsed_read_policy(&[
+            "lpcli",
+            "--public",
+            "queue",
+            "search",
+            "--status",
+            "New",
+            "--ppa",
+            "owner/test",
+        ]),
+        ReadAuthPolicy::Anonymous,
+        "--public explicitly opts into anonymous reads, even for PPAs"
+    );
 }
 
 #[test]
@@ -1118,6 +1132,16 @@ fn queue_ppa_references_parse_and_resolve() {
     assert_eq!(archive.label, "ubuntu/partner");
 
     assert!(resolve_queue_archive(&client, "debian", None, Some(&ppa)).is_err());
+    for archive_arg in [
+        "ppa:my-username/my-ppa",
+        "~my-username/+archive/ubuntu/my-ppa",
+        "https://api.example.test/devel/~my-username/+archive/ubuntu/my-ppa",
+    ] {
+        assert!(
+            resolve_queue_archive(&client, "debian", Some(archive_arg), None).is_err(),
+            "{archive_arg}"
+        );
+    }
     assert!(resolve_queue_archive(&client, "ubuntu", Some("ppa:"), None).is_err());
     assert!(resolve_queue_archive(&client, "ubuntu", Some("  "), None).is_err());
 }
