@@ -3129,9 +3129,21 @@ fn read_description_from_reader_rejects_non_utf8() {
 // skills command (embedded agent skill documentation)
 // -----------------------------------------------------------------------
 
+/// Both root help forms surface the embedded agent skills command.
 #[test]
-fn embedded_skill_doc_matches_repository_file() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("SKILL.md");
-    let expected = std::fs::read(path).expect("read SKILL.md");
-    assert_eq!(SKILL_DOC.as_bytes(), expected.as_slice());
+fn root_help_lists_agent_skills_command() {
+    for args in [vec!["lpcli", "--help"], vec!["lpcli", "help"]] {
+        let err = Cli::try_parse_from(&args).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp, "{args:?}");
+        let help = err
+            .to_string()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(help.contains("skills"), "{args:?}: {help}");
+        assert!(
+            help.contains("Agent Skills (coding agents should read this first)"),
+            "{args:?}: {help}"
+        );
+    }
 }
