@@ -7,7 +7,7 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/canonical/lpcli"
 keywords = ["launchpad", "ubuntu", "cli", "packaging"]
 categories = ["command-line-utilities"]
-rust-version = "1.93"
+rust-version = "1.97"
 
 [[bin]]
 name = "lpcli"
@@ -72,6 +72,8 @@ percent-encoding = "2"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+# RFC 9110 HTTP-date parsing for Retry-After (including legacy date formats)
+httpdate = "1"
 
 # Ubuntu distribution information (series, pockets, components, architectures)
 ubuntu-info-rust = "0.3"
@@ -92,6 +94,8 @@ unit-prefix = "0.5.2"
 dbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust", "vendored"] }
 # Non-blocking hidraw access for USB FIDO2 security keys
 libc = "0.2"
+# Safe getpwuid_r wrapper for environment-independent cache coordination paths
+nix = { version = "0.30", default-features = false, features = ["user"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1", features = ["keychain"] }
@@ -100,8 +104,12 @@ apple-native-keyring-store = { version = "1", features = ["keychain"] }
 windows-native-keyring-store = "1"
 
 [dev-dependencies]
+# Deterministic timer tests without real retry delays
+tokio = { version = "1", features = ["test-util"] }
 tokio-test = "0.4"
 mockito = "1"
 dirs = "7"
 tempfile = "3"
+# Parse documented shell examples without executing them
+shlex = "2.0.1"
 

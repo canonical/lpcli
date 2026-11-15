@@ -1,4 +1,4 @@
 {
-    "name": "Ubuntu Rust DevContainer",
-    "image": "ghcr.io/canonical/ubuntu-26.04-rust-1.93-devcontainer:latest"
+    "name": "Ubuntu 26.04 Rust 1.97 DevContainer",
+    "image": "ghcr.io/canonical/ubuntu-26.04-rust-1.97-devcontainer:latest"
 }

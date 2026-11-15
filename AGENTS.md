@@ -1,19 +1,95 @@
 # Project Overview
-lpcli is a Ubuntu Linux command-line client for Launchpad.net.  lpcli is written in async Rust and uses web API calls to interact with Launchpad.net.  lpcli implements a command line client for the Launchpad web APIs as described in https://api.launchpad.net/devel.html.  lpcli allows users to perform all of the actions they could do through the web browser on the command-line, allowing for scripted or programmatic Launchpad.net actions.  The lpcli crate is a Rust library crate that provide Rust-egonomic wrappers around the Launchpad.net web APIs and exposes them as a public Rust library suitable for use by other Rust applications.  The lpcli command-line tool parses command-line arguments, validates the received arguments, and calls the exposed public Rust library which in turn makes web API calls to the Launchpad.net web site.  Responses from the Launchpad.net web site are received and formatted for display on the Linux terminal.  The formatted responses are displayed in an easy to read and understand fashion.  lpcli implements OAuth to allow users to work with private objects on Launchpad.net.  This is handled by having the user login to Launchpad.net to create a session.  Corresponding user logout functionality also exists to allow the user to quit a session.  This session handling functionality follows the same approach that a user would use to login or logout from Launchpad.net using a web browser.
+
+lpcli is an async Rust command-line client and public library for common
+Launchpad.net workflows, with Ubuntu Linux as its primary platform. It provides
+idiomatic, type-safe wrappers for bugs, packages, projects, people, CVEs, Git,
+blueprints, questions, webhooks, translations, snap recipes, upload queues, and
+access tokens.
+
+The CLI parses and validates arguments, calls the library API wrappers, and
+formats results for terminal display. Reusable API operations belong in the
+library; argument handling, CLI authentication policy, configuration, and
+presentation belong in the binary.
+
+Authentication uses OAuth 1.0a credentials stored in the OS keyring with a
+plaintext-file fallback, or hardware-bound OAuth grants backed by USB FIDO2
+security keys. Classic login (`lpcli login`) prints a browser authorization URL
+and waits for the user to authorize access and press Enter. Logout (`lpcli logout`)
+removes locally stored classic credentials and hardware-bound grants; server-side
+revocation is a separate operation. USB hardware-token support and persisted
+access-token coordination are currently implemented on Linux.
 
 ## Folder Structure
-- `/src`: top-level Rust source code folder
-- `/src/bin`: binary entry points for the application; the lpcli.rs source code for the lpcli command-line tool is found here
-- `/src/lib.rs`: top-level library for shared modules and functionality
-- `/test`: top-level folder for integration tests
 
+- `src/lib.rs`: public library crate root and API module declarations.
+- `src/`: reusable API wrappers, HTTP client, authentication, downloads, and errors.
+- `src/hardware_tokens.rs`: hardware-bound grants, token minting, cache, and coordination.
+- `src/hardware_key.rs` and `src/hardware_key/`: security-key interfaces, CTAP2,
+  PIN/UV protocols, CBOR, and Linux hidraw transport.
+- `src/bin/lpcli.rs`: CLI argument parsing, validation, authentication policy, and dispatch.
+- `src/bin/lpcli/config.rs`: configuration loading and validation.
+- `src/bin/lpcli/display.rs`: terminal output formatting.
+- `src/bin/lpcli/tests.rs`: CLI parsing, documentation-example, and handler-helper tests.
+- `tests/`: mocked HTTP integration tests; library modules also contain inline unit tests.
+- `.github/workflows/`: build, lint, test, documentation, audit, and publishing workflows.
+- `.devcontainer/`: the Ubuntu 26.04 / Rust 1.97 development environment.
 
 ## Coding Standards
-- Follow idiomatic Rust practices and community standards as defined in `rust-instructions.md`.
 
-## Persona
-You are an Ubuntu expert with deep knowledge of Ubuntu releases, packages, and the Launchpad.net web API. You provide guidance on best practices for managing Ubuntu source packages and help troubleshoot issues related to package downloads and release compatibility.
+- Follow the idiomatic Rust practices in `rust-instructions.md`.
+- The minimum supported Rust version is 1.97, as declared in `Cargo.toml`.
+- Keep changes focused and preserve the library/CLI separation described above.
+- Prefer mature safe OS wrappers over custom FFI. For example, use the `nix` user
+  lookup to obtain an owned passwd home-directory path. Document the safety
+  requirements of any necessary unsafe code.
+- Keep public API documentation, CLI help, and README examples consistent with
+  implemented behavior.
 
-You remember that the Launchpad.net web API documentation is found at https://api.launchpad.net/devel.html
+## Authentication and Security
 
-You remember that the Launchpad.net web service documentation is found at https://documentation.ubuntu.com/launchpad/user/explanation/launchpad-api/launchpad-web-service/
+- Preserve explicit public-read boundaries: `--public` reads use an anonymous
+  client, without loading credentials, prompting for a security key, or retrying
+  with authentication.
+- Preserve hardware-grant precedence and propagate hardware-authentication errors
+  rather than automatically downgrading to classic credentials.
+- Keep credentials, grant secrets, PINs, and assertions out of debug output and logs.
+- Preserve private file permissions and the keyring-only persisted access-token
+  cache. Refresh-grant file fallback and access-token caching are separate mechanisms.
+- Resolve cache coordination paths from the effective UID's system passwd home,
+  independently of HOME/XDG/TMPDIR overrides, with the checked runtime directory
+  as fallback. Preserve ownership checks, cross-process locking, and generation fencing.
+- Follow the existing signing and redirect restrictions so credentials remain
+  scoped to trusted Launchpad endpoints.
+
+## Validation
+
+Use mocked HTTP responses and isolated filesystem/subprocess fixtures for routine
+tests. Live Launchpad mutations require explicit authorization and a suitable test
+account. Documentation examples should pass both clap parsing and `validate_cli`;
+the CLI test suite checks examples in `README.md` and `AGENTS.md` without dispatching
+commands or making network requests.
+
+Run the CI-equivalent checks, plus doctests:
+
+```sh
+cargo fmt -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
+cargo build --locked --all-targets --all-features
+cargo test --locked --all-targets --all-features
+cargo test --locked --doc
+```
+
+CI also checks tracked filenames for ASCII-only names and audits dependencies
+against the RustSec advisory database.
+
+## Persona and References
+
+You are an Ubuntu expert with deep knowledge of Ubuntu releases, packages, and the
+Launchpad.net web API. Provide guidance on Ubuntu source-package management,
+package downloads, and release compatibility grounded in the implementation and
+API documentation.
+
+- Launchpad web API: https://api.launchpad.net/devel.html
+- Launchpad web service documentation:
+  https://documentation.ubuntu.com/launchpad/user/explanation/launchpad-api/launchpad-web-service/

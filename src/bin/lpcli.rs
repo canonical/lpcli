@@ -6,9 +6,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
+#[path = "lpcli/config.rs"]
+mod config;
+#[path = "lpcli/display.rs"]
+mod display;
+
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
-use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
+
+use display::Display;
 use ubuntu_info_rust::{Architecture, Pocket, SeriesInfo};
 
 use lpcli::{
@@ -292,6 +298,23 @@ fn canonical_bug_series(
     long_about = None,
 )]
 struct Cli {
+    /// Require authenticated reads; never downgrade when credentials are missing.
+    #[arg(long, global = true, conflicts_with = "public")]
+    authenticated: bool,
+
+    /// Read public data only, without loading credentials or prompting for a key.
+    #[arg(
+        long,
+        global = true,
+        conflicts_with = "authenticated",
+        long_help = "Read public data only. Never load stored credentials, touch a security key, or \
+                     retry with authentication, even on HTTP 401/403/404. Private objects, fields and \
+                     collection entries may be omitted. Complete private-inclusive results require \
+                     authentication and may require a key touch. Not available for mutations or \
+                     identity/security-management commands."
+    )]
+    public: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -569,6 +592,24 @@ enum BugCommand {
         /// Attachment type: "Patch" or "Unspecified".
         #[arg(short = 'a', long)]
         attachment_type: Option<String>,
+    },
+    /// Change the description of a bug.
+    #[command(
+        group(ArgGroup::new("description_source")
+            .required(true)
+            .args(["description", "description_file"])),
+    )]
+    SetDescription {
+        /// The Launchpad bug number.
+        #[arg(short, long)]
+        bug_id: u64,
+        /// New description text. Mutually exclusive with --description-file.
+        #[arg(short, long)]
+        description: Option<String>,
+        /// Path to a file containing the new description ('-' for standard
+        /// input). Mutually exclusive with --description.
+        #[arg(long)]
+        description_file: Option<String>,
     },
     /// Change the status of a bug task.
     #[command(
@@ -2067,6 +2108,9 @@ enum HardwareTokenCommand {
     /// account, token key or secret).
     Show,
 
+    /// Clear the local access-token cache without deleting the grant or revoking anything.
+    ClearCache,
+
     /// Revoke a hardware-bound grant on Launchpad (by default the stored
     /// one) and remove the stored copy.
     Revoke {
@@ -2144,6 +2188,12 @@ async fn main() {
 /// Series names are only validated when the target distribution is Ubuntu,
 /// because other Launchpad distributions use their own series names.
 fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
+    if cli.public && !supports_public_reads(&cli.command) {
+        return Err(clap::Error::raw(
+            clap::error::ErrorKind::ArgumentConflict,
+            "--public is only available for data reads, not mutations or identity/security management",
+        ));
+    }
     let result = match &cli.command {
         Command::Bug(cmd) => match cmd {
             BugCommand::AddTask {
@@ -2209,11 +2259,31 @@ async fn run() -> lpcli::error::Result<()> {
     if let Err(e) = validate_cli(&cli) {
         e.exit();
     }
+    run_command(cli, config::load, handle_clear_cache).await
+}
+
+async fn run_command(
+    cli: Cli,
+    load_config: impl FnOnce() -> lpcli::error::Result<config::AppConfig>,
+    clear_cache: impl FnOnce() -> lpcli::error::Result<()>,
+) -> lpcli::error::Result<()> {
+    if matches!(
+        &cli.command,
+        Command::HardwareToken(HardwareTokenCommand::ClearCache)
+    ) {
+        return clear_cache();
+    }
+    let settings = load_config()?;
+    let display = Display::new(settings.display.width);
+    let cache_timeout = hardware_token_cache_timeout(&settings);
+    let policy = read_auth_policy(&cli.command, cli.authenticated, cli.public);
 
     match cli.command {
         Command::Status => handle_status().await?,
 
-        Command::Login(args) if args.hardware_token => handle_hardware_login(args).await?,
+        Command::Login(args) if args.hardware_token => {
+            handle_hardware_login(args, cache_timeout).await?
+        }
 
         Command::Login(_) => {
             println!("{}", "Logging in to Launchpad...".bold());
@@ -2243,21 +2313,23 @@ async fn run() -> lpcli::error::Result<()> {
             }
         }
 
-        Command::HardwareToken(cmd) => handle_hardware_token(cmd).await?,
+        Command::HardwareToken(cmd) => handle_hardware_token(cmd, &display, cache_timeout).await?,
 
-        Command::Bug(cmd) => handle_bug(cmd).await?,
-        Command::Person(cmd) => handle_person(cmd).await?,
-        Command::Package(cmd) => handle_package(cmd).await?,
-        Command::Project(cmd) => handle_project(cmd).await?,
-        Command::Cve(cmd) => handle_cve(cmd).await?,
-        Command::Git(cmd) => handle_git(cmd).await?,
-        Command::Spec(cmd) => handle_spec(cmd).await?,
-        Command::Question(cmd) => handle_question(cmd).await?,
-        Command::Webhook(cmd) => handle_webhook(cmd).await?,
-        Command::Translation(cmd) => handle_translation(cmd).await?,
-        Command::Snap(cmd) => handle_snap(cmd).await?,
-        Command::Queue(cmd) => handle_queue(cmd).await?,
-        Command::AccessToken(cmd) => handle_access_token(cmd).await?,
+        Command::Bug(cmd) => handle_bug(cmd, &display, policy, cache_timeout).await?,
+        Command::Person(cmd) => handle_person(cmd, &display, policy, cache_timeout).await?,
+        Command::Package(cmd) => handle_package(cmd, &display, policy, cache_timeout).await?,
+        Command::Project(cmd) => handle_project(cmd, &display, policy, cache_timeout).await?,
+        Command::Cve(cmd) => handle_cve(cmd, &display, policy, cache_timeout).await?,
+        Command::Git(cmd) => handle_git(cmd, &display, policy, cache_timeout).await?,
+        Command::Spec(cmd) => handle_spec(cmd, &display, policy, cache_timeout).await?,
+        Command::Question(cmd) => handle_question(cmd, &display, policy, cache_timeout).await?,
+        Command::Webhook(cmd) => handle_webhook(cmd, &display, cache_timeout).await?,
+        Command::Translation(cmd) => {
+            handle_translation(cmd, &display, policy, cache_timeout).await?
+        }
+        Command::Snap(cmd) => handle_snap(cmd, &display, policy, cache_timeout).await?,
+        Command::Queue(cmd) => handle_queue(cmd, &display, policy, cache_timeout).await?,
+        Command::AccessToken(cmd) => handle_access_token(cmd, &display, cache_timeout).await?,
     }
 
     Ok(())
@@ -2268,7 +2340,7 @@ async fn run() -> lpcli::error::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Render a list of bug tasks as a grouped table to stdout.
-fn print_bug_tasks(tasks: &[bugs::BugTask]) {
+fn print_bug_tasks(tasks: &[bugs::BugTask], display: &Display) {
     struct ParsedTask<'a> {
         series: Option<String>,
         task: &'a bugs::BugTask,
@@ -2315,7 +2387,7 @@ fn print_bug_tasks(tasks: &[bugs::BugTask]) {
     } else {
         vec!["Target", "Series", "Status", "Importance", "Assignee"]
     };
-    let mut table = build_table(header);
+    let mut table = build_table(display, header);
     for (target_name, tasks_for_target) in &by_target {
         for pt in tasks_for_target {
             let display_target = match &pt.series {
@@ -2374,30 +2446,42 @@ async fn resolve_attachment_download_url(
     client: &LaunchpadClient,
     attachment: &bugs::BugAttachment,
 ) -> String {
-    if let Some(data_link) = attachment.data_link.as_deref() {
-        match client.resolve_redirect(data_link).await {
-            Ok(Some(url)) => url,
-            _ => "—".to_string(),
-        }
-    } else {
-        "—".to_string()
+    let Some(data_link) = attachment.data_link.as_deref() else {
+        return "—".to_string();
+    };
+    // The library's classic OAuth client signs absolute URLs indiscriminately.
+    // Only enrich API-origin links with auth; download hosts remain unsigned.
+    let same_origin = url::Url::parse(&client.url("/"))
+        .ok()
+        .zip(url::Url::parse(data_link).ok())
+        .is_some_and(|(base, link)| base.origin() == link.origin());
+    let anonymous = LaunchpadClient::new(None);
+    let resolver = if same_origin { client } else { &anonymous };
+    match resolver.resolve_redirect(data_link).await {
+        Ok(Some(url)) => url,
+        _ => "—".to_string(),
     }
 }
 
-/// Resolve download URLs for all attachments in parallel.
+/// Optional URL enrichment must not prevent displaying the underlying read.
 async fn resolve_all_attachment_urls(
     client: &LaunchpadClient,
     attachments: &[bugs::BugAttachment],
 ) -> Vec<String> {
-    let futures: Vec<_> = attachments
-        .iter()
-        .map(|a| resolve_attachment_download_url(client, a))
-        .collect();
-    futures_util::future::join_all(futures).await
+    futures_util::future::join_all(
+        attachments
+            .iter()
+            .map(|a| resolve_attachment_download_url(client, a)),
+    )
+    .await
 }
 
-fn print_bug_attachments(attachments: &[bugs::BugAttachment], download_urls: &[String]) {
-    let mut table = build_table(vec!["Title", "Type", "URL"]);
+fn print_bug_attachments(
+    attachments: &[bugs::BugAttachment],
+    download_urls: &[String],
+    display: &Display,
+) {
+    let mut table = build_table(display, vec!["Title", "Type", "URL"]);
     for (a, url) in attachments.iter().zip(download_urls.iter()) {
         let title = a.title.as_deref().unwrap_or("—").to_string();
         let kind = a.attachment_type.as_deref().unwrap_or("—").to_string();
@@ -2408,20 +2492,74 @@ fn print_bug_attachments(attachments: &[bugs::BugAttachment], download_urls: &[S
     println!("{} attachment(s).", attachments.len());
 }
 
-async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
+struct BugReportRead {
+    bug: bugs::Bug,
+    tasks: Vec<bugs::BugTask>,
+    attachments: Vec<bugs::BugAttachment>,
+    download_urls: Vec<String>,
+}
+
+async fn fetch_bug_report(
+    client: &LaunchpadClient,
+    bug_id: u64,
+) -> lpcli::error::Result<BugReportRead> {
+    let (bug, tasks, attachments) = tokio::try_join!(
+        bugs::get_bug(client, bug_id),
+        bugs::get_bug_tasks(client, bug_id),
+        bugs::get_bug_attachments(client, bug_id),
+    )?;
+    let download_urls = resolve_all_attachment_urls(client, &attachments).await;
+    Ok(BugReportRead {
+        bug,
+        tasks,
+        attachments,
+        download_urls,
+    })
+}
+
+struct BugCommentsRead {
+    comments: Vec<bugs::BugComment>,
+    attachments: Vec<bugs::BugAttachment>,
+    download_urls: Vec<String>,
+}
+
+async fn fetch_bug_comments(
+    client: &LaunchpadClient,
+    bug_id: u64,
+) -> lpcli::error::Result<BugCommentsRead> {
+    let (comments, attachments) = tokio::try_join!(
+        bugs::get_bug_comments(client, bug_id),
+        bugs::get_bug_attachments(client, bug_id),
+    )?;
+    let download_urls = resolve_all_attachment_urls(client, &attachments).await;
+    Ok(BugCommentsRead {
+        comments,
+        attachments,
+        download_urls,
+    })
+}
+
+async fn handle_bug(
+    cmd: BugCommand,
+    display: &Display,
+    policy: ReadAuthPolicy,
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<()> {
+    let client = read_client(policy, cache_timeout)?;
     let client = if matches!(&cmd, BugCommand::RemoteBugTrackers { .. }) {
-        LaunchpadClient::new(None).with_max_retries(2)
+        client.with_max_retries(2)
     } else {
-        authenticated_client()?
+        client
     };
 
     match cmd {
         BugCommand::Show { bug_id } => {
-            let (bug, tasks, attachments) = tokio::try_join!(
-                bugs::get_bug(&client, bug_id),
-                bugs::get_bug_tasks(&client, bug_id),
-                bugs::get_bug_attachments(&client, bug_id),
-            )?;
+            let BugReportRead {
+                bug,
+                tasks,
+                attachments,
+                download_urls,
+            } = fetch_bug_report(&client, bug_id).await?;
             println!("{}", format!("Bug #{}", bug.id).bold());
             println!("{}", "─".repeat(60));
             println!("{}", bug.title.bold());
@@ -2439,17 +2577,16 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 println!("URL:     {}", link.underline());
             }
             println!();
-            print_bug_tasks(&tasks);
+            print_bug_tasks(&tasks, display);
             if !attachments.is_empty() {
-                let download_urls = resolve_all_attachment_urls(&client, &attachments).await;
                 println!();
-                print_bug_attachments(&attachments, &download_urls);
+                print_bug_attachments(&attachments, &download_urls, display);
             }
         }
 
         BugCommand::Tasks { bug_id } => {
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            print_bug_tasks(&tasks);
+            print_bug_tasks(&tasks, display);
         }
 
         BugCommand::Search {
@@ -2471,7 +2608,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 ..Default::default()
             };
             let tasks = bugs::search_bugs(&client, &target, &params).await?;
-            let mut table = build_table(vec!["ID", "Title", "Status", "Target"]);
+            let mut table = build_table(display, vec!["ID", "Title", "Status", "Target"]);
             for task in &tasks {
                 // The bug number is the last path segment of bug_link, e.g.
                 // "https://api.launchpad.net/devel/bugs/12345" → "12345".
@@ -2483,7 +2620,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                     .to_string();
                 table.add_row(vec![
                     bug_id,
-                    truncate(task.title.as_deref().unwrap_or("—"), 55),
+                    task.title.as_deref().unwrap_or("—").to_string(),
                     task.status.as_deref().unwrap_or("—").to_string(),
                     task.bug_target_display_name
                         .as_deref()
@@ -2529,11 +2666,11 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
         }
 
         BugCommand::Comments { bug_id } => {
-            let (comments, attachments) = tokio::try_join!(
-                bugs::get_bug_comments(&client, bug_id),
-                bugs::get_bug_attachments(&client, bug_id),
-            )?;
-            let download_urls = resolve_all_attachment_urls(&client, &attachments).await;
+            let BugCommentsRead {
+                comments,
+                attachments,
+                download_urls,
+            } = fetch_bug_comments(&client, bug_id).await?;
             for (i, c) in comments.iter().enumerate() {
                 // Skip comments that were previously deleted.
                 if c.date_deleted.is_some() {
@@ -2620,6 +2757,22 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                     "✓".green().bold(),
                     bug.id
                 );
+            }
+        }
+
+        BugCommand::SetDescription {
+            bug_id,
+            description,
+            description_file,
+        } => {
+            let text = resolve_new_description(description, description_file.as_deref())?;
+            let updated = bugs::set_bug_description(&client, bug_id, &text).await?;
+            println!(
+                "{} Description updated for bug #{bug_id}.",
+                "✓".green().bold()
+            );
+            if let Some(link) = &updated.web_link {
+                println!("URL: {}", link.underline());
             }
         }
 
@@ -2740,7 +2893,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
 
         BugCommand::Subscriptions { bug_id } => {
             let subs = bugs::get_bug_subscriptions(&client, bug_id).await?;
-            let mut table = build_table(vec!["Person", "Subscribed By", "Date"]);
+            let mut table = build_table(display, vec!["Person", "Subscribed By", "Date"]);
             for s in &subs {
                 let person = s
                     .person_link
@@ -2763,11 +2916,11 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
 
         BugCommand::Attachments { bug_id } => {
             let attachments = bugs::get_bug_attachments(&client, bug_id).await?;
+            let download_urls = resolve_all_attachment_urls(&client, &attachments).await;
             if attachments.is_empty() {
                 println!("No attachments for bug #{bug_id}.");
             } else {
-                let download_urls = resolve_all_attachment_urls(&client, &attachments).await;
-                print_bug_attachments(&attachments, &download_urls);
+                print_bug_attachments(&attachments, &download_urls, display);
             }
         }
 
@@ -3238,14 +3391,17 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
             let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
             let task_links = collect_watch_task_links(&tasks);
 
-            let mut table = build_table(vec![
-                "Watch ID",
-                "Tracker",
-                "Remote Bug",
-                "Status",
-                "URL",
-                "Linked Tasks",
-            ]);
+            let mut table = build_table(
+                display,
+                vec![
+                    "Watch ID",
+                    "Tracker",
+                    "Remote Bug",
+                    "Status",
+                    "URL",
+                    "Linked Tasks",
+                ],
+            );
             for w in &watches {
                 let watch_id = w
                     .self_link
@@ -3295,7 +3451,7 @@ async fn handle_bug(cmd: BugCommand) -> lpcli::error::Result<()> {
                 return Ok(());
             }
 
-            let mut table = build_table(vec!["Name", "Title", "Type", "Base URL"]);
+            let mut table = build_table(display, vec!["Name", "Title", "Type", "Base URL"]);
             for tracker in &trackers {
                 table.add_row(vec![
                     tracker.name.as_deref().unwrap_or("—").to_string(),
@@ -3414,8 +3570,13 @@ fn parse_positive_limit(value: &str) -> Result<usize, String> {
 // Person handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
-    let client = authenticated_client()?;
+async fn handle_person(
+    cmd: PersonCommand,
+    display: &Display,
+    policy: ReadAuthPolicy,
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<()> {
+    let client = read_client(policy, cache_timeout)?;
 
     match cmd {
         PersonCommand::Show { name } => {
@@ -3438,7 +3599,7 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
 
         PersonCommand::Search { query } => {
             let results = people::search_people(&client, &query).await?;
-            let mut table = build_table(vec!["Name", "Display Name", "Type"]);
+            let mut table = build_table(display, vec!["Name", "Display Name", "Type"]);
             for p in &results {
                 table.add_row(vec![
                     format!("~{}", p.name),
@@ -3454,7 +3615,7 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
 
         PersonCommand::Members { team } => {
             let members = people::get_team_members(&client, &team).await?;
-            let mut table = build_table(vec!["Member", "Status", "Since"]);
+            let mut table = build_table(display, vec!["Member", "Status", "Since"]);
             for m in &members {
                 // Extract "~username" from the full API URL (e.g. ".../~jdoe" → "~jdoe").
                 let member_name = m
@@ -3473,7 +3634,7 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
 
         PersonCommand::Bugs { name } => {
             let bugs_list = people::get_person_bugs(&client, &name).await?;
-            let mut table = build_table(vec!["Bug", "Title", "Status", "Importance"]);
+            let mut table = build_table(display, vec!["Bug", "Title", "Status", "Importance"]);
             for b in &bugs_list {
                 let bug_id = b
                     .bug_link
@@ -3482,7 +3643,7 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
                     .unwrap_or("—");
                 table.add_row(vec![
                     bug_id.to_string(),
-                    truncate(b.title.as_deref().unwrap_or("—"), 55),
+                    b.title.as_deref().unwrap_or("—").to_string(),
                     b.status.as_deref().unwrap_or("—").to_string(),
                     b.importance.as_deref().unwrap_or("—").to_string(),
                 ]);
@@ -3493,7 +3654,7 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
 
         PersonCommand::Ppas { name } => {
             let ppas = people::list_person_ppas(&client, &name).await?;
-            let mut table = build_table(vec!["Name", "Description", "Enabled"]);
+            let mut table = build_table(display, vec!["Name", "Description", "Enabled"]);
             for p in &ppas {
                 table.add_row(vec![
                     p.name.as_deref().unwrap_or("—"),
@@ -3506,7 +3667,7 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
 
         PersonCommand::OwnedTeams { name } => {
             let teams = people::get_person_owned_teams(&client, &name).await?;
-            let mut table = build_table(vec!["Name", "Display Name"]);
+            let mut table = build_table(display, vec!["Name", "Display Name"]);
             for t in &teams {
                 table.add_row(vec![format!("~{}", t.name), t.display_name.clone()]);
             }
@@ -3520,8 +3681,13 @@ async fn handle_person(cmd: PersonCommand) -> lpcli::error::Result<()> {
 // Package handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
-    let client = LaunchpadClient::new(None); // packages can be queried anonymously
+async fn handle_package(
+    cmd: PackageCommand,
+    display: &Display,
+    policy: ReadAuthPolicy,
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<()> {
+    let client = read_client(policy, cache_timeout)?;
 
     match cmd {
         PackageCommand::Series { series, distro } => {
@@ -3541,7 +3707,7 @@ async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
 
         PackageCommand::ListSeries { distro } => {
             let series = packages::list_distro_series(&client, &distro).await?;
-            let mut table = build_table(vec!["Name", "Version", "Status", "Active"]);
+            let mut table = build_table(display, vec!["Name", "Version", "Status", "Active"]);
             for s in &series {
                 table.add_row(vec![
                     s.name.as_str(),
@@ -3572,7 +3738,7 @@ async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
             };
             let pubs =
                 packages::search_published_sources(&client, &distro, series_name, &params).await?;
-            let mut table = build_table(vec!["Package", "Version", "Component", "Pocket"]);
+            let mut table = build_table(display, vec!["Package", "Version", "Component", "Pocket"]);
             for p in &pubs {
                 table.add_row(vec![
                     p.source_package_name.as_deref().unwrap_or("—"),
@@ -3604,7 +3770,7 @@ async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
                 ..Default::default()
             };
             let pubs = packages::list_ppa_sources(&client, &owner, &ppa, &params).await?;
-            let mut table = build_table(vec!["Package", "Version", "Status"]);
+            let mut table = build_table(display, vec!["Package", "Version", "Status"]);
             for p in &pubs {
                 table.add_row(vec![
                     p.source_package_name.as_deref().unwrap_or("—"),
@@ -3640,7 +3806,8 @@ async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
             output,
         } => {
             let series_name = canonical_series(&distro, &series).to_string();
-            return handle_package_download(name, version, series_name, distro, output).await;
+            return handle_package_download(&client, name, version, series_name, distro, output)
+                .await;
         }
     }
     Ok(())
@@ -3650,8 +3817,13 @@ async fn handle_package(cmd: PackageCommand) -> lpcli::error::Result<()> {
 // Project handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_project(cmd: ProjectCommand) -> lpcli::error::Result<()> {
-    let client = LaunchpadClient::new(None);
+async fn handle_project(
+    cmd: ProjectCommand,
+    display: &Display,
+    policy: ReadAuthPolicy,
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<()> {
+    let client = read_client(policy, cache_timeout)?;
 
     match cmd {
         ProjectCommand::Show { name } => {
@@ -3677,12 +3849,12 @@ async fn handle_project(cmd: ProjectCommand) -> lpcli::error::Result<()> {
 
         ProjectCommand::Search { query } => {
             let results = projects::search_projects(&client, &query).await?;
-            let mut table = build_table(vec!["Name", "Display Name", "Summary"]);
+            let mut table = build_table(display, vec!["Name", "Display Name", "Summary"]);
             for p in &results {
                 table.add_row(vec![
                     p.name.as_str(),
                     p.display_name.as_deref().unwrap_or("—"),
-                    &truncate(p.summary.as_deref().unwrap_or(""), 50),
+                    p.summary.as_deref().unwrap_or(""),
                 ]);
             }
             println!("{table}");
@@ -3694,7 +3866,7 @@ async fn handle_project(cmd: ProjectCommand) -> lpcli::error::Result<()> {
             } else {
                 projects::list_milestones(&client, &project).await?
             };
-            let mut table = build_table(vec!["Name", "Title", "Active", "Target Date"]);
+            let mut table = build_table(display, vec!["Name", "Title", "Active", "Target Date"]);
             for m in &milestones {
                 table.add_row(vec![
                     m.name.as_str(),
@@ -3744,7 +3916,7 @@ async fn handle_project(cmd: ProjectCommand) -> lpcli::error::Result<()> {
 
         ProjectCommand::ListSeries { project } => {
             let series = projects::list_project_series(&client, &project).await?;
-            let mut table = build_table(vec!["Name", "Title", "Status"]);
+            let mut table = build_table(display, vec!["Name", "Title", "Status"]);
             for s in &series {
                 table.add_row(vec![
                     s.name.as_str(),
@@ -3757,13 +3929,13 @@ async fn handle_project(cmd: ProjectCommand) -> lpcli::error::Result<()> {
 
         ProjectCommand::SeriesReleases { project, series } => {
             let releases = projects::list_series_releases(&client, &project, &series).await?;
-            let mut table = build_table(vec!["Version", "Release Date", "Notes"]);
+            let mut table = build_table(display, vec!["Version", "Release Date", "Notes"]);
             for r in &releases {
                 let date = r
                     .date_released
                     .map(|d| d.format("%Y-%m-%d").to_string())
                     .unwrap_or_else(|| "—".to_string());
-                let notes = truncate(r.release_notes.as_deref().unwrap_or(""), 40);
+                let notes = r.release_notes.as_deref().unwrap_or("").to_string();
                 table.add_row(vec![r.version.as_deref().unwrap_or("—"), &date, &notes]);
             }
             println!("{table}");
@@ -3776,8 +3948,13 @@ async fn handle_project(cmd: ProjectCommand) -> lpcli::error::Result<()> {
 // CVE handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_cve(cmd: CveCommand) -> lpcli::error::Result<()> {
-    let client = authenticated_client()?;
+async fn handle_cve(
+    cmd: CveCommand,
+    display: &Display,
+    policy: ReadAuthPolicy,
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<()> {
+    let client = read_client(policy, cache_timeout)?;
 
     match cmd {
         CveCommand::Show { sequence } => {
@@ -3809,12 +3986,12 @@ async fn handle_cve(cmd: CveCommand) -> lpcli::error::Result<()> {
                 ..Default::default()
             };
             let results = cves::search_cves(&client, &params).await?;
-            let mut table = build_table(vec!["CVE", "Status", "Title"]);
+            let mut table = build_table(display, vec!["CVE", "Status", "Title"]);
             for c in &results {
                 table.add_row(vec![
                     c.sequence.as_str(),
                     c.status.as_deref().unwrap_or("—"),
-                    &truncate(c.title.as_deref().unwrap_or(""), 50),
+                    c.title.as_deref().unwrap_or(""),
                 ]);
             }
             println!("{table}");
@@ -3823,12 +4000,12 @@ async fn handle_cve(cmd: CveCommand) -> lpcli::error::Result<()> {
 
         CveCommand::BugCves { bug_id } => {
             let results = cves::get_bug_cves(&client, bug_id).await?;
-            let mut table = build_table(vec!["CVE", "Status", "Title"]);
+            let mut table = build_table(display, vec!["CVE", "Status", "Title"]);
             for c in &results {
                 table.add_row(vec![
                     c.sequence.as_str(),
                     c.status.as_deref().unwrap_or("—"),
-                    &truncate(c.title.as_deref().unwrap_or(""), 50),
+                    c.title.as_deref().unwrap_or(""),
                 ]);
             }
             println!("{table}");
@@ -3841,8 +4018,13 @@ async fn handle_cve(cmd: CveCommand) -> lpcli::error::Result<()> {
 // Git handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_git(cmd: GitCommand) -> lpcli::error::Result<()> {
-    let client = LaunchpadClient::new(None);
+async fn handle_git(
+    cmd: GitCommand,
+    display: &Display,
+    policy: ReadAuthPolicy,
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<()> {
+    let client = read_client(policy, cache_timeout)?;
 
     match cmd {
         GitCommand::Show { path } => {
@@ -3889,7 +4071,7 @@ async fn handle_git(cmd: GitCommand) -> lpcli::error::Result<()> {
 
         GitCommand::ListPersonRepos { name } => {
             let repos = git::list_person_git_repositories(&client, &name).await?;
-            let mut table = build_table(vec!["Repository", "Type", "Modified"]);
+            let mut table = build_table(display, vec!["Repository", "Type", "Modified"]);
             for r in &repos {
                 let modified = r
                     .date_last_modified
@@ -3909,7 +4091,7 @@ async fn handle_git(cmd: GitCommand) -> lpcli::error::Result<()> {
 
         GitCommand::Refs { path } => {
             let refs = git::list_git_refs(&client, &path).await?;
-            let mut table = build_table(vec!["Ref", "Display Name", "SHA1"]);
+            let mut table = build_table(display, vec!["Ref", "Display Name", "SHA1"]);
             for r in &refs {
                 table.add_row(vec![
                     r.path.as_deref().unwrap_or("—"),
@@ -3925,13 +4107,10 @@ async fn handle_git(cmd: GitCommand) -> lpcli::error::Result<()> {
 
         GitCommand::Proposals { path, status } => {
             let proposals = git::list_merge_proposals(&client, &path, status.as_deref()).await?;
-            let mut table = build_table(vec![
-                "ID",
-                "Status",
-                "Source Branch",
-                "Target Branch",
-                "Date",
-            ]);
+            let mut table = build_table(
+                display,
+                vec!["ID", "Status", "Source Branch", "Target Branch", "Date"],
+            );
             for p in &proposals {
                 let mp_id = p
                     .self_link
@@ -3955,7 +4134,10 @@ async fn handle_git(cmd: GitCommand) -> lpcli::error::Result<()> {
         }
 
         GitCommand::Comments { path, id, diff } => {
-            let comments = git::get_merge_proposal_comments(&client, &path, id).await?;
+            let (comments, (inline, diff_map)) = tokio::try_join!(
+                git::get_merge_proposal_comments(&client, &path, id),
+                git::get_inline_comments(&client, &path, id, diff),
+            )?;
             if comments.is_empty() {
                 println!("No review comments.");
             } else {
@@ -3987,7 +4169,6 @@ async fn handle_git(cmd: GitCommand) -> lpcli::error::Result<()> {
             }
 
             // Inline (diff) comments.
-            let (inline, diff_map) = git::get_inline_comments(&client, &path, id, diff).await?;
             if !inline.is_empty() {
                 println!();
                 println!("{}", "Inline Comments".bold());
@@ -4062,8 +4243,13 @@ async fn handle_git(cmd: GitCommand) -> lpcli::error::Result<()> {
 // Spec handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_spec(cmd: SpecCommand) -> lpcli::error::Result<()> {
-    let client = LaunchpadClient::new(None);
+async fn handle_spec(
+    cmd: SpecCommand,
+    display: &Display,
+    policy: ReadAuthPolicy,
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<()> {
+    let client = read_client(policy, cache_timeout)?;
 
     match cmd {
         SpecCommand::Show { target, name } => {
@@ -4098,11 +4284,14 @@ async fn handle_spec(cmd: SpecCommand) -> lpcli::error::Result<()> {
             } else {
                 specifications::list_valid_project_specifications(&client, &target).await?
             };
-            let mut table = build_table(vec!["Name", "Title", "Priority", "Lifecycle", "Impl"]);
+            let mut table = build_table(
+                display,
+                vec!["Name", "Title", "Priority", "Lifecycle", "Impl"],
+            );
             for s in &specs {
                 table.add_row(vec![
                     s.name.as_str(),
-                    &truncate(s.title.as_deref().unwrap_or(""), 40),
+                    s.title.as_deref().unwrap_or(""),
                     s.priority.as_deref().unwrap_or("—"),
                     s.lifecycle_status.as_deref().unwrap_or("—"),
                     s.implementation_status.as_deref().unwrap_or("—"),
@@ -4119,8 +4308,13 @@ async fn handle_spec(cmd: SpecCommand) -> lpcli::error::Result<()> {
 // Question handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_question(cmd: QuestionCommand) -> lpcli::error::Result<()> {
-    let client = LaunchpadClient::new(None);
+async fn handle_question(
+    cmd: QuestionCommand,
+    display: &Display,
+    policy: ReadAuthPolicy,
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<()> {
+    let client = read_client(policy, cache_timeout)?;
 
     match cmd {
         QuestionCommand::Show { question_id } => {
@@ -4151,7 +4345,7 @@ async fn handle_question(cmd: QuestionCommand) -> lpcli::error::Result<()> {
                 status: status.as_deref(),
             };
             let results = questions::search_questions(&client, &target, &params).await?;
-            let mut table = build_table(vec!["ID", "Title", "Status"]);
+            let mut table = build_table(display, vec!["ID", "Title", "Status"]);
             for q in &results {
                 let id = q
                     .self_link
@@ -4160,7 +4354,7 @@ async fn handle_question(cmd: QuestionCommand) -> lpcli::error::Result<()> {
                     .unwrap_or("—");
                 table.add_row(vec![
                     id,
-                    &truncate(q.title.as_deref().unwrap_or(""), 55),
+                    q.title.as_deref().unwrap_or(""),
                     q.status.as_deref().unwrap_or("—"),
                 ]);
             }
@@ -4203,13 +4397,18 @@ async fn handle_question(cmd: QuestionCommand) -> lpcli::error::Result<()> {
 // Webhook handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_webhook(cmd: WebhookCommand) -> lpcli::error::Result<()> {
-    let client = authenticated_client()?;
+async fn handle_webhook(
+    cmd: WebhookCommand,
+    display: &Display,
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<()> {
+    let client = authenticated_client(cache_timeout)?;
 
     match cmd {
         WebhookCommand::List { target } => {
             let hooks = webhooks::list_target_webhooks(&client, &target).await?;
-            let mut table = build_table(vec!["Delivery URL", "Active", "Events", "Created"]);
+            let mut table =
+                build_table(display, vec!["Delivery URL", "Active", "Events", "Created"]);
             for h in &hooks {
                 let events = h
                     .event_types
@@ -4223,7 +4422,7 @@ async fn handle_webhook(cmd: WebhookCommand) -> lpcli::error::Result<()> {
                 table.add_row(vec![
                     h.delivery_url.as_deref().unwrap_or("—"),
                     &h.active.map(|a| a.to_string()).unwrap_or_default(),
-                    &truncate(&events, 40),
+                    &events,
                     &date,
                 ]);
             }
@@ -4271,7 +4470,10 @@ async fn handle_webhook(cmd: WebhookCommand) -> lpcli::error::Result<()> {
 
         WebhookCommand::Deliveries { webhook_url } => {
             let deliveries = webhooks::list_deliveries(&client, &webhook_url).await?;
-            let mut table = build_table(vec!["Sent", "Successful", "Status Code", "Pending"]);
+            let mut table = build_table(
+                display,
+                vec!["Sent", "Successful", "Status Code", "Pending"],
+            );
             for d in &deliveries {
                 let date = d
                     .date_sent
@@ -4296,15 +4498,20 @@ async fn handle_webhook(cmd: WebhookCommand) -> lpcli::error::Result<()> {
 // Translation handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_translation(cmd: TranslationCommand) -> lpcli::error::Result<()> {
-    let client = LaunchpadClient::new(None);
+async fn handle_translation(
+    cmd: TranslationCommand,
+    display: &Display,
+    policy: ReadAuthPolicy,
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<()> {
+    let client = read_client(policy, cache_timeout)?;
 
     match cmd {
         TranslationCommand::Queue { distro, series } => {
             let series_name = canonical_series(&distro, &series);
             let entries =
                 translations::get_distro_series_import_queue(&client, &distro, series_name).await?;
-            let mut table = build_table(vec!["Path", "Status", "Date"]);
+            let mut table = build_table(display, vec!["Path", "Status", "Date"]);
             for e in &entries {
                 let date = e
                     .date_created
@@ -4324,7 +4531,7 @@ async fn handle_translation(cmd: TranslationCommand) -> lpcli::error::Result<()>
             let series_name = canonical_series(&distro, &series);
             let templates =
                 translations::get_distro_series_templates(&client, &distro, series_name).await?;
-            let mut table = build_table(vec!["Name", "Path", "Priority", "Current"]);
+            let mut table = build_table(display, vec!["Name", "Path", "Priority", "Current"]);
             for t in &templates {
                 table.add_row(vec![
                     t.name.as_deref().unwrap_or("—"),
@@ -4344,8 +4551,13 @@ async fn handle_translation(cmd: TranslationCommand) -> lpcli::error::Result<()>
 // Snap handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_snap(cmd: SnapCommand) -> lpcli::error::Result<()> {
-    let client = authenticated_client()?;
+async fn handle_snap(
+    cmd: SnapCommand,
+    display: &Display,
+    policy: ReadAuthPolicy,
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<()> {
+    let client = read_client(policy, cache_timeout)?;
 
     match cmd {
         SnapCommand::Show { owner, name } => {
@@ -4376,7 +4588,7 @@ async fn handle_snap(cmd: SnapCommand) -> lpcli::error::Result<()> {
 
         SnapCommand::Find { owner } => {
             let snap_list = snaps::find_snaps_by_owner(&client, &owner).await?;
-            let mut table = build_table(vec!["Name", "Store Name", "Private"]);
+            let mut table = build_table(display, vec!["Name", "Store Name", "Private"]);
             for s in &snap_list {
                 table.add_row(vec![
                     s.name.as_deref().unwrap_or("—"),
@@ -4389,7 +4601,7 @@ async fn handle_snap(cmd: SnapCommand) -> lpcli::error::Result<()> {
 
         SnapCommand::Builds { owner, name } => {
             let builds = snaps::get_snap_pending_builds(&client, &owner, &name).await?;
-            let mut table = build_table(vec!["Title", "Pocket", "Score", "Upload Status"]);
+            let mut table = build_table(display, vec!["Title", "Pocket", "Score", "Upload Status"]);
             for b in &builds {
                 table.add_row(vec![
                     b.title.as_deref().unwrap_or("—"),
@@ -4432,8 +4644,12 @@ async fn handle_snap(cmd: SnapCommand) -> lpcli::error::Result<()> {
 // AccessToken handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_access_token(cmd: AccessTokenCommand) -> lpcli::error::Result<()> {
-    let client = authenticated_client()?;
+async fn handle_access_token(
+    cmd: AccessTokenCommand,
+    display: &Display,
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<()> {
+    let client = authenticated_client(cache_timeout)?;
 
     match cmd {
         AccessTokenCommand::Issue {
@@ -4476,7 +4692,10 @@ async fn handle_access_token(cmd: AccessTokenCommand) -> lpcli::error::Result<()
 
         AccessTokenCommand::List { project } => {
             let tokens = access_tokens::list_project_access_tokens(&client, &project).await?;
-            let mut table = build_table(vec!["Description", "Scopes", "Created", "Last Used"]);
+            let mut table = build_table(
+                display,
+                vec!["Description", "Scopes", "Created", "Last Used"],
+            );
             for t in &tokens {
                 let scopes = t.scopes.as_ref().map(|v| v.join(", ")).unwrap_or_default();
                 let created = t
@@ -4499,7 +4718,10 @@ async fn handle_access_token(cmd: AccessTokenCommand) -> lpcli::error::Result<()
 
         AccessTokenCommand::ListGit { repo } => {
             let tokens = access_tokens::list_git_access_tokens(&client, &repo).await?;
-            let mut table = build_table(vec!["Description", "Scopes", "Created", "Last Used"]);
+            let mut table = build_table(
+                display,
+                vec!["Description", "Scopes", "Created", "Last Used"],
+            );
             for t in &tokens {
                 let scopes = t.scopes.as_ref().map(|v| v.join(", ")).unwrap_or_default();
                 let created = t
@@ -4533,8 +4755,11 @@ async fn handle_access_token(cmd: AccessTokenCommand) -> lpcli::error::Result<()
 // ---------------------------------------------------------------------------
 
 /// `lpcli login --hardware-token`: import a grant or use the stored one.
-async fn handle_hardware_login(args: LoginArgs) -> lpcli::error::Result<()> {
-    let mut login = HardwareLogin::new();
+async fn handle_hardware_login(
+    args: LoginArgs,
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<()> {
+    let mut login = HardwareLogin::new().cache_timeout(cache_timeout);
     if let Some(token) = args.grant_token {
         let account = args.account.as_deref().ok_or_else(|| {
             lpcli::error::LpError::HardwareToken(
@@ -4632,8 +4857,23 @@ fn key_label(key: &RegisteredAuthenticator) -> String {
     }
 }
 
-async fn handle_hardware_token(cmd: HardwareTokenCommand) -> lpcli::error::Result<()> {
+fn handle_clear_cache() -> lpcli::error::Result<()> {
+    hardware_tokens::clear_cached_access_token()?;
+    println!(
+        "Cleared the local hardware access-token cache. The stored grant is unchanged; \
+         nothing was revoked on Launchpad."
+    );
+    Ok(())
+}
+
+async fn handle_hardware_token(
+    cmd: HardwareTokenCommand,
+    display: &Display,
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<()> {
     match cmd {
+        HardwareTokenCommand::ClearCache => handle_clear_cache()?,
+
         HardwareTokenCommand::Show => {
             let store = GrantStore::from_env();
             let Some(credentials) = store.load()? else {
@@ -4665,7 +4905,7 @@ async fn handle_hardware_token(cmd: HardwareTokenCommand) -> lpcli::error::Resul
         }
 
         HardwareTokenCommand::Keys => {
-            let client = authenticated_client()?;
+            let client = authenticated_client(cache_timeout)?;
             let keys = hardware_tokens::list_registered_authenticators(&client).await?;
             if keys.is_empty() {
                 println!(
@@ -4674,7 +4914,10 @@ async fn handle_hardware_token(cmd: HardwareTokenCommand) -> lpcli::error::Resul
                 );
                 return Ok(());
             }
-            let mut table = build_table(vec!["ID", "Name", "Registered", "Last Used", "Status"]);
+            let mut table = build_table(
+                display,
+                vec!["ID", "Name", "Registered", "Last Used", "Status"],
+            );
             let date = |d: Option<chrono::DateTime<chrono::Utc>>| {
                 d.map(|d| d.format("%Y-%m-%d").to_string())
             };
@@ -4694,7 +4937,7 @@ async fn handle_hardware_token(cmd: HardwareTokenCommand) -> lpcli::error::Resul
             let client = if classic {
                 classic_authenticated_client()?
             } else {
-                authenticated_client()?
+                authenticated_client(cache_timeout)?
             };
             println!("Registering a security key with Launchpad...");
             if client.is_hardware_bound() {
@@ -4723,7 +4966,7 @@ async fn handle_hardware_token(cmd: HardwareTokenCommand) -> lpcli::error::Resul
         }
 
         HardwareTokenCommand::RevokeKey { key } => {
-            let client = authenticated_client()?;
+            let client = authenticated_client(cache_timeout)?;
             let registered = find_registered_key(&client, &key).await?;
             let link = registered.self_link.as_deref().ok_or_else(|| {
                 lpcli::error::LpError::Other("The security key has no self_link.".to_string())
@@ -4744,7 +4987,8 @@ async fn handle_hardware_token(cmd: HardwareTokenCommand) -> lpcli::error::Resul
             consumer,
             print,
         } => {
-            let client = authenticated_client()?;
+            let login = HardwareLogin::new().cache_timeout(cache_timeout);
+            let client = authenticated_client(cache_timeout)?;
             let registered = find_registered_key(&client, &key).await?;
             let request = IssueGrantRequest {
                 consumer_key: consumer.clone(),
@@ -4772,7 +5016,7 @@ async fn handle_hardware_token(cmd: HardwareTokenCommand) -> lpcli::error::Resul
                 "✓".green().bold(),
                 key_label(&registered)
             );
-            let login = HardwareLogin::new().grant(grant).consumer(consumer);
+            let login = login.grant(grant).consumer(consumer);
             let outcome =
                 hardware_tokens::login_with_hardware_token(login, usb_authenticator()).await?;
             print_hardware_login(&outcome);
@@ -4807,7 +5051,7 @@ async fn handle_hardware_token(cmd: HardwareTokenCommand) -> lpcli::error::Resul
                 }
             };
 
-            let client = authenticated_client()?;
+            let client = authenticated_client(cache_timeout)?;
             hardware_tokens::revoke_hardware_bound_oauth_token(&client, &token_key).await?;
             println!(
                 "{} Revoked the hardware-bound grant on Launchpad.",
@@ -4886,7 +5130,14 @@ async fn handle_status() -> lpcli::error::Result<()> {
 // Queue handler
 // ---------------------------------------------------------------------------
 
-async fn handle_queue(cmd: QueueCommand) -> lpcli::error::Result<()> {
+async fn handle_queue(
+    cmd: QueueCommand,
+    display: &Display,
+    policy: ReadAuthPolicy,
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<()> {
+    let client = read_client(policy, cache_timeout)?;
+    let primary_archive_only = policy == ReadAuthPolicy::Anonymous;
     match cmd {
         QueueCommand::Search {
             pocket,
@@ -4900,6 +5151,8 @@ async fn handle_queue(cmd: QueueCommand) -> lpcli::error::Result<()> {
             limit,
         } => {
             handle_queue_search(
+                display,
+                &client,
                 pocket,
                 status,
                 name,
@@ -4920,7 +5173,20 @@ async fn handle_queue(cmd: QueueCommand) -> lpcli::error::Result<()> {
             distro,
             series,
             output,
-        } => handle_queue_download(name, version, status, arch, distro, series, output).await,
+        } => {
+            handle_queue_download(
+                &client,
+                name,
+                version,
+                status,
+                arch,
+                distro,
+                series,
+                output,
+                primary_archive_only,
+            )
+            .await
+        }
         QueueCommand::Info {
             name,
             version,
@@ -4928,7 +5194,20 @@ async fn handle_queue(cmd: QueueCommand) -> lpcli::error::Result<()> {
             arch,
             distro,
             series,
-        } => handle_queue_info(name, version, status, arch, distro, series).await,
+        } => {
+            handle_queue_info(
+                display,
+                &client,
+                name,
+                version,
+                status,
+                arch,
+                distro,
+                series,
+                primary_archive_only,
+            )
+            .await
+        }
         QueueCommand::Accept {
             name,
             version,
@@ -4936,7 +5215,7 @@ async fn handle_queue(cmd: QueueCommand) -> lpcli::error::Result<()> {
             arch,
             distro,
             series,
-        } => handle_queue_accept(name, version, status, arch, distro, series).await,
+        } => handle_queue_accept(&client, name, version, status, arch, distro, series).await,
         QueueCommand::Reject {
             name,
             version,
@@ -4945,12 +5224,19 @@ async fn handle_queue(cmd: QueueCommand) -> lpcli::error::Result<()> {
             comment,
             distro,
             series,
-        } => handle_queue_reject(name, version, status, arch, comment, distro, series).await,
+        } => {
+            handle_queue_reject(
+                &client, name, version, status, arch, comment, distro, series,
+            )
+            .await
+        }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_queue_search(
+    display: &Display,
+    client: &LaunchpadClient,
     pocket: Option<Pocket>,
     status: Option<String>,
     name: Option<String>,
@@ -4961,28 +5247,28 @@ async fn handle_queue_search(
     series: Option<String>,
     limit: u32,
 ) -> lpcli::error::Result<()> {
-    let client = LaunchpadClient::new(None);
-
     // Determine the series to query. If not provided, resolve the current
     // Ubuntu development series.
     let series_name = match series {
         Some(s) => canonical_series(&distro, &s).to_string(),
-        None => queue::get_devel_series_name(&client, &distro).await?,
+        None => queue::get_devel_series_name(client, &distro).await?,
     };
 
     // If an archive name is given (e.g. "primary" or "ubuntu/+archive/primary"),
     // resolve it to a full API URL. If it looks like a relative name, build the
     // URL for the primary archive of the distribution.
-    let archive_url = archive.map(|a| {
-        if a.starts_with("http://") || a.starts_with("https://") {
-            a
-        } else if a.contains("/+archive/") {
-            client.url(&format!("/{}", a))
-        } else {
-            // Assume it's just the archive name under the distro.
-            client.url(&format!("/{}/+archive/{}", distro, a))
-        }
-    });
+    let archive_url = archive
+        .map(|a| {
+            if a.starts_with("http://") || a.starts_with("https://") {
+                a
+            } else if a.contains("/+archive/") {
+                client.url(&format!("/{}", a))
+            } else {
+                // Assume it's just the archive name under the distro.
+                client.url(&format!("/{}/+archive/{}", distro, a))
+            }
+        })
+        .unwrap_or_else(|| client.url(&format!("/{distro}/+archive/primary")));
 
     let params = QueueSearchParams {
         pocket: pocket.map(pocket_launchpad_name),
@@ -4990,11 +5276,11 @@ async fn handle_queue_search(
         name: name.as_deref(),
         version: version.as_deref(),
         exact_match,
-        archive: archive_url.as_deref(),
+        archive: Some(&archive_url),
         limit: Some(limit),
     };
 
-    let uploads = queue::get_package_uploads(&client, &distro, &series_name, &params).await?;
+    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params).await?;
 
     if uploads.is_empty() {
         println!(
@@ -5015,15 +5301,18 @@ async fn handle_queue_search(
         distro,
     );
 
-    let mut table = build_table(vec![
-        "Package",
-        "Version",
-        "Component",
-        "Pocket",
-        "Status",
-        "Archs",
-        "Created",
-    ]);
+    let mut table = build_table(
+        display,
+        vec![
+            "Package",
+            "Version",
+            "Component",
+            "Pocket",
+            "Status",
+            "Archs",
+            "Created",
+        ],
+    );
     for upload in &uploads {
         let pkg_name = upload
             .package_name
@@ -5061,6 +5350,7 @@ async fn handle_queue_search(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_queue_download(
+    client: &LaunchpadClient,
     name: String,
     version: Option<String>,
     status: String,
@@ -5068,18 +5358,20 @@ async fn handle_queue_download(
     distro: String,
     series: Option<String>,
     output: String,
+    primary_archive_only: bool,
 ) -> lpcli::error::Result<()> {
-    let client = LaunchpadClient::new(None);
-
     // Resolve the series (default: current development series).
     let series_name = match series {
         Some(s) => canonical_series(&distro, &s).to_string(),
-        None => queue::get_devel_series_name(&client, &distro).await?,
+        None => queue::get_devel_series_name(client, &distro).await?,
     };
 
     // Search for the package in the queue.  Fetch multiple results so we can
     // filter by architecture client-side.
+    let archive_url =
+        primary_archive_only.then(|| client.url(&format!("/{distro}/+archive/primary")));
     let params = QueueSearchParams {
+        archive: archive_url.as_deref(),
         status: Some(&status),
         name: Some(&name),
         version: version.as_deref(),
@@ -5088,7 +5380,7 @@ async fn handle_queue_download(
         ..Default::default()
     };
 
-    let uploads = queue::get_package_uploads(&client, &distro, &series_name, &params).await?;
+    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params).await?;
 
     // Find the first upload whose display_arches field contains the
     // requested architecture.
@@ -5122,19 +5414,19 @@ async fn handle_queue_download(
     // Collect file URLs based on what the upload contains (source, binary, or both).
     let mut urls = Vec::new();
     if upload.contains_source.unwrap_or(false) {
-        let source_urls = queue::get_source_file_urls(&client, self_link).await?;
+        let source_urls = queue::get_source_file_urls(client, self_link).await?;
         urls.extend(source_urls);
     }
     if upload.contains_build.unwrap_or(false) {
-        let binary_urls = queue::get_binary_file_urls(&client, self_link).await?;
+        let binary_urls = queue::get_binary_file_urls(client, self_link).await?;
         urls.extend(binary_urls);
     }
     // If neither flag was set (e.g. a copy), try both endpoints.
     if urls.is_empty() {
-        let source_urls = queue::get_source_file_urls(&client, self_link).await?;
+        let source_urls = queue::get_source_file_urls(client, self_link).await?;
         urls.extend(source_urls);
         if urls.is_empty() {
-            let binary_urls = queue::get_binary_file_urls(&client, self_link).await?;
+            let binary_urls = queue::get_binary_file_urls(client, self_link).await?;
             urls.extend(binary_urls);
         }
     }
@@ -5158,7 +5450,7 @@ async fn handle_queue_download(
         upload.package_version.as_deref().unwrap_or("?"),
     );
 
-    let results = download::download_files(&client, &urls, output_dir).await?;
+    let results = download_public_files(&urls, output_dir).await?;
 
     let mut success_count = 0u32;
     let mut fail_count = 0u32;
@@ -5197,6 +5489,7 @@ async fn handle_queue_download(
 // ---------------------------------------------------------------------------
 
 async fn handle_queue_accept(
+    client: &LaunchpadClient,
     name: String,
     version: Option<String>,
     status: String,
@@ -5204,12 +5497,10 @@ async fn handle_queue_accept(
     distro: String,
     series: Option<String>,
 ) -> lpcli::error::Result<()> {
-    let client = authenticated_client()?;
-
     // Resolve the series (default: current development series).
     let series_name = match series {
         Some(s) => canonical_series(&distro, &s).to_string(),
-        None => queue::get_devel_series_name(&client, &distro).await?,
+        None => queue::get_devel_series_name(client, &distro).await?,
     };
 
     // Search for the package in the queue.
@@ -5222,7 +5513,7 @@ async fn handle_queue_accept(
         ..Default::default()
     };
 
-    let uploads = queue::get_package_uploads(&client, &distro, &series_name, &params).await?;
+    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params).await?;
 
     // Find uploads whose display_arches field contains the requested architecture.
     let matching: Vec<_> = uploads
@@ -5275,7 +5566,7 @@ async fn handle_queue_accept(
     })?;
 
     // Call acceptFromQueue.
-    queue::accept_from_queue(&client, self_link)
+    queue::accept_from_queue(client, self_link)
         .await
         .map_err(|e| {
             // Provide a more helpful message for permission errors.
@@ -5316,6 +5607,7 @@ async fn handle_queue_accept(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_queue_reject(
+    client: &LaunchpadClient,
     name: String,
     version: Option<String>,
     status: String,
@@ -5324,12 +5616,10 @@ async fn handle_queue_reject(
     distro: String,
     series: Option<String>,
 ) -> lpcli::error::Result<()> {
-    let client = authenticated_client()?;
-
     // Resolve the series (default: current development series).
     let series_name = match series {
         Some(s) => canonical_series(&distro, &s).to_string(),
-        None => queue::get_devel_series_name(&client, &distro).await?,
+        None => queue::get_devel_series_name(client, &distro).await?,
     };
 
     // Search for the package in the queue.
@@ -5342,7 +5632,7 @@ async fn handle_queue_reject(
         ..Default::default()
     };
 
-    let uploads = queue::get_package_uploads(&client, &distro, &series_name, &params).await?;
+    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params).await?;
 
     // Find uploads whose display_arches field contains the requested architecture.
     let matching: Vec<_> = uploads
@@ -5395,7 +5685,7 @@ async fn handle_queue_reject(
     })?;
 
     // Call rejectFromQueue.
-    queue::reject_from_queue(&client, self_link, comment.as_deref())
+    queue::reject_from_queue(client, self_link, comment.as_deref())
         .await
         .map_err(|e| {
             // Provide a more helpful message for permission errors.
@@ -5437,24 +5727,29 @@ async fn handle_queue_reject(
 // Queue info handler
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_queue_info(
+    display: &Display,
+    client: &LaunchpadClient,
     name: String,
     version: Option<String>,
     status: String,
     arch: QueueArch,
     distro: String,
     series: Option<String>,
+    primary_archive_only: bool,
 ) -> lpcli::error::Result<()> {
-    let client = LaunchpadClient::new(None);
-
     // Resolve the series (default: current development series).
     let series_name = match series {
         Some(s) => canonical_series(&distro, &s).to_string(),
-        None => queue::get_devel_series_name(&client, &distro).await?,
+        None => queue::get_devel_series_name(client, &distro).await?,
     };
 
     // Search for the package in the queue.
+    let archive_url =
+        primary_archive_only.then(|| client.url(&format!("/{distro}/+archive/primary")));
     let params = QueueSearchParams {
+        archive: archive_url.as_deref(),
         status: Some(&status),
         name: Some(&name),
         version: version.as_deref(),
@@ -5463,7 +5758,7 @@ async fn handle_queue_info(
         ..Default::default()
     };
 
-    let uploads = queue::get_package_uploads(&client, &distro, &series_name, &params).await?;
+    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params).await?;
 
     // Find the first upload whose display_arches field contains the
     // requested architecture.
@@ -5516,7 +5811,7 @@ async fn handle_queue_info(
     // If the package is rejected, show the rejection reason from the logs.
     if upload.status.as_deref() == Some("Rejected")
         && let Some(logs_url) = &upload.logs_collection_link
-        && let Ok(logs) = queue::get_upload_logs(&client, logs_url).await
+        && let Ok(logs) = queue::get_upload_logs(client, logs_url).await
     {
         // Find the log entry where new_status is "Rejected".
         let rejection = logs
@@ -5535,7 +5830,7 @@ async fn handle_queue_info(
     }
 
     // Fetch binary properties (the .deb/.ddeb package details).
-    let binaries = queue::get_binary_properties(&client, self_link).await?;
+    let binaries = queue::get_binary_properties(client, self_link).await?;
 
     if binaries.is_empty() {
         println!(
@@ -5556,16 +5851,17 @@ async fn handle_queue_info(
             "▸".green().bold(),
             debs.len(),
         );
-        let mut table = Table::new();
-        table.load_style(UTF8_FULL_CONDENSED);
-        table.set_header(vec![
-            "Package",
-            "Version",
-            "Architecture",
-            "Component",
-            "Section",
-            "Priority",
-        ]);
+        let mut table = build_table(
+            display,
+            vec![
+                "Package",
+                "Version",
+                "Architecture",
+                "Component",
+                "Section",
+                "Priority",
+            ],
+        );
         for b in &debs {
             table.add_row(vec![
                 b.name.as_deref().unwrap_or("?"),
@@ -5586,16 +5882,17 @@ async fn handle_queue_info(
             "▸".yellow().bold(),
             ddebs.len(),
         );
-        let mut table = Table::new();
-        table.load_style(UTF8_FULL_CONDENSED);
-        table.set_header(vec![
-            "Package",
-            "Version",
-            "Architecture",
-            "Component",
-            "Section",
-            "Priority",
-        ]);
+        let mut table = build_table(
+            display,
+            vec![
+                "Package",
+                "Version",
+                "Architecture",
+                "Component",
+                "Section",
+                "Priority",
+            ],
+        );
         for b in &ddebs {
             table.add_row(vec![
                 b.name.as_deref().unwrap_or("?"),
@@ -5625,14 +5922,13 @@ async fn handle_queue_info(
 // ---------------------------------------------------------------------------
 
 async fn handle_package_download(
+    client: &LaunchpadClient,
     name: String,
     version: Option<String>,
     series: String,
     distro: String,
     output: String,
 ) -> lpcli::error::Result<()> {
-    let client = LaunchpadClient::new(None);
-
     // Search for the published source package (exact match to avoid
     // substring hits like "libtest-valgrind-perl" when searching for "valgrind").
     let params = SourceSearchParams {
@@ -5643,7 +5939,7 @@ async fn handle_package_download(
         ..Default::default()
     };
 
-    let pubs = packages::search_published_sources(&client, &distro, &series, &params).await?;
+    let pubs = packages::search_published_sources(client, &distro, &series, &params).await?;
 
     let publication = pubs.first().ok_or_else(|| {
         lpcli::error::LpError::NotFound(format!(
@@ -5663,7 +5959,7 @@ async fn handle_package_download(
     })?;
 
     // Get source file URLs from the publication record.
-    let urls = packages::get_source_file_urls(&client, self_link).await?;
+    let urls = packages::get_source_file_urls(client, self_link).await?;
 
     if urls.is_empty() {
         println!(
@@ -5685,7 +5981,7 @@ async fn handle_package_download(
         publication.source_package_version.as_deref().unwrap_or("?"),
     );
 
-    let results = download::download_files(&client, &urls, output_dir).await?;
+    let results = download_public_files(&urls, output_dir).await?;
 
     let mut success_count = 0u32;
     let mut fail_count = 0u32;
@@ -5732,25 +6028,144 @@ fn format_size(bytes: u64) -> String {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// CLI policy only: never change the library's signing or token renewal semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadAuthPolicy {
+    Anonymous,
+
+    Authenticated,
+}
+
+fn supports_public_reads(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Bug(
+            BugCommand::Show { .. }
+                | BugCommand::Tasks { .. }
+                | BugCommand::Comments { .. }
+                | BugCommand::Search { .. }
+                | BugCommand::Subscriptions { .. }
+                | BugCommand::Attachments { .. }
+                | BugCommand::Watches { .. }
+                | BugCommand::RemoteBugTrackers { .. }
+        ) | Command::Person(_)
+            | Command::Package(_)
+            | Command::Project(_)
+            | Command::Cve(_)
+            | Command::Git(_)
+            | Command::Spec(_)
+            | Command::Question(_)
+            | Command::Translation(_)
+            | Command::Snap(
+                SnapCommand::Show { .. } | SnapCommand::Find { .. } | SnapCommand::Builds { .. }
+            )
+            | Command::Queue(
+                QueueCommand::Search { .. }
+                    | QueueCommand::Info { .. }
+                    | QueueCommand::Download { .. }
+            )
+    )
+}
+
+fn is_ubuntu_primary_queue_archive(distro: &str, archive: Option<&str>) -> bool {
+    if !distro.eq_ignore_ascii_case("ubuntu") {
+        return false;
+    }
+    let Some(archive) = archive else {
+        return true;
+    };
+    let trimmed = archive.trim_matches('/');
+    trimmed == "primary"
+        || trimmed == "ubuntu/+archive/primary"
+        || trimmed == "https://api.launchpad.net/devel/ubuntu/+archive/primary"
+}
+
+fn read_auth_policy(command: &Command, authenticated: bool, public: bool) -> ReadAuthPolicy {
+    use ReadAuthPolicy::{Anonymous, Authenticated};
+    if !supports_public_reads(command) || authenticated {
+        return Authenticated;
+    }
+    if public {
+        return Anonymous;
+    }
+    match command {
+        // These collections are tied to public distribution data, not a person's
+        // private archives, bugs, repositories, projects or recipes.
+        Command::Package(
+            PackageCommand::Series { .. }
+            | PackageCommand::ListSeries { .. }
+            | PackageCommand::Search { .. }
+            | PackageCommand::Distro { .. }
+            | PackageCommand::Download { .. },
+        )
+        | Command::Translation(_)
+        | Command::Bug(BugCommand::RemoteBugTrackers { .. }) => Anonymous,
+
+        Command::Queue(QueueCommand::Search {
+            distro, archive, ..
+        }) if is_ubuntu_primary_queue_archive(distro, archive.as_deref()) => Anonymous,
+        Command::Queue(
+            QueueCommand::Info { distro, .. } | QueueCommand::Download { distro, .. },
+        ) if distro.eq_ignore_ascii_case("ubuntu") => Anonymous,
+
+        // Private-capable reads require auth even when no credentials are stored.
+        // Only explicit --public opts into potentially incomplete public results.
+        _ => Authenticated,
+    }
+}
+
+fn read_client(
+    policy: ReadAuthPolicy,
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<LaunchpadClient> {
+    read_client_with_auth(policy, || authenticated_client(cache_timeout))
+}
+
+fn read_client_with_auth(
+    policy: ReadAuthPolicy,
+    authenticate: impl FnOnce() -> lpcli::error::Result<LaunchpadClient>,
+) -> lpcli::error::Result<LaunchpadClient> {
+    match policy {
+        ReadAuthPolicy::Authenticated => authenticate(),
+        ReadAuthPolicy::Anonymous => Ok(LaunchpadClient::new(None)),
+    }
+}
+
+/// Metadata may be signed, but arbitrary file URLs and redirects must not be.
+async fn download_public_files(
+    urls: &[String],
+    output_dir: &std::path::Path,
+) -> lpcli::error::Result<Vec<download::DownloadOutcome>> {
+    download::download_files(&LaunchpadClient::new(None), urls, output_dir).await
+}
+
+fn hardware_token_cache_timeout(settings: &config::AppConfig) -> std::time::Duration {
+    std::time::Duration::from_secs(settings.authentication.hardware_token_cache_seconds)
+}
+
 /// Build an authenticated client from stored credentials.
 ///
 /// A stored hardware-bound grant takes precedence over classic OAuth
-/// credentials; the first signed request then needs a touch of the security
-/// key.
+/// credentials. Requests reuse valid cached tokens according to the configured
+/// timeout; minting a fresh token requires a touch of the security key.
 ///
 /// Returns `LpError::NotAuthenticated` if no credentials are found, or the
 /// underlying error (e.g. `LpError::Config`) if the file exists but cannot
 /// be read or parsed.
-fn authenticated_client() -> lpcli::error::Result<LaunchpadClient> {
-    let session = hardware_tokens::load_session(&GrantStore::from_env(), usb_authenticator())
-        .map_err(|e| match e {
-            lpcli::error::LpError::HardwareToken(message) => {
-                lpcli::error::LpError::HardwareToken(format!(
-                    "{message} Run `lpcli logout --hardware-token` to remove the stored grant."
-                ))
-            }
-            other => other,
-        })?;
+fn authenticated_client(
+    cache_timeout: std::time::Duration,
+) -> lpcli::error::Result<LaunchpadClient> {
+    let session = hardware_tokens::load_session_with_cache(
+        &GrantStore::from_env(),
+        usb_authenticator(),
+        cache_timeout,
+    )
+    .map_err(|e| match e {
+        lpcli::error::LpError::HardwareToken(message) => lpcli::error::LpError::HardwareToken(
+            format!("{message} Run `lpcli logout --hardware-token` to remove the stored grant."),
+        ),
+        other => other,
+    })?;
     if let Some(session) = session {
         return Ok(LaunchpadClient::with_hardware_token(Arc::new(session)));
     }
@@ -5769,12 +6184,9 @@ fn usb_authenticator() -> Arc<dyn Authenticator> {
     Arc::new(UsbAuthenticator::default())
 }
 
-/// Build a [`comfy_table::Table`] with headers.
-fn build_table(headers: Vec<&str>) -> Table {
-    let mut table = Table::new();
-    table.load_style(UTF8_FULL_CONDENSED);
-    table.set_header(headers);
-    table
+/// Build a [`comfy_table::Table`] with headers and the resolved display width.
+fn build_table(display: &Display, headers: Vec<&str>) -> display::DisplayTable {
+    display.table(headers)
 }
 
 // ---------------------------------------------------------------------------
@@ -6210,15 +6622,6 @@ fn remote_link_failure_error(bug_id: u64, failures: &[String]) -> Option<lpcli::
     )))
 }
 
-/// Truncate a string to at most `max` characters, appending `…` if truncated.
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", s.chars().take(max - 1).collect::<String>())
-    }
-}
-
 /// Parse a list of tags from a `Vec<String>` where each element may contain
 /// comma-separated values (e.g. `"homestar,"` or `"homestar, cheat, strongbad"`).
 ///
@@ -6235,6 +6638,62 @@ fn parse_tags_from_vec(args: &[String]) -> Vec<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Resolve the new bug description from `--description` or
+/// `--description-file`.
+///
+/// Exactly one of the two must be supplied (enforced by clap). The resolved
+/// text is rejected when it is empty or whitespace-only: Launchpad does not
+/// accept an empty bug description, and an empty pipe or file silently
+/// wiping the current description would be an easy mistake to make.
+fn resolve_new_description(
+    description: Option<String>,
+    description_file: Option<&str>,
+) -> lpcli::error::Result<String> {
+    let text = match (description, description_file) {
+        (Some(text), _) => text,
+        (None, Some(path)) => read_description_file(path)?,
+        (None, None) => unreachable!("clap requires --description or --description-file"),
+    };
+    if text.trim().is_empty() {
+        return Err(lpcli::error::LpError::Other(
+            "the new bug description must not be empty".into(),
+        ));
+    }
+    Ok(text)
+}
+
+/// Read the new bug description from the file given by `--description-file`.
+///
+/// A path of `-` reads the description from standard input, mirroring
+/// `gh issue edit --body-file -`.
+fn read_description_file(path: &str) -> lpcli::error::Result<String> {
+    if path == "-" {
+        read_description_from_reader(std::io::stdin()).map_err(|e| {
+            lpcli::error::LpError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to read description from standard input: {e}"),
+            ))
+        })
+    } else {
+        std::fs::read_to_string(path).map_err(|e| {
+            lpcli::error::LpError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to read description file '{}': {e}", path),
+            ))
+        })
+    }
+}
+
+/// Read description text from an arbitrary reader.
+///
+/// Separated from [`read_description_file`] so the stdin path can be unit
+/// tested with a [`std::io::Cursor`] stand-in.
+fn read_description_from_reader<R: std::io::Read>(mut reader: R) -> std::io::Result<String> {
+    let mut buf = String::new();
+    reader.read_to_string(&mut buf)?;
+    Ok(buf)
 }
 
 /// Remove tags from `current_tags` according to the supplied remove flags.

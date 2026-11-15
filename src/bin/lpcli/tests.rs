@@ -3,6 +3,1006 @@
 
 use super::*;
 
+mod documentation_examples {
+    use super::*;
+
+    /// Collect logical shell lines and inline commands with their Markdown source lines.
+    fn candidates(markdown: &str) -> Vec<(usize, String)> {
+        let mut examples = Vec::new();
+        let mut fence: Option<(&str, bool)> = None;
+        let mut pending = String::new();
+        let mut start_line = 0;
+
+        for (index, line) in markdown.lines().enumerate() {
+            let line_number = index + 1;
+            let trimmed = line.trim_start();
+            if let Some((delimiter, shell)) = fence {
+                if trimmed.starts_with(delimiter) {
+                    if !pending.is_empty() {
+                        examples.push((start_line, std::mem::take(&mut pending)));
+                    }
+                    fence = None;
+                } else if shell && (!trimmed.is_empty() || !pending.is_empty()) {
+                    if pending.is_empty() {
+                        start_line = line_number;
+                    } else {
+                        // Join explicit continuations before tokenizing: shlex otherwise emits
+                        // an empty argument for a standalone backslash-newline. Keep a trailing
+                        // backslash until another line arrives so dangling ones remain errors.
+                        pending.pop();
+                    }
+                    pending.push_str(line);
+                    // shlex distinguishes continuations from escaped backslashes and comments.
+                    if !(line.ends_with('\\') && shlex::split(&pending).is_none()) {
+                        examples.push((start_line, std::mem::take(&mut pending)));
+                    }
+                }
+                continue;
+            }
+
+            if let Some(delimiter) = ["```", "~~~"]
+                .into_iter()
+                .find(|delimiter| trimmed.starts_with(delimiter))
+            {
+                let language = trimmed[delimiter.len()..].split_whitespace().next();
+                fence = Some((delimiter, matches!(language, Some("bash" | "sh"))));
+                continue;
+            }
+
+            for inline in line.split('`').skip(1).step_by(2) {
+                let inline = inline.trim();
+                // A bare `lpcli` in prose names the program/consumer, not a command example.
+                if inline
+                    .strip_prefix("lpcli")
+                    .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+                {
+                    examples.push((line_number, inline.to_owned()));
+                }
+            }
+        }
+        if !pending.is_empty() {
+            examples.push((start_line, pending));
+        }
+        examples
+    }
+
+    // shlex parses words, not redirection operators. Check placeholder spelling in the
+    // source, since tokenization removes the quotes/escapes that make angle brackets literal.
+    fn has_unquoted_placeholder(command: &str) -> bool {
+        let mut quote = None;
+        let mut word_start = true;
+        let mut chars = command.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\\' if quote != Some('\'') => {
+                    chars.next();
+                    word_start = false;
+                }
+                '\'' | '"' if quote.is_none() => {
+                    quote = Some(ch);
+                    word_start = false;
+                }
+                '\'' | '"' if quote == Some(ch) => quote = None,
+                '#' if quote.is_none() && word_start => {
+                    for ch in chars.by_ref() {
+                        if ch == '\n' {
+                            break;
+                        }
+                    }
+                    word_start = true;
+                }
+                '<' if quote.is_none() => {
+                    if chars
+                        .clone()
+                        .take_while(|ch| !ch.is_whitespace() && !matches!(ch, '\'' | '"' | '\\'))
+                        .any(|ch| ch == '>')
+                    {
+                        return true;
+                    }
+                    word_start = false;
+                }
+                _ if quote.is_none() => word_start = ch.is_whitespace(),
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn command_args(command: &str) -> Result<Option<Vec<String>>, &'static str> {
+        let mut words =
+            shlex::split(command).ok_or("invalid shell quoting or dangling backslash")?;
+        let start = if words.first().is_some_and(|word| word == "lpcli") {
+            Some(0)
+        } else {
+            // Support the documented `cat ... | lpcli ...` form, not arbitrary shell scripts.
+            // Check command boundaries rather than treating any argument named lpcli as a command.
+            words
+                .windows(2)
+                .position(|pair| pair[0] == "|" && pair[1] == "lpcli")
+                .map(|pipe| pipe + 1)
+        };
+        if start.is_some() && has_unquoted_placeholder(command) {
+            return Err(
+                "unquoted <...> placeholder is shell redirection, not a CLI argument; use a concrete value or quote literal text",
+            );
+        }
+        Ok(start.map(|start| words.drain(start..).collect()))
+    }
+
+    fn validation_failures(document: &str, markdown: &str) -> (usize, Vec<String>) {
+        let mut count = 0;
+        let mut failures = Vec::new();
+        for (line, command) in candidates(markdown) {
+            let args = match command_args(&command) {
+                Ok(Some(args)) => args,
+                Ok(None) => continue,
+                Err(error) => {
+                    count += 1;
+                    failures.push(format!("{document}:{line}: {}\n  {error}", command.trim()));
+                    continue;
+                }
+            };
+            count += 1;
+            if let Err(error) = Cli::try_parse_from(&args).and_then(|cli| validate_cli(&cli))
+                && !matches!(
+                    error.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                )
+            {
+                failures.push(format!("{document}:{line}: {}\n  {error}", command.trim()));
+            }
+        }
+        (count, failures)
+    }
+
+    #[test]
+    fn documented_cli_examples_parse_and_validate() {
+        let mut total = 0;
+        let mut failures = Vec::new();
+        for (document, markdown) in [
+            ("README.md", include_str!("../../../README.md")),
+            ("AGENTS.md", include_str!("../../../AGENTS.md")),
+        ] {
+            let (count, errors) = validation_failures(document, markdown);
+            total += count;
+            failures.extend(errors);
+            eprintln!("{document}: checked {count} lpcli command examples");
+        }
+        assert!(total > 0, "no documented lpcli command examples found");
+        assert!(
+            failures.is_empty(),
+            "{} of {total} documented lpcli examples failed:\n\n{}",
+            failures.len(),
+            failures.join("\n\n")
+        );
+    }
+
+    #[test]
+    fn extracts_shell_fences_and_inline_commands_only() {
+        let markdown = "Use `lpcli --help` and `lpcli --version`; `lpcli` names the program.\n\
+                        ```bash\n\
+                        lpcli login\n\
+                        cargo build --release\n\
+                        ```\n\
+                        ~~~sh\n\
+                        lpcli status\n\
+                        ~~~\n\
+                        ```rust\n\
+                        `lpcli not-a-command`\n\
+                        ```\n\
+                        ```\n\
+                        lpcli <COMMAND> [OPTIONS]\n\
+                        ```\n\
+                        Ignore `lpcli-helper --help` and `echo lpcli --help`.\n";
+        let examples: Vec<_> = candidates(markdown)
+            .into_iter()
+            .filter_map(|(line, command)| command_args(&command).unwrap().map(|args| (line, args)))
+            .collect();
+        assert_eq!(
+            examples,
+            vec![
+                (1, vec!["lpcli".to_owned(), "--help".to_owned()]),
+                (1, vec!["lpcli".to_owned(), "--version".to_owned()]),
+                (3, vec!["lpcli".to_owned(), "login".to_owned()]),
+                (7, vec!["lpcli".to_owned(), "status".to_owned()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn shell_quotes_and_comments_preserve_argument_contents() {
+        let command =
+            r#"lpcli bug comment --bug-id 123456 --message "A \"quote\", # and | lpcli" # ignored"#;
+        assert_eq!(
+            command_args(command).unwrap().unwrap(),
+            [
+                "lpcli",
+                "bug",
+                "comment",
+                "--bug-id",
+                "123456",
+                "--message",
+                "A \"quote\", # and | lpcli"
+            ]
+        );
+        let command = "lpcli bug comment --bug-id 123456 --message 'literal # | and \\ slash'";
+        assert_eq!(
+            command_args(command).unwrap().unwrap().last().unwrap(),
+            "literal # | and \\ slash"
+        );
+        assert!(command_args("# lpcli not-a-command").unwrap().is_none());
+        assert_eq!(
+            command_args("lpcli bug comment --bug-id 1 --message ''")
+                .unwrap()
+                .unwrap()
+                .last()
+                .unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn unquoted_placeholders_fail_but_literal_brackets_and_comments_are_allowed() {
+        for command in [
+            "lpcli person show --name <person>",
+            "lpcli login --hardware-token --account <you> --grant-token <oauth_token>",
+        ] {
+            // These string arguments pass clap, but are not argv in a shell invocation.
+            let cli = Cli::try_parse_from(shlex::split(command).unwrap()).unwrap();
+            validate_cli(&cli).unwrap();
+            let (count, failures) = validation_failures("placeholder.md", &format!("`{command}`"));
+            assert_eq!(count, 1);
+            assert_eq!(failures.len(), 1);
+            assert!(failures[0].starts_with("placeholder.md:1:"));
+            assert!(failures[0].contains("unquoted <...> placeholder"));
+        }
+        for command in [
+            "lpcli person show --name '<person>'",
+            "lpcli person show --name \"<person>\"",
+            r"lpcli person show --name \<person\>",
+            "lpcli person show --name person#tag # <placeholder>",
+            r#"lpcli person show --name "A \"quote\" and <literal>""#,
+        ] {
+            let (count, failures) = validation_failures("literal.md", &format!("`{command}`"));
+            assert_eq!(count, 1);
+            assert!(failures.is_empty(), "{}", failures.join("\n"));
+        }
+    }
+
+    #[test]
+    fn continuations_use_shell_unescaping_and_keep_start_lines() {
+        let markdown = "```bash\n\
+                        # This comment does not continue \\\n\
+                        lpcli hardware-token register \\\n\
+                            \"My Yubi\\\n\
+                        Key\" # trailing comment \\\n\
+                        lpcli status\n\
+                        lpcli bug comment --bug-id 1 --message backslash\\\\\n\
+                        lpcli logout\n\
+                        ```";
+        let examples: Vec<_> = candidates(markdown)
+            .into_iter()
+            .filter_map(|(line, command)| command_args(&command).unwrap().map(|args| (line, args)))
+            .collect();
+        assert_eq!(examples.len(), 4);
+        assert_eq!(examples[0].0, 3);
+        assert_eq!(
+            examples[0].1,
+            ["lpcli", "hardware-token", "register", "My YubiKey"]
+        );
+        assert_eq!(
+            examples[1],
+            (6, vec!["lpcli".to_owned(), "status".to_owned()])
+        );
+        assert_eq!(examples[2].1.last().unwrap(), "backslash\\");
+        assert_eq!(examples[3].0, 8);
+        let (_, failures) = validation_failures("dangling.md", "```sh\nlpcli status \\\n```");
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("dangling backslash"));
+    }
+
+    #[test]
+    fn input_pipe_extracts_lpcli_but_not_upstream_arguments() {
+        let command = "cat 'description with spaces.txt' | lpcli bug set-description \\\n    --bug-id 123456 --description-file - # stdin";
+        let examples = candidates(&format!("```sh\n{command}\n```"));
+        assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].0, 2);
+        assert_eq!(
+            command_args(&examples[0].1).unwrap().unwrap(),
+            [
+                "lpcli",
+                "bug",
+                "set-description",
+                "--bug-id",
+                "123456",
+                "--description-file",
+                "-"
+            ]
+        );
+        let (count, failures) = validation_failures("pipe.md", &format!("```sh\n{command}\n```"));
+        assert_eq!(count, 1);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        assert!(command_args("echo lpcli --help").unwrap().is_none());
+        assert!(command_args("cat lpcli | cat").unwrap().is_none());
+    }
+
+    #[test]
+    fn validation_aggregates_parse_shell_and_semantic_errors() {
+        let markdown = "```sh\n\
+                        lpcli not-a-command\n\
+                        lpcli bug show\n\
+                        lpcli package series --series not-a-series\n\
+                        lpcli --public login\n\
+                        lpcli bug comment --bug-id 1 --message 'unclosed\n\
+                        lpcli status\n\
+                        ```\n\
+                        Finally, `lpcli --version`.";
+        let (count, failures) = validation_failures("examples.md", markdown);
+        assert_eq!(count, 7);
+        assert_eq!(failures.len(), 5, "{}", failures.join("\n"));
+        for (failure, line) in failures.iter().zip(2..=6) {
+            assert!(
+                failure.starts_with(&format!("examples.md:{line}:")),
+                "{failure}"
+            );
+        }
+        assert!(failures[2].contains("not-a-series"));
+        assert!(failures[3].contains("--public"));
+        assert!(failures[4].contains("invalid shell quoting"));
+    }
+
+    #[test]
+    fn only_help_and_version_error_kinds_count_as_success() {
+        let markdown = "```bash\n\
+                        lpcli --help\n\
+                        lpcli --version\n\
+                        lpcli bug --help\n\
+                        lpcli help bug\n\
+                        lpcli\n\
+                        lpcli bug\n\
+                        lpcli not-a-command --help\n\
+                        ```";
+        let (count, failures) = validation_failures("help.md", markdown);
+        assert_eq!(count, 7);
+        assert_eq!(failures.len(), 3, "{}", failures.join("\n"));
+        for (failure, line) in failures.iter().zip(6..=8) {
+            assert!(
+                failure.starts_with(&format!("help.md:{line}:")),
+                "{failure}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cli_hardware_clear_cache_parses_without_credentials_or_token_arguments() {
+    for args in [
+        vec!["lpcli", "hardware-token", "clear-cache"],
+        vec!["lpcli", "--authenticated", "hardware-token", "clear-cache"],
+    ] {
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::HardwareToken(HardwareTokenCommand::ClearCache)
+        ));
+        validate_cli(&cli).unwrap();
+    }
+    assert!(
+        Cli::try_parse_from([
+            "lpcli",
+            "hardware-token",
+            "clear-cache",
+            "--token",
+            "secret"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn cli_hardware_clear_cache_help_distinguishes_clearing_from_revoking() {
+    let help = Cli::try_parse_from(["lpcli", "hardware-token", "clear-cache", "--help"])
+        .unwrap_err()
+        .to_string();
+    let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(help.contains("without deleting the grant or revoking anything"));
+}
+
+#[tokio::test]
+async fn clear_cache_dispatch_skips_malformed_config_and_propagates_clear_failure() {
+    use lpcli::error::LpError;
+    for clear_fails in [false, true] {
+        let cli = Cli::try_parse_from(["lpcli", "hardware-token", "clear-cache"]).unwrap();
+        validate_cli(&cli).unwrap();
+        let config_reads = std::cell::Cell::new(0);
+        let clears = std::cell::Cell::new(0);
+        let result = run_command(
+            cli,
+            || {
+                config_reads.set(config_reads.get() + 1);
+                Err(LpError::Config("malformed config".into()))
+            },
+            || {
+                clears.set(clears.get() + 1);
+                if clear_fails {
+                    Err(LpError::HardwareToken("cache unavailable".into()))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        assert_eq!(config_reads.get(), 0);
+        assert_eq!(clears.get(), 1);
+        if clear_fails {
+            assert!(matches!(result, Err(LpError::HardwareToken(_))));
+        } else {
+            result.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn other_commands_still_require_valid_config_before_dispatch() {
+    let cli = Cli::try_parse_from(["lpcli", "hardware-token", "show"]).unwrap();
+    validate_cli(&cli).unwrap();
+    let result = run_command(
+        cli,
+        || Err(lpcli::error::LpError::Config("malformed config".into())),
+        || panic!("only clear-cache bypasses configuration"),
+    )
+    .await;
+    assert!(matches!(result, Err(lpcli::error::LpError::Config(_))));
+}
+
+#[test]
+fn hardware_cache_config_is_converted_without_overriding_zero() {
+    assert_eq!(
+        hardware_token_cache_timeout(&config::AppConfig::default()),
+        std::time::Duration::from_secs(300)
+    );
+    for seconds in [0, 1, 600, 86_400] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!("[authentication]\nhardware_token_cache_seconds = {seconds}\n"),
+        )
+        .unwrap();
+        let settings = config::load_from(&path).unwrap();
+        assert_eq!(
+            hardware_token_cache_timeout(&settings),
+            std::time::Duration::from_secs(seconds)
+        );
+    }
+}
+
+fn parsed_read_policy(args: &[&str]) -> ReadAuthPolicy {
+    let cli = Cli::try_parse_from(args).unwrap();
+    read_auth_policy(&cli.command, cli.authenticated, cli.public)
+}
+
+#[test]
+fn direct_reads_use_auth_by_default_and_support_explicit_public() {
+    for args in [
+        vec!["bug", "show", "--bug-id", "59"],
+        vec!["bug", "comments", "--bug-id", "59"],
+        vec!["bug", "tasks", "--bug-id", "59"],
+        vec!["bug", "attachments", "--bug-id", "59"],
+        vec!["bug", "watches", "--bug-id", "59"],
+        vec!["person", "show", "--name", "ubuntu"],
+        vec!["package", "ppa", "--owner", "ubuntu", "--ppa", "test"],
+        vec!["project", "show", "--name", "ubuntu"],
+        vec!["cve", "show", "--sequence", "2026-1234"],
+        vec!["git", "show", "--path", "~ubuntu/test/+git/test"],
+        vec!["git", "default", "--target", "ubuntu"],
+        vec!["spec", "show", "--target", "ubuntu", "--name", "test"],
+        vec!["question", "show", "--question-id", "59"],
+        vec!["snap", "show", "--owner", "ubuntu", "--name", "test"],
+    ] {
+        let mut full = vec!["lpcli"];
+        full.extend(args);
+        assert_eq!(
+            parsed_read_policy(&full),
+            ReadAuthPolicy::Authenticated,
+            "{full:?}"
+        );
+        let mut public = full.clone();
+        public.push("--public");
+        assert_eq!(parsed_read_policy(&public), ReadAuthPolicy::Anonymous);
+        full.push("--authenticated");
+        assert_eq!(
+            parsed_read_policy(&full),
+            ReadAuthPolicy::Authenticated,
+            "{full:?}"
+        );
+    }
+}
+
+#[test]
+fn private_inclusive_collections_and_identity_require_auth() {
+    for args in [
+        vec!["bug", "search", "--target", "ubuntu"],
+        vec!["bug", "subscriptions", "--bug-id", "59"],
+        vec!["person", "bugs", "--name", "ubuntu"],
+        vec!["person", "ppas", "--name", "ubuntu"],
+        vec!["person", "members", "--team", "ubuntu"],
+        vec!["person", "search", "--query", "ubuntu"],
+        vec!["person", "owned-teams", "--name", "ubuntu"],
+        vec![
+            "package",
+            "ppa-sources",
+            "--owner",
+            "ubuntu",
+            "--ppa",
+            "test",
+        ],
+        vec!["project", "search", "--query", "test"],
+        vec!["project", "list-series", "--project", "test"],
+        vec!["git", "list-person-repos", "--name", "ubuntu"],
+        vec!["git", "refs", "--path", "~ubuntu/test/+git/test"],
+        vec!["git", "proposals", "--path", "~ubuntu/test/+git/test"],
+        vec![
+            "git",
+            "comments",
+            "--path",
+            "~ubuntu/test/+git/test",
+            "--id",
+            "59",
+        ],
+        vec!["snap", "find", "--owner", "ubuntu"],
+        vec!["snap", "builds", "--owner", "ubuntu", "--name", "test"],
+        vec!["spec", "list", "--target", "test"],
+        vec!["question", "search", "--target", "ubuntu"],
+        vec!["webhook", "list", "--target", "ubuntu"],
+        vec!["status"],
+        vec!["hardware-token", "keys"],
+        vec!["access-token", "list", "--project", "test"],
+    ] {
+        let mut full = vec!["lpcli"];
+        full.extend(args);
+        assert_eq!(
+            parsed_read_policy(&full),
+            ReadAuthPolicy::Authenticated,
+            "{full:?}"
+        );
+    }
+}
+
+#[test]
+fn mutations_never_use_anonymous_fallback() {
+    for args in [
+        vec!["bug", "add-comment", "--bug-id", "59", "--message", "test"],
+        vec![
+            "bug",
+            "delete-comment",
+            "--bug-id",
+            "59",
+            "--comment-index",
+            "1",
+        ],
+        vec!["bug", "subscribe", "--bug-id", "59", "--name", "ubuntu"],
+        vec!["bug", "tag", "--bug-id", "59", "--add-tag", "test"],
+        vec!["queue", "accept", "--name", "test", "--arch", "source"],
+        vec!["queue", "reject", "--name", "test", "--arch", "source"],
+        vec![
+            "snap",
+            "request-builds",
+            "--owner",
+            "ubuntu",
+            "--name",
+            "test",
+        ],
+        vec![
+            "webhook",
+            "ping",
+            "--webhook-url",
+            "https://api.launchpad.net/devel/test",
+        ],
+    ] {
+        let mut full = vec!["lpcli"];
+        full.extend(args);
+        assert_eq!(
+            parsed_read_policy(&full),
+            ReadAuthPolicy::Authenticated,
+            "{full:?}"
+        );
+    }
+}
+
+#[test]
+fn public_distribution_reads_do_not_require_auth() {
+    for args in [
+        vec!["queue", "search", "--status", "New"],
+        vec![
+            "queue", "info", "--name", "test", "--arch", "source", "--status", "New",
+        ],
+        vec![
+            "queue", "download", "--name", "test", "--arch", "source", "--status", "New",
+        ],
+        vec!["package", "list-series"],
+        vec!["package", "search", "--series", "resolute"],
+        vec!["bug", "remote-bug-trackers"],
+    ] {
+        let mut full = vec!["lpcli"];
+        full.extend(args);
+        assert_eq!(
+            parsed_read_policy(&full),
+            ReadAuthPolicy::Anonymous,
+            "{full:?}"
+        );
+        full.insert(1, "--authenticated");
+        assert_eq!(parsed_read_policy(&full), ReadAuthPolicy::Authenticated);
+    }
+}
+
+fn mock_read_client(server: &mockito::Server, signed: bool) -> LaunchpadClient {
+    LaunchpadClient::new(signed.then(|| auth::Credentials::new("lpcli", "test-token", "secret")))
+        .with_base_url(server.url())
+}
+
+#[test]
+fn public_mode_conflicts_with_auth_and_rejects_mutations_and_identity() {
+    assert!(
+        Cli::try_parse_from([
+            "lpcli",
+            "--public",
+            "--authenticated",
+            "bug",
+            "show",
+            "--bug-id",
+            "59"
+        ])
+        .is_err()
+    );
+    for args in [
+        vec!["status"],
+        vec!["hardware-token", "keys"],
+        vec!["hardware-token", "clear-cache"],
+        vec!["bug", "add-comment", "--bug-id", "59", "--message", "test"],
+        vec!["queue", "accept", "--name", "test", "--arch", "source"],
+    ] {
+        let mut full = vec!["lpcli", "--public"];
+        full.extend(args);
+        let cli = Cli::try_parse_from(full).unwrap();
+        assert!(validate_cli(&cli).is_err());
+        assert_eq!(
+            read_auth_policy(&cli.command, false, true),
+            ReadAuthPolicy::Authenticated
+        );
+    }
+    let cli = Cli::try_parse_from(["lpcli", "--public", "bug", "search"]).unwrap();
+    assert!(validate_cli(&cli).is_ok());
+    assert_eq!(
+        parsed_read_policy(&[
+            "lpcli",
+            "queue",
+            "search",
+            "--status",
+            "New",
+            "--archive",
+            "~owner/+archive/private"
+        ]),
+        ReadAuthPolicy::Authenticated
+    );
+    assert_eq!(
+        parsed_read_policy(&[
+            "lpcli",
+            "queue",
+            "search",
+            "--status",
+            "New",
+            "--archive",
+            "primary"
+        ]),
+        ReadAuthPolicy::Anonymous
+    );
+    for args in [
+        vec![
+            "lpcli", "queue", "search", "--distro", "Ubuntu", "--status", "New",
+        ],
+        vec![
+            "lpcli",
+            "queue",
+            "search",
+            "--status",
+            "New",
+            "--archive",
+            "/ubuntu/+archive/primary/",
+        ],
+        vec![
+            "lpcli",
+            "queue",
+            "search",
+            "--status",
+            "New",
+            "--archive",
+            "https://api.launchpad.net/devel/ubuntu/+archive/primary/",
+        ],
+        vec![
+            "lpcli", "queue", "info", "--distro", "Ubuntu", "--name", "test", "--arch", "source",
+            "--status", "New",
+        ],
+    ] {
+        assert_eq!(
+            parsed_read_policy(&args),
+            ReadAuthPolicy::Anonymous,
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn private_direct_reads_never_downgrade_missing_or_failed_credentials() {
+    use lpcli::error::LpError;
+    for authenticated in [false, true] {
+        let mut args = vec!["lpcli", "bug", "show", "--bug-id", "59"];
+        if authenticated {
+            args.push("--authenticated");
+        }
+        let policy = parsed_read_policy(&args);
+        assert!(matches!(
+            read_client_with_auth(policy, || Err(LpError::NotAuthenticated)),
+            Err(LpError::NotAuthenticated)
+        ));
+        for error in [
+            LpError::HardwareKeyCancelled,
+            LpError::Config("bad grant".into()),
+            LpError::Keyring("unavailable".into()),
+            LpError::HardwareTokenGrantRejected,
+        ] {
+            let expected = error.to_string();
+            let result = read_client_with_auth(policy, || Err(error));
+            assert_eq!(result.err().unwrap().to_string(), expected);
+        }
+    }
+    assert!(
+        read_client_with_auth(ReadAuthPolicy::Anonymous, || panic!(
+            "--public must not load credentials"
+        ))
+        .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn private_capable_metadata_is_signed_from_the_first_request() {
+    for authenticated in [false, true] {
+        let mut args = vec!["lpcli", "bug", "comments", "--bug-id", "59"];
+        if authenticated {
+            args.push("--authenticated");
+        }
+        let policy = parsed_read_policy(&args);
+        let mut server = mockito::Server::new_async().await;
+        let signed = server
+            .mock("GET", "/bugs/59/messages")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("oauth_token=\"test-token\"".into()),
+            )
+            .with_body(r#"{"entries":[{"content":"private"}]}"#)
+            .create_async()
+            .await;
+        let attachments = server
+            .mock("GET", "/bugs/59/attachments")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("oauth_token=\"test-token\"".into()),
+            )
+            .with_body(r#"{"entries":[]}"#)
+            .create_async()
+            .await;
+        let loads = std::cell::Cell::new(0);
+        let client = read_client_with_auth(policy, || {
+            loads.set(loads.get() + 1);
+            Ok(mock_read_client(&server, true))
+        })
+        .unwrap();
+        let read = fetch_bug_comments(&client, 59).await.unwrap();
+        assert_eq!(loads.get(), 1);
+        assert_eq!(read.comments[0].content.as_deref(), Some("private"));
+        signed.assert_async().await;
+        attachments.assert_async().await;
+    }
+}
+
+#[tokio::test]
+async fn public_comments_do_not_load_auth_or_retry_on_denial() {
+    for status in [200, 401, 403, 404, 500] {
+        let mut server = mockito::Server::new_async().await;
+        let comments = server
+            .mock("GET", "/bugs/59/messages")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_status(status)
+            .with_body(r#"{"entries":[{"content":"public"}]}"#)
+            .create_async()
+            .await;
+        let mut attachments_builder = server
+            .mock("GET", "/bugs/59/attachments")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_body(r#"{"entries":[]}"#);
+        if status != 200 {
+            // `fetch_bug_comments` uses `tokio::try_join!`, which cancels the
+            // concurrent attachments request if `get_bug_comments` errors first.
+            attachments_builder = attachments_builder.expect_at_most(1);
+        }
+        let attachments = attachments_builder.create_async().await;
+        let client = read_client_with_auth(ReadAuthPolicy::Anonymous, || panic!("must not prompt"))
+            .unwrap()
+            .with_base_url(server.url());
+        let result = fetch_bug_comments(&client, 59).await;
+        assert_eq!(result.is_ok(), status == 200);
+        comments.assert_async().await;
+        attachments.assert_async().await;
+    }
+}
+
+#[tokio::test]
+async fn failed_page_exposes_no_partial_data_and_is_not_replayed() {
+    let mut server = mockito::Server::new_async().await;
+    let first = server.mock("GET", "/bugs/59/messages")
+        .with_body(serde_json::json!({"entries":[{"content":"must not render"}], "next_collection_link":format!("{}/next",server.url())}).to_string()).create_async().await;
+    let next = server
+        .mock("GET", "/next")
+        .with_status(401)
+        .create_async()
+        .await;
+    let attachments = server
+        .mock("GET", "/bugs/59/attachments")
+        .with_body(r#"{"entries":[]}"#)
+        .expect_at_most(1)
+        .create_async()
+        .await;
+    let client = mock_read_client(&server, true);
+    let result = fetch_bug_comments(&client, 59).await;
+    assert!(matches!(
+        result,
+        Err(lpcli::error::LpError::Api { status: 401, .. })
+    ));
+    first.assert_async().await;
+    next.assert_async().await;
+    attachments.assert_async().await;
+}
+
+#[tokio::test]
+async fn optional_url_enrichment_is_tolerant_and_off_origin_unsigned() {
+    let mut api = mockito::Server::new_async().await;
+    let mut files = mockito::Server::new_async().await;
+    let signed = mock_read_client(&api, true);
+    let local = api
+        .mock("GET", "/attachment")
+        .match_header(
+            "authorization",
+            mockito::Matcher::Regex("oauth_token=\"test-token\"".into()),
+        )
+        .with_status(302)
+        .with_header("location", &format!("{}/file", files.url()))
+        .create_async()
+        .await;
+    let external = files
+        .mock("GET", "/denied")
+        .match_header("authorization", mockito::Matcher::Missing)
+        .with_status(403)
+        .create_async()
+        .await;
+    let attachments: Vec<bugs::BugAttachment> = serde_json::from_value(serde_json::json!([
+        {"data_link":format!("{}/attachment",api.url())},
+        {"data_link":format!("{}/denied",files.url())},
+        {"data_link":"not a URL"}, {}
+    ]))
+    .unwrap();
+    let urls = resolve_all_attachment_urls(&signed, &attachments).await;
+    assert_eq!(
+        urls,
+        vec![
+            format!("{}/file", files.url()),
+            "—".into(),
+            "—".into(),
+            "—".into()
+        ]
+    );
+    local.assert_async().await;
+    external.assert_async().await;
+}
+
+#[tokio::test]
+async fn metadata_auth_is_not_sent_to_transfers_or_redirected_hosts() {
+    let mut api = mockito::Server::new_async().await;
+    let mut files = mockito::Server::new_async().await;
+    let metadata = api
+        .mock("GET", "/metadata")
+        .match_header(
+            "authorization",
+            mockito::Matcher::Regex("oauth_token=\"test-token\"".into()),
+        )
+        .with_body(
+            serde_json::json!([
+                format!("{}/source.dsc", api.url()),
+                format!("{}/direct.tar", files.url())
+            ])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let redirect = api
+        .mock("GET", "/source.dsc")
+        .match_header("authorization", mockito::Matcher::Missing)
+        .with_status(302)
+        .with_header("location", &format!("{}/source.dsc", files.url()))
+        .create_async()
+        .await;
+    let transfer = files
+        .mock("GET", "/source.dsc")
+        .match_header("authorization", mockito::Matcher::Missing)
+        .with_body("source")
+        .create_async()
+        .await;
+    let direct = files
+        .mock("GET", "/direct.tar")
+        .match_header("authorization", mockito::Matcher::Missing)
+        .with_body("archive")
+        .create_async()
+        .await;
+    let client = mock_read_client(&api, true);
+    let urls: Vec<String> = client.get("/metadata").await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let outcomes = download_public_files(&urls, dir.path()).await.unwrap();
+    assert!(
+        outcomes
+            .iter()
+            .all(|o| matches!(o, download::DownloadOutcome::Success(_)))
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("source.dsc")).unwrap(),
+        "source"
+    );
+    metadata.assert_async().await;
+    redirect.assert_async().await;
+    transfer.assert_async().await;
+    direct.assert_async().await;
+}
+
+#[tokio::test]
+async fn queue_info_restricts_archive_only_for_anonymous_reads() {
+    for primary_archive_only in [true, false] {
+        let mut server = mockito::Server::new_async().await;
+        let query_matcher = if primary_archive_only {
+            mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getPackageUploads".into()),
+                mockito::Matcher::UrlEncoded(
+                    "archive".into(),
+                    format!("{}/ubuntu/+archive/primary", server.url()),
+                ),
+            ])
+        } else {
+            mockito::Matcher::Exact(
+                "ws.op=getPackageUploads&status=New&name=curl&exact_match=true&ws.size=30".into(),
+            )
+        };
+        let uploads = server
+            .mock("GET", "/ubuntu/noble")
+            .match_query(query_matcher)
+            .with_body(r#"{"entries":[]}"#)
+            .create_async()
+            .await;
+        let client = mock_read_client(&server, !primary_archive_only);
+        let err = handle_queue_info(
+            &Display::from_width(100),
+            &client,
+            "curl".into(),
+            None,
+            "New".into(),
+            QueueArch::Source,
+            "ubuntu".into(),
+            Some("noble".into()),
+            primary_archive_only,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, lpcli::error::LpError::NotFound(_)));
+        uploads.assert_async().await;
+    }
+}
+
 #[test]
 fn cli_hardware_registration_can_use_classic_credentials() {
     for classic in [false, true] {
@@ -926,32 +1926,47 @@ fn collect_empty_tasks_list_returns_error() {
 }
 
 // -----------------------------------------------------------------------
-// truncate / build_table (pre-existing)
+// build_table (pre-existing)
 // -----------------------------------------------------------------------
 
 #[test]
-fn truncate_short_string_unchanged() {
-    assert_eq!(truncate("hello", 10), "hello");
-}
-
-#[test]
-fn truncate_long_string_adds_ellipsis() {
-    let s = truncate("abcdefghij", 5);
-    assert!(s.ends_with('…'));
-    assert!(s.chars().count() <= 5);
-}
-
-#[test]
-fn truncate_exact_length_unchanged() {
-    assert_eq!(truncate("hello", 5), "hello");
-}
-
-#[test]
 fn build_table_smoke() {
-    let table = build_table(vec!["Col A", "Col B"]);
+    let display = Display::from_width(100);
+    let table = build_table(&display, vec!["Col A", "Col B"]);
     let rendered = table.to_string();
     assert!(rendered.contains("Col A"));
     assert!(rendered.contains("Col B"));
+}
+
+#[test]
+fn cli_rejects_removed_width_option() {
+    for args in [
+        vec!["lpcli", "--width", "150", "status"],
+        vec!["lpcli", "status", "--width", "150"],
+        vec!["lpcli", "bug", "search", "--width", "150"],
+        vec!["lpcli", "--width=150", "status"],
+    ] {
+        let err = Cli::try_parse_from(&args).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}"
+        );
+        assert!(err.to_string().contains("--width"), "{args:?}: {err}");
+    }
+}
+
+#[test]
+fn cli_help_does_not_list_width_option() {
+    for args in [
+        vec!["lpcli", "--help"],
+        vec!["lpcli", "status", "--help"],
+        vec!["lpcli", "bug", "search", "--help"],
+    ] {
+        let help = Cli::try_parse_from(&args).unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp, "{args:?}");
+        assert!(!help.to_string().contains("--width"), "{args:?}: {help}");
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -2423,4 +3438,205 @@ fn find_task_to_link_without_selector_auto_links_single_task() {
         }
         other => panic!("Expected the ambiguous-selection error, got {other:?}"),
     }
+}
+
+// -----------------------------------------------------------------------
+// bug set-description
+// -----------------------------------------------------------------------
+
+/// `bug set-description --description` parses the bug id and description text.
+#[test]
+fn cli_bug_set_description_accepts_description_text() {
+    let cli = Cli::try_parse_from([
+        "lpcli",
+        "bug",
+        "set-description",
+        "--bug-id",
+        "2174396",
+        "--description",
+        "Crash when unlocking the session.",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Bug(BugCommand::SetDescription {
+            bug_id,
+            description,
+            description_file,
+        }) => {
+            assert_eq!(bug_id, 2174396);
+            assert_eq!(
+                description.as_deref(),
+                Some("Crash when unlocking the session.")
+            );
+            assert!(description_file.is_none());
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+/// `bug set-description --description-file` parses the file path.
+#[test]
+fn cli_bug_set_description_accepts_description_file() {
+    let cli = Cli::try_parse_from([
+        "lpcli",
+        "bug",
+        "set-description",
+        "-b",
+        "42",
+        "--description-file",
+        "/tmp/description.txt",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Bug(BugCommand::SetDescription {
+            bug_id,
+            description,
+            description_file,
+        }) => {
+            assert_eq!(bug_id, 42);
+            assert!(description.is_none());
+            assert_eq!(description_file.as_deref(), Some("/tmp/description.txt"));
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+/// `-` is accepted as the `--description-file` value (meaning stdin).
+#[test]
+fn cli_bug_set_description_accepts_stdin_marker() {
+    let cli = Cli::try_parse_from([
+        "lpcli",
+        "bug",
+        "set-description",
+        "-b",
+        "42",
+        "--description-file",
+        "-",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Bug(BugCommand::SetDescription {
+            description_file, ..
+        }) => {
+            assert_eq!(description_file.as_deref(), Some("-"));
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+/// Omitting both `--description` and `--description-file` is an error.
+#[test]
+fn cli_bug_set_description_requires_description_or_file() {
+    let err =
+        Cli::try_parse_from(["lpcli", "bug", "set-description", "--bug-id", "42"]).unwrap_err();
+    assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+}
+
+/// Passing both `--description` and `--description-file` is an error.
+#[test]
+fn cli_bug_set_description_rejects_description_and_file_together() {
+    let err = Cli::try_parse_from([
+        "lpcli",
+        "bug",
+        "set-description",
+        "--bug-id",
+        "42",
+        "--description",
+        "text",
+        "--description-file",
+        "/tmp/description.txt",
+    ])
+    .unwrap_err();
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
+/// `read_description_file` reads the file contents verbatim, including
+/// newlines and unicode text.
+#[test]
+fn read_description_file_reads_file_contents() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("description.txt");
+    std::fs::write(&path, "line one\nline two ✓\n").unwrap();
+
+    let text =
+        read_description_file(path.to_str().unwrap()).expect("reading the file should succeed");
+    assert_eq!(text, "line one\nline two ✓\n");
+}
+
+/// `read_description_file` reports a helpful error naming the path for a
+/// missing file (mirroring the attachment-reader error pattern).
+#[test]
+fn read_description_file_missing_file_is_an_error() {
+    let err = read_description_file("/nonexistent/description.txt").unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Failed to read description file '/nonexistent/description.txt'"),
+        "msg: {msg}"
+    );
+}
+
+/// `resolve_new_description` returns the text given via `--description`.
+#[test]
+fn resolve_new_description_accepts_text() {
+    let text = resolve_new_description(Some("Updated description.".into()), None)
+        .expect("text should be accepted");
+    assert_eq!(text, "Updated description.");
+}
+
+/// `resolve_new_description` reads the file given via `--description-file`.
+#[test]
+fn resolve_new_description_reads_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("description.txt");
+    std::fs::write(&path, "description from a file").unwrap();
+
+    let text = resolve_new_description(None, Some(path.to_str().unwrap()))
+        .expect("file input should be accepted");
+    assert_eq!(text, "description from a file");
+}
+
+/// `resolve_new_description` rejects an empty `--description` value.
+#[test]
+fn resolve_new_description_rejects_empty_text() {
+    let err = resolve_new_description(Some(String::new()), None).unwrap_err();
+    assert!(err.to_string().contains("must not be empty"), "msg: {err}");
+}
+
+/// `resolve_new_description` rejects a whitespace-only `--description` value.
+#[test]
+fn resolve_new_description_rejects_whitespace_only_text() {
+    let err = resolve_new_description(Some("  \n\t".into()), None).unwrap_err();
+    assert!(err.to_string().contains("must not be empty"), "msg: {err}");
+}
+
+/// `resolve_new_description` rejects an empty description file, so an empty
+/// pipe or file cannot silently wipe the current description.
+#[test]
+fn resolve_new_description_rejects_empty_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty.txt");
+    std::fs::write(&path, "").unwrap();
+
+    let err = resolve_new_description(None, Some(path.to_str().unwrap())).unwrap_err();
+    assert!(err.to_string().contains("must not be empty"), "msg: {err}");
+}
+
+/// `read_description_from_reader` reads stdin-style input verbatim.
+#[test]
+fn read_description_from_reader_reads_input() {
+    use std::io::Cursor;
+
+    let text = read_description_from_reader(Cursor::new(b"piped description\n".to_vec()))
+        .expect("reading should succeed");
+    assert_eq!(text, "piped description\n");
+}
+
+/// `read_description_from_reader` surfaces non-UTF-8 input as an I/O error.
+#[test]
+fn read_description_from_reader_rejects_non_utf8() {
+    use std::io::Cursor;
+
+    let err = read_description_from_reader(Cursor::new(vec![0xff, 0xfe, 0x41]))
+        .expect_err("non-UTF-8 input should be an error");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }

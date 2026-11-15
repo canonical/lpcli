@@ -30,8 +30,10 @@ pub enum LpError {
 
     /// The Launchpad API rate-limited this request (HTTP 429 Too Many Requests).
     ///
-    /// `retry_after_secs` is populated from the `Retry-After` response header
-    /// when present.
+    /// `retry_after_secs` is populated from a valid `Retry-After` response
+    /// header, either delay-seconds or an HTTP-date. Dates become seconds
+    /// remaining until that date, rounded up; expired dates become zero.
+    /// Missing, invalid or unrepresentable values produce `None`.
     #[error("Rate limited by Launchpad. Retry after {retry_after_secs:?} seconds.")]
     RateLimit { retry_after_secs: Option<u64> },
 
