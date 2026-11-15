@@ -1909,3 +1909,14 @@ fn find_task_to_link_not_found_fails() {
     let res = find_task_to_link(&tasks, 42, &selector);
     assert!(res.is_err());
 }
+
+// -----------------------------------------------------------------------
+// skills command (embedded agent skill documentation)
+// -----------------------------------------------------------------------
+
+#[test]
+fn embedded_skill_doc_matches_repository_file() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("SKILL.md");
+    let expected = std::fs::read(path).expect("read SKILL.md");
+    assert_eq!(SKILL_DOC.as_bytes(), expected.as_slice());
+}

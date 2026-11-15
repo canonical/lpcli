@@ -324,3 +324,7 @@ lpcli person ppas --name jdoe
 5. **Source package names in Launchpad** may differ from upstream project names
    (e.g. `rustc-1.97` not `rust`). Use the exact source package name the user
    provides.
+6. **Self-contained documentation** — `lpcli skills` (alias `lpcli skill`)
+   prints this entire document straight from the binary, byte for byte, with
+   no authentication or network access; redirect it into a skill directory if
+   your agent tooling expects one.
