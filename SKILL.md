@@ -83,10 +83,10 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 | Set status on series-less tasks | `lpcli bug set-status --bug-id 123456 --target curl --no-series --status fix-released` |
 | Set importance | `lpcli bug set-importance --bug-id 123456 --target curl --series noble --importance high` |
 | Set importance on all targets | `lpcli bug set-importance --bug-id 123456 --all-targets --all-series --importance critical` |
-| Assign a bug task | `lpcli bug set-assignee --bug-id 123456 --target curl --series noble --name jdoe` |
-| Assign on all targets | `lpcli bug set-assignee --bug-id 123456 --all-targets --all-series --name jdoe` |
-| Subscribe a person | `lpcli bug subscribe --bug-id 123456 --name jdoe` |
-| Unsubscribe a person | `lpcli bug unsubscribe --bug-id 123456 --name jdoe` |
+| Assign a bug task | `lpcli bug set-assignee --bug-id 123456 --target curl --series noble --name your-username` |
+| Assign on all targets | `lpcli bug set-assignee --bug-id 123456 --all-targets --all-series --name your-username` |
+| Subscribe a person | `lpcli bug subscribe --bug-id 123456 --name your-username` |
+| Unsubscribe a person | `lpcli bug unsubscribe --bug-id 123456 --name your-username` |
 | List subscribers | `lpcli bug subscriptions --bug-id 123456` |
 | Add a bug task | `lpcli bug add-task --bug-id 123456 --target ubuntu --package curl --series noble --status new --importance undecided` |
 | Add a bug task with remote bug link | `lpcli bug add-task --bug-id 123456 --target debian --package curl --bug-tracker debbugs --remote-bug 654321` |
@@ -105,12 +105,12 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 
 | Action | Command |
 |--------|---------|
-| Show a person or team | `lpcli person show --name jdoe` |
+| Show a person or team | `lpcli person show --name your-username` |
 | Search people | `lpcli person search --query "John Doe"` |
 | List team members | `lpcli person members --team ubuntu-security` |
-| List bugs for a person | `lpcli person bugs --name jdoe` |
-| List PPAs | `lpcli person ppas --name jdoe` |
-| List owned teams | `lpcli person owned-teams --name jdoe` |
+| List bugs for a person | `lpcli person bugs --name your-username` |
+| List PPAs | `lpcli person ppas --name your-username` |
+| List owned teams | `lpcli person owned-teams --name your-username` |
 
 ### Packages
 
@@ -121,8 +121,8 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 | Search published sources | `lpcli package search --series noble --name curl` |
 | Search by pocket | `lpcli package search --series noble --pocket Security` |
 | Show distribution info | `lpcli package distro` |
-| Show a PPA | `lpcli package ppa --owner jdoe --ppa my-ppa` |
-| List PPA sources | `lpcli package ppa-sources --owner jdoe --ppa my-ppa --name curl` |
+| Show a PPA | `lpcli package ppa --owner your-username --ppa my-ppa` |
+| List PPA sources | `lpcli package ppa-sources --owner your-username --ppa my-ppa --name curl` |
 | Download source files | `lpcli package download --name curl --series noble` |
 | Download specific version | `lpcli package download --name curl --series noble --version 8.5.0-2ubuntu10` |
 
@@ -152,14 +152,14 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 
 | Action | Command |
 |--------|---------|
-| Show a repo | `lpcli git show --path "~jdoe/launchpad/+git/myrepo"` |
+| Show a repo | `lpcli git show --path "~your-username/launchpad/+git/myrepo"` |
 | Show default repo | `lpcli git default --target launchpad` |
-| List person repos | `lpcli git list-person-repos --name jdoe` |
-| List refs (branches/tags) | `lpcli git refs --path "~jdoe/launchpad/+git/myrepo"` |
-| List merge proposals | `lpcli git proposals --path "~jdoe/launchpad/+git/myrepo"` |
-| Filter merge proposals | `lpcli git proposals --path "~jdoe/launchpad/+git/myrepo" --status "Needs review"` |
-| List MP comments | `lpcli git comments --path "~jdoe/launchpad/+git/myrepo" --id 12345` |
-| List MP diffs | `lpcli git diffs --path "~jdoe/launchpad/+git/myrepo" --id 12345` |
+| List person repos | `lpcli git list-person-repos --name your-username` |
+| List refs (branches/tags) | `lpcli git refs --path "~your-username/launchpad/+git/myrepo"` |
+| List merge proposals | `lpcli git proposals --path "~your-username/launchpad/+git/myrepo"` |
+| Filter merge proposals | `lpcli git proposals --path "~your-username/launchpad/+git/myrepo" --status "Needs review"` |
+| List MP comments | `lpcli git comments --path "~your-username/launchpad/+git/myrepo" --id 12345` |
+| List MP diffs | `lpcli git diffs --path "~your-username/launchpad/+git/myrepo" --id 12345` |
 
 ### Specifications (Blueprints)
 
@@ -199,10 +199,10 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 
 | Action | Command |
 |--------|---------|
-| Show a snap recipe | `lpcli snap show --owner jdoe --name my-snap` |
-| Find snap recipes | `lpcli snap find --owner jdoe` |
-| List builds | `lpcli snap builds --owner jdoe --name my-snap` |
-| Request builds | `lpcli snap request-builds --owner jdoe --name my-snap` |
+| Show a snap recipe | `lpcli snap show --owner your-username --name my-snap` |
+| Find snap recipes | `lpcli snap find --owner your-username` |
+| List builds | `lpcli snap builds --owner your-username --name my-snap` |
+| Request builds | `lpcli snap request-builds --owner your-username --name my-snap` |
 
 ### Package Upload Queues
 
@@ -212,19 +212,24 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 | Search by name | `lpcli queue search --status "New" --name curl` |
 | Search with pocket/series | `lpcli queue search --status "Unapproved" --series noble --pocket Security` |
 | Exact match search | `lpcli queue search --status "New" --name curl --version 8.5.0-2ubuntu10 --exact-match` |
+| Search a PPA queue | `lpcli queue search --status done --ppa your-username/my-ppa --series tenacious` |
 | Download queue files | `lpcli queue download --name curl --status "New" --arch source` |
+| Download PPA queue files | `lpcli queue download --name mutter --status done --arch source --ppa your-username/my-ppa --series tenacious` |
 | Show binary details | `lpcli queue info --name curl --status "New" --arch amd64` |
+| Show PPA queue details | `lpcli queue info --name mutter --status done --arch source --ppa your-username/my-ppa --series tenacious` |
 | Accept a package | `lpcli queue accept --name curl --status "New" --arch source` |
+| Accept from a PPA | `lpcli queue accept --name mutter --status unapproved --arch source --ppa your-username/my-ppa --series tenacious` |
 | Reject a package | `lpcli queue reject --name curl --status "New" --arch source --comment "Reason"` |
+| Reject from a PPA | `lpcli queue reject --name mutter --status unapproved --arch source --ppa your-username/my-ppa --series tenacious --comment "Reason"` |
 
 ### Access Tokens
 
 | Action | Command |
 |--------|---------|
 | Issue token for project | `lpcli access-token issue --project launchpad --description "CI" --scopes "repository:push"` |
-| Issue token for Git repo | `lpcli access-token issue-git --repo "~jdoe/launchpad/+git/myrepo" --description "Deploy" --scopes "repository:push"` |
+| Issue token for Git repo | `lpcli access-token issue-git --repo "~your-username/launchpad/+git/myrepo" --description "Deploy" --scopes "repository:push"` |
 | List project tokens | `lpcli access-token list --project launchpad` |
-| List Git repo tokens | `lpcli access-token list-git --repo "~jdoe/launchpad/+git/myrepo"` |
+| List Git repo tokens | `lpcli access-token list-git --repo "~your-username/launchpad/+git/myrepo"` |
 | Revoke a token | `lpcli access-token revoke --token-url "<URL>"` |
 
 ---
@@ -283,7 +288,7 @@ lpcli cve bug-cves --bug-id 123456
 ### Review merge proposals
 
 ```bash
-lpcli git proposals --path "~jdoe/launchpad/+git/myrepo" --status "Needs review"
+lpcli git proposals --path "~your-username/launchpad/+git/myrepo" --status "Needs review"
 ```
 
 ### Review the upload queue
@@ -293,6 +298,20 @@ lpcli queue search --status "New" --name curl
 lpcli queue info --name curl --status "New" --arch source
 lpcli queue download --name curl --status "New" --arch source
 lpcli queue accept --name curl --status "New" --arch source
+```
+
+### Review a PPA upload queue
+
+Use `--ppa OWNER/NAME` (or `--archive ppa:OWNER/NAME`) to target a PPA. PPA
+uploads are normally auto-accepted, so search with `--status done`. The search
+header names the queried archive, for example `(~your-username/my-ppa)`.
+
+```bash
+lpcli queue search --status done --ppa your-username/my-ppa --series tenacious
+lpcli queue info --name mutter --status done --arch source --ppa your-username/my-ppa --series tenacious
+lpcli queue download --name mutter --status done --arch source --ppa your-username/my-ppa --series tenacious
+lpcli queue accept --name mutter --status unapproved --arch source --ppa your-username/my-ppa --series tenacious
+lpcli queue reject --name mutter --status unapproved --arch source --ppa your-username/my-ppa --series tenacious --comment "Reason"
 ```
 
 ### Download source packages
@@ -305,9 +324,9 @@ lpcli package download --name curl --series noble --version 8.5.0-2ubuntu10 --ou
 ### Check a person's activity
 
 ```bash
-lpcli person show --name jdoe
-lpcli person bugs --name jdoe
-lpcli person ppas --name jdoe
+lpcli person show --name your-username
+lpcli person bugs --name your-username
+lpcli person ppas --name your-username
 ```
 
 ---
