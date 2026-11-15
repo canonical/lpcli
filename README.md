@@ -226,10 +226,10 @@ lpcli logout --hardware-token        # delete the stored grant only
 
 # Import a grant issued elsewhere (the secret is prompted for, or read from
 # LPCLI_HARDWARE_GRANT_SECRET):
-lpcli login --hardware-token --account your-username --grant-token "issued-oauth-token"
+lpcli login --hardware-token --account my-username --grant-token "issued-oauth-token"
 ```
 
-In the import example, `your-username` is your Launchpad account and
+In the import example, `my-username` is your Launchpad account and
 `issued-oauth-token` is the token from your issued grant.
 
 The grant is stored in the system keyring, falling back to
@@ -360,14 +360,14 @@ lpcli bug set-importance --bug-id 123456 --all-targets --all-series --importance
 
 # Assign a bug task to a user
 lpcli bug set-assignee --bug-id 123456 --target curl \
-    --series noble --name your-username
+    --series noble --name my-username
 
 # Assign every current task, including series-less tasks
-lpcli bug set-assignee --bug-id 123456 --all-targets --all-series --name your-username
+lpcli bug set-assignee --bug-id 123456 --all-targets --all-series --name my-username
 
 # Subscribe / unsubscribe a person
-lpcli bug subscribe   --bug-id 123456 --name your-username
-lpcli bug unsubscribe --bug-id 123456 --name your-username
+lpcli bug subscribe   --bug-id 123456 --name my-username
+lpcli bug unsubscribe --bug-id 123456 --name my-username
 
 # List subscribers
 lpcli bug subscriptions --bug-id 123456
@@ -422,7 +422,7 @@ lpcli bug tag --bug-id 123456 --remove-all-tags --add-many-tags "new-tag-1, new-
 
 ```bash
 # Show a Launchpad person or team
-lpcli person show --name your-username
+lpcli person show --name my-username
 
 # Search by name
 lpcli person search --query "John Doe"
@@ -431,13 +431,13 @@ lpcli person search --query "John Doe"
 lpcli person members --team ubuntu-security
 
 # List bug tasks for bugs filed by a person
-lpcli person bugs --name your-username
+lpcli person bugs --name my-username
 
 # List PPAs owned by a person
-lpcli person ppas --name your-username
+lpcli person ppas --name my-username
 
 # List teams owned by a person
-lpcli person owned-teams --name your-username
+lpcli person owned-teams --name my-username
 ```
 
 ---
@@ -459,10 +459,10 @@ lpcli package search --series noble --pocket Security
 lpcli package distro
 
 # Show info about a PPA
-lpcli package ppa --owner your-username --ppa my-ppa
+lpcli package ppa --owner my-username --ppa my-ppa
 
 # List source packages in a PPA
-lpcli package ppa-sources --owner your-username --ppa my-ppa --name curl
+lpcli package ppa-sources --owner my-username --ppa my-ppa --name curl
 
 # Download source files for a published source package
 lpcli package download --name curl --series noble
@@ -522,29 +522,29 @@ lpcli cve bug-cves --bug-id 123456
 
 ```bash
 # Show a Git repository
-lpcli git show --path "~your-username/launchpad/+git/myrepo"
+lpcli git show --path "~my-username/launchpad/+git/myrepo"
 
 # Show the default repository for a project
 lpcli git default --target launchpad
 
 # List repositories owned by a person
-lpcli git list-person-repos --name your-username
+lpcli git list-person-repos --name my-username
 
 # List branches and tags in a repository
-lpcli git refs --path "~your-username/launchpad/+git/myrepo"
+lpcli git refs --path "~my-username/launchpad/+git/myrepo"
 
 # List merge proposals for a repository
-lpcli git proposals --path "~your-username/launchpad/+git/myrepo"
-lpcli git proposals --path "~your-username/launchpad/+git/myrepo" --status "Needs review"
+lpcli git proposals --path "~my-username/launchpad/+git/myrepo"
+lpcli git proposals --path "~my-username/launchpad/+git/myrepo" --status "Needs review"
 
 # List code review comments on a merge proposal
-lpcli git comments --path "~your-username/launchpad/+git/myrepo" --id 12345
+lpcli git comments --path "~my-username/launchpad/+git/myrepo" --id 12345
 
 # Select a preview diff when listing inline review comments
-lpcli git comments --path "~your-username/launchpad/+git/myrepo" --id 12345 --diff 67890
+lpcli git comments --path "~my-username/launchpad/+git/myrepo" --id 12345 --diff 67890
 
 # List code review diffs on a merge proposal
-lpcli git diffs --path "~your-username/launchpad/+git/myrepo" --id 12345
+lpcli git diffs --path "~my-username/launchpad/+git/myrepo" --id 12345
 ```
 
 ---
@@ -588,7 +588,7 @@ The URL below illustrates that format; substitute your own webhook's link.
 ```bash
 # List webhooks for a project or Git repository
 lpcli webhook list --target launchpad
-lpcli webhook list --target "~your-username/launchpad/+git/myrepo"
+lpcli webhook list --target "~my-username/launchpad/+git/myrepo"
 
 # Create a webhook
 lpcli webhook create --target launchpad \
@@ -630,16 +630,16 @@ lpcli translation templates --series noble
 
 ```bash
 # Show a snap recipe
-lpcli snap show --owner your-username --name my-snap
+lpcli snap show --owner my-username --name my-snap
 
 # Find snap recipes owned by a person
-lpcli snap find --owner your-username
+lpcli snap find --owner my-username
 
 # List pending builds for a snap recipe
-lpcli snap builds --owner your-username --name my-snap
+lpcli snap builds --owner my-username --name my-snap
 
 # Request new builds for a snap recipe
-lpcli snap request-builds --owner your-username --name my-snap
+lpcli snap request-builds --owner my-username --name my-snap
 ```
 
 ---
@@ -679,32 +679,34 @@ lpcli queue reject --name curl --version 8.5.0-2ubuntu10 --status "New" \
 ```
 
 PPAs are archives too. Use `--ppa OWNER/NAME` or `--archive ppa:OWNER/NAME`
-with any queue command to target one; the two flags are mutually exclusive.
-Without either flag, queue commands query the distribution's primary archive.
-The queried archive is shown in the search header: the distribution name
-(`ubuntu`) for the primary archive, or `~owner/name` for a PPA, e.g.
-`for tenacious (~your-username/my-ppa)`. Launchpad normally auto-accepts PPA
-uploads, so use `--status done` to find them; accepting or rejecting a PPA
-upload requires queue-admin permissions and a genuinely queued upload.
+with any queue command to target one; the two flags are mutually exclusive and
+PPAs are Ubuntu-only. Without either flag, queue commands query the
+distribution's primary archive. The queried archive is shown in the search
+header: the distribution name (`ubuntu`) for the primary archive, or
+`~owner/name` for a PPA, e.g. `for tenacious (~my-username/my-ppa)`.
+Launchpad normally auto-accepts PPA uploads, so search with `--status done` or
+`--status accepted` (a newly built binary can be accepted while it waits for
+publication). Accepting or rejecting a PPA upload requires queue-admin
+permissions and a genuinely queued upload.
 
 ```bash
-# Search a PPA queue (resolves to ~your-username/+archive/ubuntu/my-ppa)
+# Search a PPA queue (resolves to ~my-username/+archive/ubuntu/my-ppa)
 lpcli queue search --status done --series tenacious --name mutter \
-    --ppa your-username/my-ppa
+    --ppa my-username/my-ppa
 lpcli queue search --status done --series tenacious --name mutter \
-    --archive ppa:your-username/my-ppa
+    --archive ppa:my-username/my-ppa
 
 # Download files from, or inspect, a PPA upload
 lpcli queue download --name mutter --status done --arch source \
-    --ppa your-username/my-ppa --series tenacious --output ~/Downloads
+    --ppa my-username/my-ppa --series tenacious --output ~/Downloads
 lpcli queue info --name mutter --status done --arch source \
-    --ppa your-username/my-ppa --series tenacious
+    --ppa my-username/my-ppa --series tenacious
 
 # Accept or reject a queued PPA upload (requires queue-admin permissions)
 lpcli queue accept --name mutter --version 51.0-1ubuntu4 --status unapproved \
-    --arch source --ppa your-username/my-ppa --series tenacious
+    --arch source --ppa my-username/my-ppa --series tenacious
 lpcli queue reject --name mutter --version 51.0-1ubuntu4 --status unapproved \
-    --arch source --ppa your-username/my-ppa --series tenacious \
+    --arch source --ppa my-username/my-ppa --series tenacious \
     --comment "Needs a bug fix."
 ```
 
@@ -721,14 +723,14 @@ lpcli access-token issue --project launchpad --description "CI token" \
     --scopes "repository:push,repository:build_status"
 
 # Issue a personal access token for a Git repository
-lpcli access-token issue-git --repo "~your-username/launchpad/+git/myrepo" \
+lpcli access-token issue-git --repo "~my-username/launchpad/+git/myrepo" \
     --description "Deploy key" --scopes "repository:push"
 
 # List access tokens for a project
 lpcli access-token list --project launchpad
 
 # List access tokens for a Git repository
-lpcli access-token list-git --repo "~your-username/launchpad/+git/myrepo"
+lpcli access-token list-git --repo "~my-username/launchpad/+git/myrepo"
 
 # Revoke an access token
 lpcli access-token revoke --token-url "https://api.launchpad.net/devel/launchpad/+access-token/1"

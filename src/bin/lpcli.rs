@@ -163,7 +163,7 @@ impl PpaRef {
         format!("/~{}/+archive/ubuntu/{}", self.owner, self.name)
     }
 
-    /// Human-readable form used in output, e.g. `~your-username/my-ppa`.
+    /// Human-readable form used in output, e.g. `~my-username/my-ppa`.
     fn label(&self) -> String {
         format!("~{}/{}", self.owner, self.name)
     }
@@ -172,7 +172,7 @@ impl PpaRef {
 /// Parse a `--ppa OWNER/NAME` argument for clap.
 fn parse_ppa_ref(s: &str) -> Result<PpaRef, String> {
     let value = s.trim();
-    let invalid = || format!("invalid PPA '{s}'; expected OWNER/NAME (e.g. your-username/my-ppa)");
+    let invalid = || format!("invalid PPA '{s}'; expected OWNER/NAME (e.g. my-username/my-ppa)");
     let Some((owner, name)) = value.split_once('/') else {
         return Err(invalid());
     };
@@ -1486,8 +1486,8 @@ enum SnapCommand {
 enum QueueCommand {
     /// Search packages in build/upload queues for a distro series.
     #[command(after_help = "Examples:
-  lpcli queue search --status done --series tenacious --name mutter --ppa your-username/my-ppa
-  lpcli queue search --status done --series tenacious --name mutter --archive ppa:your-username/my-ppa")]
+  lpcli queue search --status done --series tenacious --name mutter --ppa my-username/my-ppa
+  lpcli queue search --status done --series tenacious --name mutter --archive ppa:my-username/my-ppa")]
     Search {
         /// Filter by pocket: Release, Security, Updates, Proposed, or Backports.
         #[arg(short, long, value_parser = parse_pocket)]
@@ -1509,9 +1509,10 @@ enum QueueCommand {
         /// "~owner/+archive/ubuntu/name", or "ppa:owner/name".
         #[arg(short, long, conflicts_with = "ppa")]
         archive: Option<String>,
-        /// PPA to query as OWNER/NAME (e.g. "your-username/my-ppa").
+        /// PPA to query as OWNER/NAME (e.g. "my-username/my-ppa").
         /// Resolves to ~OWNER/+archive/ubuntu/NAME; conflicts with --archive.
-        /// PPA uploads are normally auto-accepted, so use --status done.
+        /// PPA uploads are normally auto-accepted; search for done or accepted.
+        /// The queried archive is shown in the results. PPAs are Ubuntu-only.
         #[arg(long, value_parser = parse_ppa_ref, conflicts_with = "archive")]
         ppa: Option<PpaRef>,
         /// Distribution name (default: "ubuntu").
@@ -1543,8 +1544,9 @@ enum QueueCommand {
         /// Defaults to the distribution's primary archive.
         #[arg(long, conflicts_with = "ppa")]
         archive: Option<String>,
-        /// PPA containing the upload as OWNER/NAME (e.g. "your-username/my-ppa").
-        /// Conflicts with --archive; PPA uploads are normally auto-accepted.
+        /// PPA containing the upload as OWNER/NAME (e.g. "my-username/my-ppa").
+        /// Conflicts with --archive; PPAs are Ubuntu-only. PPA uploads are
+        /// normally auto-accepted; use the status shown by `queue search`.
         #[arg(long, value_parser = parse_ppa_ref, conflicts_with = "archive")]
         ppa: Option<PpaRef>,
         /// Distribution name (default: "ubuntu").
@@ -1576,8 +1578,9 @@ enum QueueCommand {
         /// Defaults to the distribution's primary archive.
         #[arg(long, conflicts_with = "ppa")]
         archive: Option<String>,
-        /// PPA containing the upload as OWNER/NAME (e.g. "your-username/my-ppa").
-        /// Conflicts with --archive; PPA uploads are normally auto-accepted.
+        /// PPA containing the upload as OWNER/NAME (e.g. "my-username/my-ppa").
+        /// Conflicts with --archive; PPAs are Ubuntu-only. PPA uploads are
+        /// normally auto-accepted; use the status shown by `queue search`.
         #[arg(long, value_parser = parse_ppa_ref, conflicts_with = "archive")]
         ppa: Option<PpaRef>,
         /// Distribution name (default: "ubuntu").
@@ -1589,7 +1592,7 @@ enum QueueCommand {
     },
     /// Accept a package in the upload queue (requires queue-admin permissions).
     #[command(after_help = "Examples:
-  lpcli queue accept --name mutter --version 51.0-1ubuntu4 --status unapproved --arch source --series tenacious --ppa your-username/my-ppa")]
+  lpcli queue accept --name mutter --version 51.0-1ubuntu4 --status unapproved --arch source --series tenacious --ppa my-username/my-ppa")]
     Accept {
         /// Source package name (required).
         #[arg(short, long)]
@@ -1607,8 +1610,9 @@ enum QueueCommand {
         /// Defaults to the distribution's primary archive.
         #[arg(long, conflicts_with = "ppa")]
         archive: Option<String>,
-        /// PPA containing the upload as OWNER/NAME (e.g. "your-username/my-ppa").
-        /// Conflicts with --archive; PPA uploads are normally auto-accepted.
+        /// PPA containing the upload as OWNER/NAME (e.g. "my-username/my-ppa").
+        /// Conflicts with --archive; PPAs are Ubuntu-only. PPA uploads are
+        /// normally auto-accepted; use the status shown by `queue search`.
         #[arg(long, value_parser = parse_ppa_ref, conflicts_with = "archive")]
         ppa: Option<PpaRef>,
         /// Distribution name (default: "ubuntu").
@@ -1620,7 +1624,7 @@ enum QueueCommand {
     },
     /// Reject a package in the upload queue (requires queue-admin permissions).
     #[command(after_help = "Examples:
-  lpcli queue reject --name mutter --version 51.0-1ubuntu4 --status unapproved --arch source --series tenacious --ppa your-username/my-ppa --comment \"Needs a bug fix.\"")]
+  lpcli queue reject --name mutter --version 51.0-1ubuntu4 --status unapproved --arch source --series tenacious --ppa my-username/my-ppa --comment \"Needs a bug fix.\"")]
     Reject {
         /// Source package name (required).
         #[arg(short, long)]
@@ -1638,8 +1642,9 @@ enum QueueCommand {
         /// Defaults to the distribution's primary archive.
         #[arg(long, conflicts_with = "ppa")]
         archive: Option<String>,
-        /// PPA containing the upload as OWNER/NAME (e.g. "your-username/my-ppa").
-        /// Conflicts with --archive; PPA uploads are normally auto-accepted.
+        /// PPA containing the upload as OWNER/NAME (e.g. "my-username/my-ppa").
+        /// Conflicts with --archive; PPAs are Ubuntu-only. PPA uploads are
+        /// normally auto-accepted; use the status shown by `queue search`.
         #[arg(long, value_parser = parse_ppa_ref, conflicts_with = "archive")]
         ppa: Option<PpaRef>,
         /// Rejection comment explaining why the package is being rejected.

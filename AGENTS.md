@@ -74,9 +74,9 @@ Launchpad auto-accepts PPA uploads, so PPA queue entries normally appear as
 
 ```bash
 lpcli queue search --status done --series tenacious --name mutter \
-    --ppa your-username/my-ppa
+    --ppa my-username/my-ppa
 lpcli queue info --name mutter --status accepted --arch amd64 \
-    --ppa your-username/my-ppa --series tenacious
+    --ppa my-username/my-ppa --series tenacious
 ```
 
 ## Validation

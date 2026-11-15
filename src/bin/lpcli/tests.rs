@@ -1075,27 +1075,27 @@ async fn queue_info_targets_the_resolved_archive() {
 fn queue_ppa_references_parse_and_resolve() {
     let client = LaunchpadClient::new(None).with_base_url("https://api.example.test/devel");
     let base = "https://api.example.test/devel";
-    let ppa = parse_ppa_ref("your-username/my-ppa").unwrap();
-    assert_eq!(ppa.label(), "~your-username/my-ppa");
+    let ppa = parse_ppa_ref("my-username/my-ppa").unwrap();
+    assert_eq!(ppa.label(), "~my-username/my-ppa");
 
     let archive = resolve_queue_archive(&client, "ubuntu", None, Some(&ppa)).unwrap();
     assert_eq!(
         archive.api_url,
-        format!("{base}/~your-username/+archive/ubuntu/my-ppa")
+        format!("{base}/~my-username/+archive/ubuntu/my-ppa")
     );
-    assert_eq!(archive.label, "~your-username/my-ppa");
+    assert_eq!(archive.label, "~my-username/my-ppa");
 
     for archive_arg in [
-        "ppa:your-username/my-ppa",
-        "~your-username/+archive/ubuntu/my-ppa",
-        "https://api.example.test/devel/~your-username/+archive/ubuntu/my-ppa",
+        "ppa:my-username/my-ppa",
+        "~my-username/+archive/ubuntu/my-ppa",
+        "https://api.example.test/devel/~my-username/+archive/ubuntu/my-ppa",
     ] {
         let archive = resolve_queue_archive(&client, "ubuntu", Some(archive_arg), None).unwrap();
         assert_eq!(
             archive.api_url,
-            format!("{base}/~your-username/+archive/ubuntu/my-ppa")
+            format!("{base}/~my-username/+archive/ubuntu/my-ppa")
         );
-        assert_eq!(archive.label, "~your-username/my-ppa", "{archive_arg}");
+        assert_eq!(archive.label, "~my-username/my-ppa", "{archive_arg}");
     }
 
     for archive_arg in [
