@@ -19,6 +19,7 @@
 //! | [`add_bug_comment`] | Add a comment to a bug |
 //! | [`get_bug_comments`] | List comments on a bug |
 //! | [`delete_bug_comment`] | Delete a comment from a bug |
+//! | [`set_bug_description`] | Replace the description of a bug |
 //! | [`set_bug_tags`] | Replace the tag list on a bug |
 //! | [`get_bug_tracker_by_name`] | Fetch a bug tracker by name |
 //! | [`get_bug_trackers`] | List registered remote bug trackers |
@@ -629,6 +630,34 @@ pub async fn get_bug_attachments(
 ) -> Result<Vec<BugAttachment>> {
     let url = client.url(&format!("/bugs/{bug_id}/attachments"));
     Collection::fetch_all(client, &url).await
+}
+
+/// Replace the description of a bug.
+///
+/// The Launchpad bug entry's `description` field is writable via a PATCH to
+/// the bug's API entry (the same mechanism [`set_bug_tags`] uses for tags).
+///
+/// Launchpad's `launchpad.Edit` permission on the bug governs who may edit
+/// the description: on public bugs any legitimate user (including the bug
+/// reporter) may edit it, while bugs locked to comment-only can only be
+/// edited by users with a target role (e.g. bug supervisor) or
+/// administrators.
+///
+/// # Errors
+///
+/// Returns [`crate::error::LpError::Api`] with `status` 401 if the
+/// authenticated user lacks `launchpad.Edit` on the bug (e.g. the bug is
+/// locked to comment-only), and 404 if the bug does not exist.
+///
+/// Returns the updated [`Bug`] on success.
+pub async fn set_bug_description(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    description: &str,
+) -> Result<Bug> {
+    let url = client.url(&format!("/bugs/{bug_id}"));
+    let body = serde_json::json!({ "description": description });
+    client.patch_url_with_value(&url, &body).await
 }
 
 /// Replace the complete tag list on a bug.

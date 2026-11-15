@@ -12,6 +12,7 @@
 //! * 200 with JSON body never triggers a retry
 
 use std::collections::HashMap;
+use std::time::{Duration, SystemTime};
 
 use lpcli::{client::LaunchpadClient, error::LpError};
 use mockito::Server;
@@ -112,6 +113,179 @@ async fn rate_limit_retry_after_header_is_captured() {
     }
 
     mock.assert_async().await;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #56: Retry-After dates and consistent metadata across response handlers
+// ---------------------------------------------------------------------------
+
+// Each branch reaches a different response handler through a public method.
+async fn retry_after_request(client: &LaunchpadClient, path: &str) -> lpcli::error::Result<()> {
+    let params = HashMap::new();
+    match path {
+        "/json" => client
+            .post::<serde_json::Value>(path, &params)
+            .await
+            .map(|_| ()),
+        "/empty" => client.post_ok(path, &params).await,
+        "/location" => client
+            .post_created_location(path, &params)
+            .await
+            .map(|_| ()),
+        _ => unreachable!("unknown response path"),
+    }
+}
+
+fn rate_limit_seconds(err: LpError) -> Option<u64> {
+    match err {
+        LpError::RateLimit { retry_after_secs } => retry_after_secs,
+        other => panic!("expected RateLimit, got: {other}"),
+    }
+}
+
+fn ceil_seconds(duration: Duration) -> u64 {
+    duration.as_secs() + u64::from(duration.subsec_nanos() != 0)
+}
+
+#[tokio::test]
+async fn retry_after_future_dates_surface_bounded_metadata_in_all_handlers() {
+    let mut server = Server::new_async().await;
+    let header = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(120));
+    // Round-trip the header because HTTP dates have only whole-second precision.
+    let target = httpdate::parse_http_date(&header).expect("valid generated HTTP date");
+    let date: chrono::DateTime<chrono::Utc> = target.into();
+    let headers = [
+        header,
+        date.format("%A, %d-%b-%y %H:%M:%S GMT").to_string(),
+        date.format("%a %b %e %H:%M:%S %Y").to_string(),
+    ];
+    let client = LaunchpadClient::new(None)
+        .with_base_url(server.url())
+        .with_max_retries(0);
+
+    for header in headers {
+        for path in ["/json", "/empty", "/location"] {
+            let mock = server
+                .mock("POST", path)
+                .with_status(429)
+                .with_header("Retry-After", &header)
+                .expect(1)
+                .create_async()
+                .await;
+            let before = SystemTime::now();
+            let err = retry_after_request(&client, path).await.expect_err("429");
+            let after = SystemTime::now();
+            let seconds = rate_limit_seconds(err).expect("future date must supply metadata");
+            let lower = ceil_seconds(target.duration_since(after).unwrap_or_default());
+            let upper = ceil_seconds(target.duration_since(before).unwrap_or_default());
+            assert!(
+                (lower..=upper).contains(&seconds),
+                "{path}, {header}: {seconds} not in {lower}..={upper}"
+            );
+            mock.assert_async().await;
+            mock.remove_async().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn retry_after_invalid_missing_integer_and_expired_metadata_in_all_handlers() {
+    let mut server = Server::new_async().await;
+    let client = LaunchpadClient::new(None)
+        .with_base_url(server.url())
+        .with_max_retries(0);
+    let expired = httpdate::fmt_http_date(SystemTime::UNIX_EPOCH);
+    let cases = [
+        (None, None),
+        (Some("not-a-date"), None),
+        (Some(""), None),
+        (Some("+12"), None),
+        (Some("-1"), None),
+        (Some("1.5"), None),
+        (Some("18446744073709551616"), None),
+        (Some("１２"), None),
+        (Some("0"), Some(0)),
+        (Some("00012"), Some(12)),
+        (Some(expired.as_str()), Some(0)),
+    ];
+
+    for (header, expected) in cases {
+        for path in ["/json", "/empty", "/location"] {
+            let mut builder = server.mock("POST", path).with_status(429).expect(1);
+            if let Some(header) = header {
+                builder = builder.with_header("Retry-After", header);
+            }
+            let mock = builder.create_async().await;
+            let err = retry_after_request(&client, path).await.expect_err("429");
+            assert_eq!(rate_limit_seconds(err), expected, "{path}, {header:?}");
+            mock.assert_async().await;
+            mock.remove_async().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn retry_after_expired_date_retries_then_succeeds_without_fallback() {
+    let mut server = Server::new_async().await;
+    let expired = httpdate::fmt_http_date(SystemTime::UNIX_EPOCH);
+    let client = LaunchpadClient::new(None)
+        .with_base_url(server.url())
+        .with_max_retries(1)
+        .with_retry_delay_ms(60_000);
+
+    for path in ["/json", "/empty", "/location"] {
+        let limited = server
+            .mock("POST", path)
+            .with_status(429)
+            .with_header("Retry-After", &expired)
+            .expect(1)
+            .create_async()
+            .await;
+        let success = server
+            .mock("POST", path)
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_header("Location", &format!("{}/created", server.url()))
+            .with_body(if path == "/json" { "{}" } else { "" })
+            .expect(1)
+            .create_async()
+            .await;
+        // A fallback would wait 60 seconds; bound failure without elapsed-time assertions.
+        tokio::time::timeout(Duration::from_secs(10), retry_after_request(&client, path))
+            .await
+            .expect("expired date must bypass the fallback delay")
+            .expect("retry must reach the successful response");
+        limited.assert_async().await;
+        success.assert_async().await;
+    }
+}
+
+#[tokio::test]
+async fn retry_after_expired_date_exhausts_exact_retry_count_in_all_handlers() {
+    let mut server = Server::new_async().await;
+    let expired = httpdate::fmt_http_date(SystemTime::UNIX_EPOCH);
+
+    for max_retries in [0, 2] {
+        let client = LaunchpadClient::new(None)
+            .with_base_url(server.url())
+            .with_max_retries(max_retries)
+            .with_retry_delay_ms(1);
+        for path in ["/json", "/empty", "/location"] {
+            let mock = server
+                .mock("POST", path)
+                .with_status(429)
+                .with_header("Retry-After", &expired)
+                .expect(1 + max_retries as usize)
+                .create_async()
+                .await;
+            let err = retry_after_request(&client, path)
+                .await
+                .expect_err("exhausted 429s");
+            assert_eq!(rate_limit_seconds(err), Some(0), "{path}, {max_retries}");
+            mock.assert_async().await;
+            mock.remove_async().await;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
