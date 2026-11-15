@@ -957,7 +957,9 @@ pub async fn unset_bug_watch(client: &LaunchpadClient, task_url: &str) -> Result
 /// # Errors
 ///
 /// Returns [`LpError::NotFound`] when the tracker or task does not exist and
-/// [`LpError::Other`] for configuration or URL mismatches. The task
+/// [`LpError::Other`] for configuration or URL mismatches — including a task
+/// or explicit tracker URL that is not on the configured API origin
+/// (rejected before any request is issued). The task
 /// preflight and tracker validation run before any mutation: no watch is
 /// created and no task is modified when they fail. If a watch is created and
 /// its derived URL then fails validation — or the task cannot be linked
@@ -977,6 +979,10 @@ pub async fn link_bug_task_remote(
     preflight_bug_task(client, bug_id, task_url).await?;
 
     let tracker = if bug_tracker.starts_with("http://") || bug_tracker.starts_with("https://") {
+        // An explicit tracker URL is fetched directly, so it must be on the
+        // configured API origin too (tracker names go through the API as
+        // query parameters and need no check).
+        ensure_same_api_origin(client, bug_tracker, "Bug tracker URL")?;
         get_bug_tracker(client, bug_tracker).await?
     } else {
         get_bug_tracker_by_name(client, bug_tracker).await?
@@ -1116,8 +1122,8 @@ impl std::fmt::Display for GitHubBugRef {
 /// * `https://github.com/owner/repo/pull/N`
 ///
 /// URLs must be strict https GitHub web URLs (no userinfo, no explicit
-/// port, no query or fragment, no empty or repeated path segments; a single
-/// trailing slash is accepted). Owner/repo are canonicalised to lower case;
+/// port, no query or fragment, no empty path segments; a single trailing
+/// slash is accepted). Owner/repo are canonicalised to lower case;
 /// `N` must be a strictly positive decimal number (`+1` and `-1` are
 /// rejected, `#007` is normalised to `7`).
 ///
@@ -1171,8 +1177,8 @@ pub fn parse_github_bug_ref(input: &str) -> Result<GitHubBugRef> {
 /// This is a pure shape check: it parses the URL and compares it against
 /// `https://github.com/{owner}/{repo}/(issues|pull)/{number}`, applying the
 /// same strictness as `parse_github_issues_base_url` (https only, no
-/// userinfo, no explicit port, no query or fragment, no empty or repeated
-/// path segments; a single trailing slash is accepted). It never performs a
+/// userinfo, no explicit port, no query or fragment, no empty path
+/// segments; a single trailing slash is accepted). It never performs a
 /// network request — and remote tracker URLs must never be fetched with an
 /// authenticated [`LaunchpadClient`], because stored-credential clients
 /// attach Launchpad OAuth credentials to *every* request, including those to
@@ -1505,7 +1511,9 @@ pub async fn ensure_github_bug_tracker(
 ///
 /// Returns [`LpError::Other`] when the tracker or an existing watch is
 /// mis-configured; when a just-created watch turns out to have an invalid
-/// URL, the error includes the watch ID and its web-UI page. The task
+/// URL, the error includes the watch ID and its web-UI page. A `task_url`
+/// that is not on the configured API origin is rejected before any request.
+/// The task
 /// preflight and tracker validation run before any mutation: no watch
 /// is created and no task is modified when they fail. If a watch is created
 /// and the task cannot be linked afterwards, the watch may remain on the
@@ -1549,8 +1557,44 @@ fn urlenc(s: &str) -> String {
 // GitHub / watch-link helpers
 // ---------------------------------------------------------------------------
 
+/// Reject remote-linking URLs that are not on the configured client's API
+/// origin, before any authenticated request is issued.
+///
+/// [`LaunchpadClient`] attaches the stored Launchpad credentials to *every*
+/// request it sends, so a user-supplied URL (a bug task URL, or an explicit
+/// bug tracker URL handed to [`link_bug_task_remote`]) must be on the
+/// configured API origin before it is fetched. Origins are compared with
+/// `url::Url` semantics — exact scheme, hostname and effective port — never
+/// by string prefix or host suffix; different API-version paths on the same
+/// origin are allowed. Malformed URLs and origins that do not match the
+/// configured API are rejected.
+fn ensure_same_api_origin(client: &LaunchpadClient, url_text: &str, what: &str) -> Result<()> {
+    let api_base = client.url("/");
+    let api = url::Url::parse(&api_base).map_err(|_| {
+        LpError::Other(format!(
+            "The configured Launchpad API base URL '{api_base}' is not a valid URL."
+        ))
+    })?;
+    let url = url::Url::parse(url_text.trim())
+        .map_err(|_| LpError::Other(format!("{what} '{url_text}' is not a valid URL.")))?;
+    if url.origin() != api.origin() {
+        return Err(LpError::Other(format!(
+            "{what} '{url_text}' is not on the configured Launchpad API origin \
+             '{}'; a request to it would be sent with Launchpad credentials. \
+             Pass a URL on the configured API server.",
+            api.origin().ascii_serialization()
+        )));
+    }
+    Ok(())
+}
+
 /// Fetch `task_url` and verify it is eligible to receive a remote bug watch
 /// link *before* any mutation-capable request is issued.
+///
+/// The URL must be on the configured client's API origin
+/// ([`ensure_same_api_origin`]): the client attaches the stored Launchpad
+/// credentials to every request it sends, so a foreign URL is rejected
+/// before the first request is issued.
 ///
 /// Bug watches cannot be deleted through the Launchpad REST API, so a task
 /// that does not exist, belongs to a different bug, or cannot prove its bug
@@ -1565,6 +1609,7 @@ async fn preflight_bug_task(
     bug_id: u64,
     task_url: &str,
 ) -> Result<BugTask> {
+    ensure_same_api_origin(client, task_url, "Bug task URL")?;
     let task: BugTask = client.get_url(task_url).await?;
     // Fail closed: without a bug_link the task's ownership cannot be
     // verified, and an entry-shaped response that deserialises to all-None
@@ -1767,14 +1812,17 @@ fn strict_github_url(url: &url::Url) -> bool {
 /// segment (a single trailing slash).
 ///
 /// Returns `None` when the path contains empty internal segments (e.g.
-/// `/o//r/issues`) or repeated adjacent segments (e.g. `/o/o/r/issues`).
+/// `/o//r/issues`). Adjacent equal segments are valid: GitHub repositories
+/// may share their owner's name (e.g. `/babel/babel/issues`) or be named
+/// `issues` (e.g. `/owner/issues/issues`); the exact segment count and
+/// keywords are enforced by the callers.
 fn url_path_segments(path: &str) -> Option<Vec<&str>> {
     let trimmed = path.strip_prefix('/').unwrap_or(path);
     let mut parts: Vec<&str> = trimmed.split('/').collect();
     if parts.last() == Some(&"") {
         parts.pop();
     }
-    if parts.iter().any(|s| s.is_empty()) || parts.windows(2).any(|w| w[0] == w[1]) {
+    if parts.iter().any(|s| s.is_empty()) {
         return None;
     }
     Some(parts)
@@ -1785,8 +1833,8 @@ fn url_path_segments(path: &str) -> Option<Vec<&str>> {
 /// Only accepts the strict canonical shape
 /// `https://github.com/{owner}/{repo}/issues` (a single trailing slash is
 /// tolerated): https only, exact `github.com` host, no user information, no
-/// explicit port, no query or fragment, no empty or repeated path segments.
-/// Owner and repo are validated and lowercased.
+/// explicit port, no query or fragment, no empty path segments. Owner and
+/// repo are validated and lowercased.
 ///
 /// # Errors
 ///
@@ -2214,6 +2262,34 @@ mod tests {
 
         // Case is canonicalised to lower case.
         assert_eq!(parse_github_bug_ref("O/R#1").unwrap().to_string(), "o/r#1");
+
+        // Equal owner and repo names, and a repository named `issues`
+        // (path `issues/issues`), are valid GitHub repositories.
+        let same = parse_github_bug_ref("babel/babel#658").unwrap();
+        assert_eq!(
+            (same.owner(), same.repo(), same.number()),
+            ("babel", "babel", 658)
+        );
+        let issues_url = parse_github_bug_ref("https://github.com/babel/babel/issues/658").unwrap();
+        assert_eq!(
+            (issues_url.owner(), issues_url.repo(), issues_url.number()),
+            ("babel", "babel", 658)
+        );
+        let pull_url = parse_github_bug_ref("https://github.com/babel/babel/pull/9").unwrap();
+        assert_eq!(
+            (pull_url.owner(), pull_url.repo(), pull_url.number()),
+            ("babel", "babel", 9)
+        );
+        let issues_repo =
+            parse_github_bug_ref("https://github.com/babel/issues/issues/658").unwrap();
+        assert_eq!(
+            (
+                issues_repo.owner(),
+                issues_repo.repo(),
+                issues_repo.number()
+            ),
+            ("babel", "issues", 658)
+        );
     }
 
     #[test]
@@ -2362,6 +2438,19 @@ mod tests {
             &r,
         )
         .unwrap();
+        // Equal owner/repo names and a repository named `issues` are valid:
+        // the derived URL then contains equal adjacent segments.
+        let same = GitHubBugRef::new("babel", "babel", 658).unwrap();
+        validate_github_watch_url(&watch("https://github.com/babel/babel/issues/658"), &same)
+            .unwrap();
+        validate_github_watch_url(&watch("https://github.com/babel/babel/pull/658"), &same)
+            .unwrap();
+        let issues_repo = GitHubBugRef::new("babel", "issues", 658).unwrap();
+        validate_github_watch_url(
+            &watch("https://github.com/babel/issues/issues/658"),
+            &issues_repo,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2442,6 +2531,14 @@ mod tests {
         let (owner, repo) =
             parse_github_issues_base_url("https://github.com/Canonical/Apport/issues/").unwrap();
         assert_eq!((owner.as_str(), repo.as_str()), ("canonical", "apport"));
+        // Equal owner/repo names and a repository named `issues` (path
+        // `issues/issues`) are valid; only empty segments are rejected.
+        let (owner, repo) =
+            parse_github_issues_base_url("https://github.com/babel/babel/issues").unwrap();
+        assert_eq!((owner.as_str(), repo.as_str()), ("babel", "babel"));
+        let (owner, repo) =
+            parse_github_issues_base_url("https://github.com/babel/issues/issues").unwrap();
+        assert_eq!((owner.as_str(), repo.as_str()), ("babel", "issues"));
         assert!(parse_github_issues_base_url("https://github.com/").is_err());
         assert!(parse_github_issues_base_url("https://github.com/o/r").is_err());
         assert!(parse_github_issues_base_url("https://github.com/o/r/pulls").is_err());
@@ -2473,5 +2570,44 @@ mod tests {
         assert!(!remote_bug_is(Some("659"), 658));
         assert!(!remote_bug_is(Some("not-a-number"), 658));
         assert!(!remote_bug_is(None, 658));
+    }
+
+    // -----------------------------------------------------------------------
+    // Remote-linking API origin guard
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ensure_same_api_origin_pure_cases() {
+        let client = LaunchpadClient::new(None).with_base_url("https://api.launchpad.net/devel");
+        // Same origin: a different API-version path and an explicit default
+        // port (same effective port) are both accepted.
+        ensure_same_api_origin(
+            &client,
+            "https://api.launchpad.net/1.0/bugs/42",
+            "Bug task URL",
+        )
+        .unwrap();
+        ensure_same_api_origin(
+            &client,
+            "https://api.launchpad.net:443/devel/bugs/42",
+            "Bug task URL",
+        )
+        .unwrap();
+        // Exact scheme/hostname/effective-port comparison: deceptive host
+        // suffixes, scheme mismatches, port mismatches, non-http(s) schemes
+        // and malformed URLs are all rejected.
+        for foreign in [
+            "https://api.launchpad.net.evil.com/devel/bugs/42",
+            "http://api.launchpad.net/devel/bugs/42",
+            "https://api.launchpad.net:8443/devel/bugs/42",
+            "ftp://api.launchpad.net/devel/bugs/42",
+            "/devel/bugs/42",
+            "not a url",
+        ] {
+            assert!(
+                ensure_same_api_origin(&client, foreign, "Bug task URL").is_err(),
+                "'{foreign}' must be rejected by the API origin guard"
+            );
+        }
     }
 }

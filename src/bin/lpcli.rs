@@ -1122,7 +1122,7 @@ fn parse_github_ref(value: &str) -> Result<bugs::GitHubBugRef, String> {
 /// inference: returns the lowercased `(owner, repo)` pair when `base_url` is
 /// the strict canonical `https://github.com/<owner>/<repo>/issues` form
 /// (https only, exact github.com host, no user information, no explicit
-/// port, no query or fragment, no empty or repeated path segments).
+/// port, no query or fragment, no empty path segments).
 /// Delegates entirely to [`bugs::parse_github_issues_base_url`].
 fn parse_github_issues_base_url(base_url: &str) -> Option<(String, String)> {
     bugs::parse_github_issues_base_url(base_url).ok()

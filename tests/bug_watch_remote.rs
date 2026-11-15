@@ -1538,3 +1538,94 @@ async fn link_bug_task_remote_github_tracker_guards_fail_before_writes() {
         assert_all(&[get_task, tracker_mock, list_watches, add_watch, patch_task]).await;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Owner==repo references and remote-linking origin safety
+// ---------------------------------------------------------------------------
+
+#[rustfmt::skip]
+#[tokio::test]
+async fn link_github_bug_task_links_owner_equals_repo_shorthand() {
+    // owner and repo may be equal (babel/babel): the tracker base URL and
+    // the derived watch URL both parse, so the shorthand links end to end —
+    // the fix is not parser-only.
+    let mut server = Server::new_async().await;
+    let base = server.url();
+    let repo_base_url = "https://github.com/babel/babel/issues";
+    let tracker_url = format!("{base}/bugs/bugtrackers/auto-github-babel-babel");
+    let watch_url = "https://github.com/babel/babel/issues/658";
+    let get_task = mock_apport_task_get(&mut server).await;
+    let preflight = mock_query_by_base_url(&mut server, repo_base_url, "null", 1).await;
+    let (post_tracker, fetch_tracker) = mock_ensure_tracker_created(&mut server, "auto-github-babel-babel", &tracker_entry_json(&base, "auto-github-babel-babel", TRACKER_TYPE, Some(repo_base_url))).await;
+    let list_watches = mock_list_watches(&mut server, "").await;
+    let post_watch = mock_add_watch_created(&mut server, &tracker_url, 101).await;
+    let fetch_watch = mock_json_get(&mut server, "/bugs/42/+watch/101", &github_watch_json(&base, 101, watch_url)).await;
+    let watch_api_url = format!("{base}/bugs/{BUG_ID}/+watch/101");
+    let patch_task = mock_patch_watch_link(&mut server, &watch_api_url).await;
+    let r = bugs::parse_github_bug_ref("babel/babel#658").unwrap();
+    let (task, watch) = bugs::link_github_bug_task(&client_for(&server), BUG_ID, &format!("{base}{TASK_PATH}"), &r)
+        .await
+        .expect("an owner==repo shorthand must link end to end");
+    assert!(task.bug_watch_link.as_deref().unwrap().ends_with("/+watch/101"));
+    assert_eq!(watch.url.as_deref(), Some(watch_url));
+    assert_all(&[get_task, preflight, post_tracker, fetch_tracker, list_watches, post_watch, fetch_watch, patch_task]).await;
+}
+
+#[rustfmt::skip]
+#[tokio::test]
+async fn link_github_bug_task_rejects_foreign_task_url_before_any_request() {
+    // Two localhost servers on one hostname with different ports: a task
+    // URL on the foreign port is rejected by the origin guard before the
+    // first request — even though its body would pass every later
+    // bug_link/target_link check — and the configured API is never
+    // contacted. The clients are anonymous, so zero requests is a hard
+    // proof that no header could have leaked to the foreign origin.
+    let mut server = Server::new_async().await;
+    let mut foreign = Server::new_async().await;
+    let spoofed_task = foreign
+        .mock("GET", TASK_PATH)
+        .with_body(apport_task_json(&server.url(), BUG_ID, None))
+        .expect(0)
+        .create_async()
+        .await;
+    let task_get = mock_never(&mut server, "GET", TASK_PATH).await;
+    let tracker_lookup = mock_never(&mut server, "GET", &query_by_base_url_path(REPO_BASE_URL)).await;
+    let post_tracker = mock_never(&mut server, "POST", "/bugs/bugtrackers").await;
+    let list_watches = mock_never(&mut server, "GET", &format!("/bugs/{BUG_ID}/bug_watches")).await;
+    let post_watch = mock_never(&mut server, "POST", &format!("/bugs/{BUG_ID}")).await;
+    let patch_task = mock_never(&mut server, "PATCH", TASK_PATH).await;
+    let r = bugs::parse_github_bug_ref("canonical/apport#658").unwrap();
+    let result = bugs::link_github_bug_task(&client_for(&server), BUG_ID, &format!("{}{TASK_PATH}", foreign.url()), &r).await;
+    assert!(matches!(result, Err(LpError::Other(_))));
+    assert_all(&[task_get, tracker_lookup, post_tracker, list_watches, post_watch, patch_task]).await;
+    spoofed_task.assert_async().await;
+}
+
+#[rustfmt::skip]
+#[tokio::test]
+async fn link_bug_task_remote_rejects_foreign_tracker_url_without_fetching_it() {
+    // An explicit http(s) tracker URL is fetched directly, so it must pass
+    // the origin guard too: after a valid task preflight, a foreign tracker
+    // URL (again a different port on the same hostname) is rejected
+    // unfetched, and the configured API sees the preflight GET but no
+    // mutation.
+    let mut server = Server::new_async().await;
+    let mut foreign = Server::new_async().await;
+    let get_task = mock_apport_task_get(&mut server).await;
+    let foreign_tracker = foreign
+        .mock("GET", "/bugs/bugtrackers/debbugs")
+        .expect(0)
+        .create_async()
+        .await;
+    let tracker_on_api = mock_never(&mut server, "GET", "/bugs/bugtrackers/debbugs").await;
+    let list_watches = mock_never(&mut server, "GET", &format!("/bugs/{BUG_ID}/bug_watches")).await;
+    let post_watch = mock_never(&mut server, "POST", &format!("/bugs/{BUG_ID}")).await;
+    let patch_task = mock_never(&mut server, "PATCH", TASK_PATH).await;
+    let task_url = format!("{}{TASK_PATH}", server.url());
+    let foreign_tracker_url = format!("{}/bugs/bugtrackers/debbugs", foreign.url());
+    let result = bugs::link_bug_task_remote(&client_for(&server), BUG_ID, &task_url, &foreign_tracker_url, "1150409").await;
+    assert!(matches!(result, Err(LpError::Other(_))));
+    get_task.assert_async().await;
+    assert_all(&[tracker_on_api, list_watches, post_watch, patch_task]).await;
+    foreign_tracker.assert_async().await;
+}
