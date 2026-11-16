@@ -61,6 +61,24 @@ access-token coordination are currently implemented on Linux.
 - Follow the existing signing and redirect restrictions so credentials remain
   scoped to trusted Launchpad endpoints.
 
+## Upload Queues and PPAs
+
+Queue commands default to `{distro}/+archive/primary`. Use `--ppa OWNER/NAME`
+(or `--archive ppa:OWNER/NAME`) with `queue search`, `download`, `info`,
+`accept`, and `reject` to target a PPA; it resolves to
+`/~OWNER/+archive/ubuntu/NAME`. The resolved archive is shown in search and
+result output.
+
+Launchpad auto-accepts PPA uploads, so PPA queue entries normally appear as
+`Done` or `Accepted`, not `New`/`Unapproved`.
+
+```bash
+lpcli queue search --status done --series tenacious --name mutter \
+    --ppa my-username/my-ppa
+lpcli queue info --name mutter --status accepted --arch amd64 \
+    --ppa my-username/my-ppa --series tenacious
+```
+
 ## Validation
 
 Use mocked HTTP responses and isolated filesystem/subprocess fixtures for routine

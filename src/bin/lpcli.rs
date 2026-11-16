@@ -152,6 +152,62 @@ fn parse_queue_arch(s: &str) -> Result<QueueArch, String> {
     s.parse()
 }
 
+/// A Personal Package Archive reference accepted by `--ppa`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PpaRef {
+    owner: String,
+    name: String,
+}
+
+impl PpaRef {
+    /// API path for the archive resource.
+    fn api_path(&self) -> String {
+        format!("/~{}/+archive/ubuntu/{}", self.owner, self.name)
+    }
+
+    /// Human-readable form used in output, e.g. `~my-username/my-ppa`.
+    fn label(&self) -> String {
+        format!("~{}/{}", self.owner, self.name)
+    }
+}
+
+/// Parse a `--ppa OWNER/NAME` argument for clap.
+fn parse_ppa_ref(s: &str) -> Result<PpaRef, String> {
+    let value = s.trim();
+    let invalid = || format!("invalid PPA '{s}'; expected OWNER/NAME (e.g. my-username/my-ppa)");
+    let Some((owner, name)) = value.split_once('/') else {
+        return Err(invalid());
+    };
+    if owner.is_empty() || name.is_empty() || name.contains('/') {
+        return Err(invalid());
+    }
+    if owner.chars().any(char::is_whitespace) || name.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "invalid PPA '{s}'; owner and name must not contain whitespace"
+        ));
+    }
+    if owner.starts_with('~') {
+        return Err(format!(
+            "invalid PPA '{s}'; omit the leading '~' (use 'owner/name')"
+        ));
+    }
+    if !owner
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '+'))
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '+'))
+    {
+        return Err(format!(
+            "invalid PPA '{s}'; owner and name may only contain letters, digits, '-', '.', '_' and '+'"
+        ));
+    }
+    Ok(PpaRef {
+        owner: owner.to_string(),
+        name: name.to_string(),
+    })
+}
+
 /// Build a helpful error message for an unknown architecture.
 fn invalid_arch_error(value: &str) -> String {
     let mut valid: Vec<&str> = vec!["source", "all"];
@@ -1841,6 +1897,9 @@ enum SnapCommand {
 #[derive(Debug, Subcommand)]
 enum QueueCommand {
     /// Search packages in build/upload queues for a distro series.
+    #[command(after_help = "Examples:
+  lpcli queue search --status done --series tenacious --name mutter --ppa my-username/my-ppa
+  lpcli queue search --status done --series tenacious --name mutter --archive ppa:my-username/my-ppa")]
     Search {
         /// Filter by pocket: Release, Security, Updates, Proposed, or Backports.
         #[arg(short, long, value_parser = parse_pocket)]
@@ -1858,10 +1917,16 @@ enum QueueCommand {
         /// Require exact match for --name or --version (default: false).
         #[arg(short, long, default_value = "false")]
         exact_match: bool,
-        /// Archive to query (full LP archive reference, e.g. "ubuntu/+archive/primary").
-        /// Defaults to the primary archive for the current Ubuntu development release.
-        #[arg(short, long)]
+        /// Archive to query: "primary" (the default), "ubuntu/+archive/primary",
+        /// "~owner/+archive/ubuntu/name", or "ppa:owner/name".
+        #[arg(short, long, conflicts_with = "ppa")]
         archive: Option<String>,
+        /// PPA to query as OWNER/NAME (e.g. "my-username/my-ppa").
+        /// Resolves to ~OWNER/+archive/ubuntu/NAME; conflicts with --archive.
+        /// PPA uploads are normally auto-accepted; search for done or accepted.
+        /// The queried archive is shown in the results. PPAs are Ubuntu-only.
+        #[arg(long, value_parser = parse_ppa_ref, conflicts_with = "archive")]
+        ppa: Option<PpaRef>,
         /// Distribution name (default: "ubuntu").
         #[arg(short, long, default_value = "ubuntu")]
         distro: String,
@@ -1877,7 +1942,7 @@ enum QueueCommand {
         /// Source package name (required).
         #[arg(short, long)]
         name: String,
-        /// Package version (optional; downloads the first match if not given).
+        /// Exact package version (optional; downloads the first match if not given).
         #[arg(short, long)]
         version: Option<String>,
         /// Filter by upload status: new, unapproved, accepted, done, or rejected
@@ -1887,6 +1952,15 @@ enum QueueCommand {
         /// Filter by architecture (e.g. "amd64", "arm64", "source").
         #[arg(short, long, value_parser = parse_queue_arch)]
         arch: QueueArch,
+        /// Archive containing the upload (see `queue search --help`).
+        /// Defaults to the distribution's primary archive.
+        #[arg(long, conflicts_with = "ppa")]
+        archive: Option<String>,
+        /// PPA containing the upload as OWNER/NAME (e.g. "my-username/my-ppa").
+        /// Conflicts with --archive; PPAs are Ubuntu-only. PPA uploads are
+        /// normally auto-accepted; use the status shown by `queue search`.
+        #[arg(long, value_parser = parse_ppa_ref, conflicts_with = "archive")]
+        ppa: Option<PpaRef>,
         /// Distribution name (default: "ubuntu").
         #[arg(short, long, default_value = "ubuntu")]
         distro: String,
@@ -1897,12 +1971,12 @@ enum QueueCommand {
         #[arg(short, long, default_value = ".")]
         output: String,
     },
-    /// Display binary package (.deb/.ddeb) details for a package in the queue.
+    /// Display upload details, including binary .deb/.ddeb information, for a queue item.
     Info {
         /// Source package name (required).
         #[arg(short, long)]
         name: String,
-        /// Package version (optional; shows the first match if not given).
+        /// Exact package version (optional; shows the first match if not given).
         #[arg(short, long)]
         version: Option<String>,
         /// Filter by upload status: new, unapproved, accepted, done, or rejected
@@ -1912,6 +1986,15 @@ enum QueueCommand {
         /// Filter by architecture (e.g. "amd64", "arm64", "source").
         #[arg(short, long, value_parser = parse_queue_arch)]
         arch: QueueArch,
+        /// Archive containing the upload (see `queue search --help`).
+        /// Defaults to the distribution's primary archive.
+        #[arg(long, conflicts_with = "ppa")]
+        archive: Option<String>,
+        /// PPA containing the upload as OWNER/NAME (e.g. "my-username/my-ppa").
+        /// Conflicts with --archive; PPAs are Ubuntu-only. PPA uploads are
+        /// normally auto-accepted; use the status shown by `queue search`.
+        #[arg(long, value_parser = parse_ppa_ref, conflicts_with = "archive")]
+        ppa: Option<PpaRef>,
         /// Distribution name (default: "ubuntu").
         #[arg(short, long, default_value = "ubuntu")]
         distro: String,
@@ -1920,11 +2003,13 @@ enum QueueCommand {
         series: Option<String>,
     },
     /// Accept a package in the upload queue (requires queue-admin permissions).
+    #[command(after_help = "Examples:
+  lpcli queue accept --name mutter --version 51.0-1ubuntu4 --status unapproved --arch source --series tenacious --ppa my-username/my-ppa")]
     Accept {
         /// Source package name (required).
         #[arg(short, long)]
         name: String,
-        /// Package version (optional; accepts the first match if not given).
+        /// Exact package version (optional; required when multiple uploads match).
         #[arg(short, long)]
         version: Option<String>,
         /// Filter by upload status, e.g. new or unapproved (case-insensitive).
@@ -1933,6 +2018,15 @@ enum QueueCommand {
         /// Filter by architecture (e.g. "amd64", "arm64", "source").
         #[arg(short, long, value_parser = parse_queue_arch)]
         arch: QueueArch,
+        /// Archive containing the upload (see `queue search --help`).
+        /// Defaults to the distribution's primary archive.
+        #[arg(long, conflicts_with = "ppa")]
+        archive: Option<String>,
+        /// PPA containing the upload as OWNER/NAME (e.g. "my-username/my-ppa").
+        /// Conflicts with --archive; PPAs are Ubuntu-only. PPA uploads are
+        /// normally auto-accepted; use the status shown by `queue search`.
+        #[arg(long, value_parser = parse_ppa_ref, conflicts_with = "archive")]
+        ppa: Option<PpaRef>,
         /// Distribution name (default: "ubuntu").
         #[arg(short, long, default_value = "ubuntu")]
         distro: String,
@@ -1941,11 +2035,13 @@ enum QueueCommand {
         series: Option<String>,
     },
     /// Reject a package in the upload queue (requires queue-admin permissions).
+    #[command(after_help = "Examples:
+  lpcli queue reject --name mutter --version 51.0-1ubuntu4 --status unapproved --arch source --series tenacious --ppa my-username/my-ppa --comment \"Needs a bug fix.\"")]
     Reject {
         /// Source package name (required).
         #[arg(short, long)]
         name: String,
-        /// Package version (optional; rejects the first match if not given).
+        /// Exact package version (optional; required when multiple uploads match).
         #[arg(short, long)]
         version: Option<String>,
         /// Filter by upload status, e.g. new or unapproved (case-insensitive).
@@ -1954,6 +2050,15 @@ enum QueueCommand {
         /// Filter by architecture (e.g. "amd64", "arm64", "source").
         #[arg(short, long, value_parser = parse_queue_arch)]
         arch: QueueArch,
+        /// Archive containing the upload (see `queue search --help`).
+        /// Defaults to the distribution's primary archive.
+        #[arg(long, conflicts_with = "ppa")]
+        archive: Option<String>,
+        /// PPA containing the upload as OWNER/NAME (e.g. "my-username/my-ppa").
+        /// Conflicts with --archive; PPAs are Ubuntu-only. PPA uploads are
+        /// normally auto-accepted; use the status shown by `queue search`.
+        #[arg(long, value_parser = parse_ppa_ref, conflicts_with = "archive")]
+        ppa: Option<PpaRef>,
         /// Rejection comment explaining why the package is being rejected.
         #[arg(short, long)]
         comment: Option<String>,
@@ -5158,6 +5263,175 @@ async fn handle_status() -> lpcli::error::Result<()> {
 // Queue handler
 // ---------------------------------------------------------------------------
 
+/// A queue archive resolved to a Launchpad API URL and a display label.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QueueArchive {
+    /// Full Launchpad API URL passed to `getPackageUploads`.
+    api_url: String,
+    /// Short label used in output, e.g. `ubuntu` or `~owner/ppa`.
+    label: String,
+}
+
+impl QueueArchive {
+    /// Describe the target as `distro/series`, appending the archive when it
+    /// is not the distribution's primary archive.
+    fn target_label(&self, distro: &str, series: &str) -> String {
+        if self.label.eq_ignore_ascii_case(distro) {
+            format!("{distro}/{series}")
+        } else {
+            format!("{distro}/{series} ({})", self.label)
+        }
+    }
+}
+
+/// Resolve `--archive`/`--ppa` to the Launchpad archive API URL.
+fn resolve_queue_archive(
+    client: &LaunchpadClient,
+    distro: &str,
+    archive: Option<&str>,
+    ppa: Option<&PpaRef>,
+) -> lpcli::error::Result<QueueArchive> {
+    if let Some(ppa) = ppa {
+        return ppa_queue_archive(client, distro, ppa);
+    }
+    let Some(archive) = archive else {
+        return Ok(primary_queue_archive(client, distro));
+    };
+    let value = archive.trim();
+    if value.is_empty() {
+        return Err(lpcli::error::LpError::Other(
+            "--archive must not be empty".to_string(),
+        ));
+    }
+    if let Some(ppa) = value.strip_prefix("ppa:") {
+        let ppa = parse_ppa_ref(ppa).map_err(lpcli::error::LpError::Other)?;
+        return ppa_queue_archive(client, distro, &ppa);
+    }
+    if value.starts_with("http://") || value.starts_with("https://") {
+        let label = archive_label(value).unwrap_or_else(|| value.trim_end_matches('/').to_string());
+        if label.starts_with('~') {
+            validate_ppa_distro(distro)?;
+        }
+        return Ok(QueueArchive {
+            api_url: value.to_string(),
+            label,
+        });
+    }
+    if value.contains("/+archive/") {
+        let trimmed = value.trim_matches('/');
+        let label = archive_label(trimmed).unwrap_or_else(|| trimmed.to_string());
+        if label.starts_with('~') {
+            validate_ppa_distro(distro)?;
+        }
+        return Ok(QueueArchive {
+            api_url: client.url(&format!("/{trimmed}")),
+            label,
+        });
+    }
+    if value.eq_ignore_ascii_case("primary") {
+        return Ok(primary_queue_archive(client, distro));
+    }
+    Ok(QueueArchive {
+        api_url: client.url(&format!("/{}/+archive/{}", distro, value)),
+        label: format!("{distro}/{value}"),
+    })
+}
+
+/// The primary archive for a distribution.
+fn primary_queue_archive(client: &LaunchpadClient, distro: &str) -> QueueArchive {
+    QueueArchive {
+        api_url: client.url(&format!("/{distro}/+archive/primary")),
+        label: distro.to_string(),
+    }
+}
+
+/// Reject PPA-shaped archive targets for non-Ubuntu distributions.
+fn validate_ppa_distro(distro: &str) -> lpcli::error::Result<()> {
+    if distro.eq_ignore_ascii_case("ubuntu") {
+        Ok(())
+    } else {
+        Err(lpcli::error::LpError::Other(format!(
+            "PPA archives are only available for Ubuntu, not '{distro}'"
+        )))
+    }
+}
+
+/// A PPA archive; PPAs live under the Ubuntu distribution.
+fn ppa_queue_archive(
+    client: &LaunchpadClient,
+    distro: &str,
+    ppa: &PpaRef,
+) -> lpcli::error::Result<QueueArchive> {
+    validate_ppa_distro(distro)?;
+    Ok(QueueArchive {
+        api_url: client.url(&ppa.api_path()),
+        label: ppa.label(),
+    })
+}
+
+/// Derive a short label from an archive reference or API URL.
+///
+/// Recognises both `distro/+archive/name` and `~owner/+archive/distro/name`.
+fn archive_label(reference: &str) -> Option<String> {
+    let path = url::Url::parse(reference)
+        .ok()
+        .map(|url| url.path().to_string())
+        .unwrap_or_else(|| reference.to_string());
+    let segments: Vec<&str> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let archive_index = segments.iter().position(|segment| *segment == "+archive")?;
+    let distro = segments.get(archive_index.checked_sub(1)?)?;
+    if distro.starts_with('~') {
+        let name = segments.get(archive_index + 2)?;
+        return Some(format!("{distro}/{name}"));
+    }
+    let name = segments.get(archive_index + 1)?;
+    if name.eq_ignore_ascii_case("primary") {
+        Some((*distro).to_string())
+    } else {
+        Some(format!("{distro}/{name}"))
+    }
+}
+
+/// Add archive context to an HTTP 401/403 error from a queue mutation.
+fn queue_mutation_permission_error(
+    err: lpcli::error::LpError,
+    action: &str,
+    archive: &QueueArchive,
+    distro: &str,
+    series: &str,
+) -> lpcli::error::LpError {
+    match err {
+        lpcli::error::LpError::Api { status, message } if status == 401 || status == 403 => {
+            lpcli::error::LpError::Unauthorized(format!(
+                "You do not have queue-admin permission to {action} packages in {}. {message}",
+                archive.target_label(distro, series),
+            ))
+        }
+        other => other,
+    }
+}
+
+/// Add archive context to an HTTP 401/403 error from a queue read.
+fn queue_read_permission_error(
+    err: lpcli::error::LpError,
+    archive: &QueueArchive,
+    distro: &str,
+    series: &str,
+) -> lpcli::error::LpError {
+    match err {
+        lpcli::error::LpError::Api { status, message } if status == 401 || status == 403 => {
+            lpcli::error::LpError::Unauthorized(format!(
+                "You do not have permission to read the upload queue for {}. {message}",
+                archive.target_label(distro, series),
+            ))
+        }
+        other => other,
+    }
+}
+
 async fn handle_queue(
     cmd: QueueCommand,
     display: &Display,
@@ -5165,7 +5439,6 @@ async fn handle_queue(
     cache_timeout: std::time::Duration,
 ) -> lpcli::error::Result<()> {
     let client = read_client(policy, cache_timeout)?;
-    let primary_archive_only = policy == ReadAuthPolicy::Anonymous;
     match cmd {
         QueueCommand::Search {
             pocket,
@@ -5174,10 +5447,13 @@ async fn handle_queue(
             version,
             exact_match,
             archive,
+            ppa,
             distro,
             series,
             limit,
         } => {
+            let archive =
+                resolve_queue_archive(&client, &distro, archive.as_deref(), ppa.as_ref())?;
             handle_queue_search(
                 display,
                 &client,
@@ -5186,7 +5462,7 @@ async fn handle_queue(
                 name,
                 version,
                 exact_match,
-                archive,
+                &archive,
                 distro,
                 series,
                 limit,
@@ -5198,20 +5474,16 @@ async fn handle_queue(
             version,
             status,
             arch,
+            archive,
+            ppa,
             distro,
             series,
             output,
         } => {
+            let archive =
+                resolve_queue_archive(&client, &distro, archive.as_deref(), ppa.as_ref())?;
             handle_queue_download(
-                &client,
-                name,
-                version,
-                status,
-                arch,
-                distro,
-                series,
-                output,
-                primary_archive_only,
+                &client, name, version, status, arch, &archive, distro, series, output,
             )
             .await
         }
@@ -5220,19 +5492,15 @@ async fn handle_queue(
             version,
             status,
             arch,
+            archive,
+            ppa,
             distro,
             series,
         } => {
+            let archive =
+                resolve_queue_archive(&client, &distro, archive.as_deref(), ppa.as_ref())?;
             handle_queue_info(
-                display,
-                &client,
-                name,
-                version,
-                status,
-                arch,
-                distro,
-                series,
-                primary_archive_only,
+                display, &client, name, version, status, arch, &archive, distro, series,
             )
             .await
         }
@@ -5241,20 +5509,33 @@ async fn handle_queue(
             version,
             status,
             arch,
+            archive,
+            ppa,
             distro,
             series,
-        } => handle_queue_accept(&client, name, version, status, arch, distro, series).await,
+        } => {
+            let archive =
+                resolve_queue_archive(&client, &distro, archive.as_deref(), ppa.as_ref())?;
+            handle_queue_accept(
+                &client, name, version, status, arch, &archive, distro, series,
+            )
+            .await
+        }
         QueueCommand::Reject {
             name,
             version,
             status,
             arch,
+            archive,
+            ppa,
             comment,
             distro,
             series,
         } => {
+            let archive =
+                resolve_queue_archive(&client, &distro, archive.as_deref(), ppa.as_ref())?;
             handle_queue_reject(
-                &client, name, version, status, arch, comment, distro, series,
+                &client, name, version, status, arch, &archive, comment, distro, series,
             )
             .await
         }
@@ -5270,7 +5551,7 @@ async fn handle_queue_search(
     name: Option<String>,
     version: Option<String>,
     exact_match: bool,
-    archive: Option<String>,
+    archive: &QueueArchive,
     distro: String,
     series: Option<String>,
     limit: u32,
@@ -5282,40 +5563,26 @@ async fn handle_queue_search(
         None => queue::get_devel_series_name(client, &distro).await?,
     };
 
-    // If an archive name is given (e.g. "primary" or "ubuntu/+archive/primary"),
-    // resolve it to a full API URL. If it looks like a relative name, build the
-    // URL for the primary archive of the distribution.
-    let archive_url = archive
-        .map(|a| {
-            if a.starts_with("http://") || a.starts_with("https://") {
-                a
-            } else if a.contains("/+archive/") {
-                client.url(&format!("/{}", a))
-            } else {
-                // Assume it's just the archive name under the distro.
-                client.url(&format!("/{}/+archive/{}", distro, a))
-            }
-        })
-        .unwrap_or_else(|| client.url(&format!("/{distro}/+archive/primary")));
-
     let params = QueueSearchParams {
         pocket: pocket.map(pocket_launchpad_name),
         status: status.as_deref(),
         name: name.as_deref(),
         version: version.as_deref(),
         exact_match,
-        archive: Some(&archive_url),
+        archive: Some(&archive.api_url),
         limit: Some(limit),
     };
 
-    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params).await?;
+    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params)
+        .await
+        .map_err(|err| queue_read_permission_error(err, archive, &distro, &series_name))?;
 
     if uploads.is_empty() {
         println!(
             "{} No packages found in the queue for {} ({}).",
             "ℹ".cyan().bold(),
             series_name.bold(),
-            distro
+            archive.label
         );
         return Ok(());
     }
@@ -5326,7 +5593,7 @@ async fn handle_queue_search(
         "●".green().bold(),
         uploads.len(),
         series_name.bold(),
-        distro,
+        archive.label,
     );
 
     let mut table = build_table(
@@ -5383,10 +5650,10 @@ async fn handle_queue_download(
     version: Option<String>,
     status: String,
     arch: QueueArch,
+    archive: &QueueArchive,
     distro: String,
     series: Option<String>,
     output: String,
-    primary_archive_only: bool,
 ) -> lpcli::error::Result<()> {
     // Resolve the series (default: current development series).
     let series_name = match series {
@@ -5396,10 +5663,8 @@ async fn handle_queue_download(
 
     // Search for the package in the queue.  Fetch multiple results so we can
     // filter by architecture client-side.
-    let archive_url =
-        primary_archive_only.then(|| client.url(&format!("/{distro}/+archive/primary")));
     let params = QueueSearchParams {
-        archive: archive_url.as_deref(),
+        archive: Some(&archive.api_url),
         status: Some(&status),
         name: Some(&name),
         version: version.as_deref(),
@@ -5408,7 +5673,9 @@ async fn handle_queue_download(
         ..Default::default()
     };
 
-    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params).await?;
+    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params)
+        .await
+        .map_err(|err| queue_read_permission_error(err, archive, &distro, &series_name))?;
 
     // Find the first upload whose display_arches field contains the
     // requested architecture.
@@ -5422,7 +5689,7 @@ async fn handle_queue_download(
 
     let upload = upload.ok_or_else(|| {
         lpcli::error::LpError::NotFound(format!(
-            "No package '{}'{} [arch={}] found in queue with status '{}' for {}/{}.",
+            "No package '{}'{} [arch={}] found in queue with status '{}' for {}.",
             name,
             version
                 .as_ref()
@@ -5430,8 +5697,7 @@ async fn handle_queue_download(
                 .unwrap_or_default(),
             arch,
             status,
-            distro,
-            series_name,
+            archive.target_label(&distro, &series_name),
         ))
     })?;
 
@@ -5461,10 +5727,11 @@ async fn handle_queue_download(
 
     if urls.is_empty() {
         println!(
-            "{} No files found for '{}' [arch={}] in the queue.",
+            "{} No files found for '{}' [arch={}] in the queue for {}.",
             "ℹ".cyan().bold(),
             name.bold(),
             arch,
+            archive.target_label(&distro, &series_name),
         );
         return Ok(());
     }
@@ -5496,16 +5763,18 @@ async fn handle_queue_download(
 
     if fail_count > 0 {
         println!(
-            "\n{} {} file(s) downloaded, {} failed.",
+            "\n{} {} file(s) downloaded from {}, {} failed.",
             "●".yellow().bold(),
             success_count,
+            archive.target_label(&distro, &series_name),
             fail_count,
         );
     } else {
         println!(
-            "\n{} Downloaded {} file(s) to '{}'.",
+            "\n{} Downloaded {} file(s) from {} to '{}'.",
             "●".green().bold(),
             success_count,
+            archive.target_label(&distro, &series_name),
             output_dir.display(),
         );
     }
@@ -5516,12 +5785,14 @@ async fn handle_queue_download(
 // Queue accept handler
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_queue_accept(
     client: &LaunchpadClient,
     name: String,
     version: Option<String>,
     status: String,
     arch: QueueArch,
+    archive: &QueueArchive,
     distro: String,
     series: Option<String>,
 ) -> lpcli::error::Result<()> {
@@ -5533,6 +5804,7 @@ async fn handle_queue_accept(
 
     // Search for the package in the queue.
     let params = QueueSearchParams {
+        archive: Some(&archive.api_url),
         status: Some(&status),
         name: Some(&name),
         version: version.as_deref(),
@@ -5541,7 +5813,9 @@ async fn handle_queue_accept(
         ..Default::default()
     };
 
-    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params).await?;
+    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params)
+        .await
+        .map_err(|err| queue_read_permission_error(err, archive, &distro, &series_name))?;
 
     // Find uploads whose display_arches field contains the requested architecture.
     let matching: Vec<_> = uploads
@@ -5563,20 +5837,19 @@ async fn handle_queue_accept(
             .filter_map(|u| u.package_version.clone())
             .collect();
         return Err(lpcli::error::LpError::Other(format!(
-            "Multiple uploads match '{}' [arch={}] with status '{}' in {}/{}: {}. \
+            "Multiple uploads match '{}' [arch={}] with status '{}' in {}: {}. \
              Use --version to select exactly one.",
             name,
             arch,
             status,
-            distro,
-            series_name,
+            archive.target_label(&distro, &series_name),
             versions.join(", "),
         )));
     }
 
     let upload = matching.first().ok_or_else(|| {
         lpcli::error::LpError::NotFound(format!(
-            "No package '{}'{} [arch={}] found in queue with status '{}' for {}/{}.",
+            "No package '{}'{} [arch={}] found in queue with status '{}' for {}.",
             name,
             version
                 .as_ref()
@@ -5584,8 +5857,7 @@ async fn handle_queue_accept(
                 .unwrap_or_default(),
             arch,
             status,
-            distro,
-            series_name,
+            archive.target_label(&distro, &series_name),
         ))
     })?;
 
@@ -5596,34 +5868,17 @@ async fn handle_queue_accept(
     // Call acceptFromQueue.
     queue::accept_from_queue(client, self_link)
         .await
-        .map_err(|e| {
-            // Provide a more helpful message for permission errors.
-            if let lpcli::error::LpError::Api {
-                status,
-                ref message,
-            } = e
-                && (status == 401 || status == 403)
-            {
-                return lpcli::error::LpError::Api {
-                    status,
-                    message: format!(
-                        "Permission denied: you do not have queue-admin privileges to accept \
-                     packages for {}/{}. {message}",
-                        distro, series_name,
-                    ),
-                };
-            }
-            e
+        .map_err(|err| {
+            queue_mutation_permission_error(err, "accept", archive, &distro, &series_name)
         })?;
 
     println!(
-        "{} Accepted {} ({}) [{}] in {}/{}.",
+        "{} Accepted {} ({}) [{}] in {}.",
         "✓".green().bold(),
         upload.package_name.as_deref().unwrap_or("?").bold(),
         upload.package_version.as_deref().unwrap_or("?"),
         upload.display_arches.as_deref().unwrap_or("?"),
-        distro,
-        series_name,
+        archive.target_label(&distro, &series_name),
     );
 
     Ok(())
@@ -5640,6 +5895,7 @@ async fn handle_queue_reject(
     version: Option<String>,
     status: String,
     arch: QueueArch,
+    archive: &QueueArchive,
     comment: Option<String>,
     distro: String,
     series: Option<String>,
@@ -5652,6 +5908,7 @@ async fn handle_queue_reject(
 
     // Search for the package in the queue.
     let params = QueueSearchParams {
+        archive: Some(&archive.api_url),
         status: Some(&status),
         name: Some(&name),
         version: version.as_deref(),
@@ -5660,7 +5917,9 @@ async fn handle_queue_reject(
         ..Default::default()
     };
 
-    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params).await?;
+    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params)
+        .await
+        .map_err(|err| queue_read_permission_error(err, archive, &distro, &series_name))?;
 
     // Find uploads whose display_arches field contains the requested architecture.
     let matching: Vec<_> = uploads
@@ -5682,20 +5941,19 @@ async fn handle_queue_reject(
             .filter_map(|u| u.package_version.clone())
             .collect();
         return Err(lpcli::error::LpError::Other(format!(
-            "Multiple uploads match '{}' [arch={}] with status '{}' in {}/{}: {}. \
+            "Multiple uploads match '{}' [arch={}] with status '{}' in {}: {}. \
              Use --version to select exactly one.",
             name,
             arch,
             status,
-            distro,
-            series_name,
+            archive.target_label(&distro, &series_name),
             versions.join(", "),
         )));
     }
 
     let upload = matching.first().ok_or_else(|| {
         lpcli::error::LpError::NotFound(format!(
-            "No package '{}'{} [arch={}] found in queue with status '{}' for {}/{}.",
+            "No package '{}'{} [arch={}] found in queue with status '{}' for {}.",
             name,
             version
                 .as_ref()
@@ -5703,8 +5961,7 @@ async fn handle_queue_reject(
                 .unwrap_or_default(),
             arch,
             status,
-            distro,
-            series_name,
+            archive.target_label(&distro, &series_name),
         ))
     })?;
 
@@ -5715,34 +5972,17 @@ async fn handle_queue_reject(
     // Call rejectFromQueue.
     queue::reject_from_queue(client, self_link, comment.as_deref())
         .await
-        .map_err(|e| {
-            // Provide a more helpful message for permission errors.
-            if let lpcli::error::LpError::Api {
-                status,
-                ref message,
-            } = e
-                && (status == 401 || status == 403)
-            {
-                return lpcli::error::LpError::Api {
-                    status,
-                    message: format!(
-                        "Permission denied: you do not have queue-admin privileges to reject \
-                         packages for {}/{}. {message}",
-                        distro, series_name,
-                    ),
-                };
-            }
-            e
+        .map_err(|err| {
+            queue_mutation_permission_error(err, "reject", archive, &distro, &series_name)
         })?;
 
     println!(
-        "{} Rejected {} ({}) [{}] in {}/{}.",
+        "{} Rejected {} ({}) [{}] in {}.",
         "✗".red().bold(),
         upload.package_name.as_deref().unwrap_or("?").bold(),
         upload.package_version.as_deref().unwrap_or("?"),
         upload.display_arches.as_deref().unwrap_or("?"),
-        distro,
-        series_name,
+        archive.target_label(&distro, &series_name),
     );
     if let Some(ref c) = comment {
         println!("  Comment: {c}");
@@ -5763,9 +6003,9 @@ async fn handle_queue_info(
     version: Option<String>,
     status: String,
     arch: QueueArch,
+    archive: &QueueArchive,
     distro: String,
     series: Option<String>,
-    primary_archive_only: bool,
 ) -> lpcli::error::Result<()> {
     // Resolve the series (default: current development series).
     let series_name = match series {
@@ -5774,10 +6014,8 @@ async fn handle_queue_info(
     };
 
     // Search for the package in the queue.
-    let archive_url =
-        primary_archive_only.then(|| client.url(&format!("/{distro}/+archive/primary")));
     let params = QueueSearchParams {
-        archive: archive_url.as_deref(),
+        archive: Some(&archive.api_url),
         status: Some(&status),
         name: Some(&name),
         version: version.as_deref(),
@@ -5786,7 +6024,9 @@ async fn handle_queue_info(
         ..Default::default()
     };
 
-    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params).await?;
+    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params)
+        .await
+        .map_err(|err| queue_read_permission_error(err, archive, &distro, &series_name))?;
 
     // Find the first upload whose display_arches field contains the
     // requested architecture.
@@ -5800,7 +6040,7 @@ async fn handle_queue_info(
 
     let upload = upload.ok_or_else(|| {
         lpcli::error::LpError::NotFound(format!(
-            "No package '{}'{} [arch={}] found in queue with status '{}' for {}/{}.",
+            "No package '{}'{} [arch={}] found in queue with status '{}' for {}.",
             name,
             version
                 .as_ref()
@@ -5808,8 +6048,7 @@ async fn handle_queue_info(
                 .unwrap_or_default(),
             arch,
             status,
-            distro,
-            series_name,
+            archive.target_label(&distro, &series_name),
         ))
     })?;
 
@@ -5826,6 +6065,9 @@ async fn handle_queue_info(
         upload.status.as_deref().unwrap_or("?"),
         upload.display_arches.as_deref().unwrap_or("?"),
     );
+    if !archive.label.eq_ignore_ascii_case(&distro) {
+        println!("  Archive:   {}", archive.label);
+    }
     if let Some(component) = &upload.component_name {
         println!("  Component: {component}");
     }
@@ -6103,6 +6345,9 @@ fn is_ubuntu_primary_queue_archive(distro: &str, archive: Option<&str>) -> bool 
         return true;
     };
     let trimmed = archive.trim_matches('/');
+    if trimmed.starts_with("ppa:") {
+        return false;
+    }
     trimmed == "primary"
         || trimmed == "ubuntu/+archive/primary"
         || trimmed == "https://api.launchpad.net/devel/ubuntu/+archive/primary"
@@ -6130,11 +6375,29 @@ fn read_auth_policy(command: &Command, authenticated: bool, public: bool) -> Rea
         | Command::Bug(BugCommand::RemoteBugTrackers { .. }) => Anonymous,
 
         Command::Queue(QueueCommand::Search {
-            distro, archive, ..
-        }) if is_ubuntu_primary_queue_archive(distro, archive.as_deref()) => Anonymous,
+            distro,
+            archive,
+            ppa,
+            ..
+        }) if ppa.is_none() && is_ubuntu_primary_queue_archive(distro, archive.as_deref()) => {
+            Anonymous
+        }
         Command::Queue(
-            QueueCommand::Info { distro, .. } | QueueCommand::Download { distro, .. },
-        ) if distro.eq_ignore_ascii_case("ubuntu") => Anonymous,
+            QueueCommand::Info {
+                distro,
+                archive,
+                ppa,
+                ..
+            }
+            | QueueCommand::Download {
+                distro,
+                archive,
+                ppa,
+                ..
+            },
+        ) if ppa.is_none() && is_ubuntu_primary_queue_archive(distro, archive.as_deref()) => {
+            Anonymous
+        }
 
         // Private-capable reads require auth even when no credentials are stored.
         // Only explicit --public opts into potentially incomplete public results.

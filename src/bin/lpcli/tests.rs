@@ -697,6 +697,66 @@ fn public_mode_conflicts_with_auth_and_rejects_mutations_and_identity() {
         ]),
         ReadAuthPolicy::Anonymous
     );
+    for archive_args in [
+        vec!["--ppa", "owner/test"],
+        vec!["--archive", "ppa:owner/test"],
+        vec!["--archive", "~owner/+archive/ubuntu/test"],
+    ] {
+        let mut args = vec!["lpcli", "queue", "search", "--status", "New"];
+        args.extend(archive_args);
+        assert_eq!(
+            parsed_read_policy(&args),
+            ReadAuthPolicy::Authenticated,
+            "{args:?}"
+        );
+    }
+    for args in [
+        vec![
+            "lpcli",
+            "queue",
+            "info",
+            "--name",
+            "test",
+            "--arch",
+            "source",
+            "--status",
+            "New",
+            "--ppa",
+            "owner/test",
+        ],
+        vec![
+            "lpcli",
+            "queue",
+            "download",
+            "--name",
+            "test",
+            "--arch",
+            "source",
+            "--status",
+            "New",
+            "--ppa",
+            "owner/test",
+        ],
+        vec![
+            "lpcli",
+            "queue",
+            "info",
+            "--name",
+            "test",
+            "--arch",
+            "source",
+            "--status",
+            "New",
+            "--archive",
+            "ppa:owner/test",
+        ],
+    ] {
+        assert_eq!(
+            parsed_read_policy(&args),
+            ReadAuthPolicy::Authenticated,
+            "{args:?}"
+        );
+    }
     for args in [
         vec![
             "lpcli", "queue", "search", "--distro", "Ubuntu", "--status", "New",
@@ -730,6 +790,20 @@ fn public_mode_conflicts_with_auth_and_rejects_mutations_and_identity() {
             "{args:?}"
         );
     }
+    assert_eq!(
+        parsed_read_policy(&[
+            "lpcli",
+            "--public",
+            "queue",
+            "search",
+            "--status",
+            "New",
+            "--ppa",
+            "owner/test",
+        ]),
+        ReadAuthPolicy::Anonymous,
+        "--public explicitly opts into anonymous reads, even for PPAs"
+    );
 }
 
 #[test]
@@ -962,29 +1036,37 @@ async fn metadata_auth_is_not_sent_to_transfers_or_redirected_hosts() {
 }
 
 #[tokio::test]
-async fn queue_info_restricts_archive_only_for_anonymous_reads() {
-    for primary_archive_only in [true, false] {
+async fn queue_info_targets_the_resolved_archive() {
+    for (archive_arg, ppa, signed) in [
+        (None, None, false),
+        (Some("primary"), None, false),
+        (
+            None,
+            Some(PpaRef {
+                owner: "owner".into(),
+                name: "test".into(),
+            }),
+            true,
+        ),
+        (Some("ppa:owner/test"), None, true),
+    ] {
         let mut server = mockito::Server::new_async().await;
-        let query_matcher = if primary_archive_only {
-            mockito::Matcher::AllOf(vec![
-                mockito::Matcher::UrlEncoded("ws.op".into(), "getPackageUploads".into()),
-                mockito::Matcher::UrlEncoded(
-                    "archive".into(),
-                    format!("{}/ubuntu/+archive/primary", server.url()),
-                ),
-            ])
+        let client = mock_read_client(&server, signed);
+        let archive = resolve_queue_archive(&client, "ubuntu", archive_arg, ppa.as_ref()).unwrap();
+        if archive_arg.is_some_and(|value| value.starts_with("ppa:")) || ppa.is_some() {
+            assert_eq!(archive.label, "~owner/test");
         } else {
-            mockito::Matcher::Exact(
-                "ws.op=getPackageUploads&status=New&name=curl&exact_match=true&ws.size=30".into(),
-            )
-        };
+            assert_eq!(archive.label, "ubuntu");
+        }
         let uploads = server
             .mock("GET", "/ubuntu/noble")
-            .match_query(query_matcher)
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getPackageUploads".into()),
+                mockito::Matcher::UrlEncoded("archive".into(), archive.api_url.clone()),
+            ]))
             .with_body(r#"{"entries":[]}"#)
             .create_async()
             .await;
-        let client = mock_read_client(&server, !primary_archive_only);
         let err = handle_queue_info(
             &Display::from_width(100),
             &client,
@@ -992,14 +1074,438 @@ async fn queue_info_restricts_archive_only_for_anonymous_reads() {
             None,
             "New".into(),
             QueueArch::Source,
+            &archive,
             "ubuntu".into(),
             Some("noble".into()),
-            primary_archive_only,
         )
         .await
         .unwrap_err();
         assert!(matches!(err, lpcli::error::LpError::NotFound(_)));
         uploads.assert_async().await;
+    }
+}
+
+#[test]
+fn queue_ppa_references_parse_and_resolve() {
+    let client = LaunchpadClient::new(None).with_base_url("https://api.example.test/devel");
+    let base = "https://api.example.test/devel";
+    let ppa = parse_ppa_ref("my-username/my-ppa").unwrap();
+    assert_eq!(ppa.label(), "~my-username/my-ppa");
+
+    let archive = resolve_queue_archive(&client, "ubuntu", None, Some(&ppa)).unwrap();
+    assert_eq!(
+        archive.api_url,
+        format!("{base}/~my-username/+archive/ubuntu/my-ppa")
+    );
+    assert_eq!(archive.label, "~my-username/my-ppa");
+
+    for archive_arg in [
+        "ppa:my-username/my-ppa",
+        "~my-username/+archive/ubuntu/my-ppa",
+        "https://api.example.test/devel/~my-username/+archive/ubuntu/my-ppa",
+    ] {
+        let archive = resolve_queue_archive(&client, "ubuntu", Some(archive_arg), None).unwrap();
+        assert_eq!(
+            archive.api_url,
+            format!("{base}/~my-username/+archive/ubuntu/my-ppa")
+        );
+        assert_eq!(archive.label, "~my-username/my-ppa", "{archive_arg}");
+    }
+
+    for archive_arg in [
+        None,
+        Some("primary"),
+        Some("ubuntu/+archive/primary"),
+        Some("https://api.example.test/devel/ubuntu/+archive/primary"),
+    ] {
+        let archive = resolve_queue_archive(&client, "ubuntu", archive_arg, None).unwrap();
+        assert_eq!(
+            archive.api_url,
+            format!("{base}/ubuntu/+archive/primary"),
+            "{archive_arg:?}"
+        );
+        assert_eq!(archive.label, "ubuntu", "{archive_arg:?}");
+    }
+
+    let archive = resolve_queue_archive(&client, "ubuntu", Some("partner"), None).unwrap();
+    assert_eq!(archive.api_url, format!("{base}/ubuntu/+archive/partner"));
+    assert_eq!(archive.label, "ubuntu/partner");
+
+    assert!(resolve_queue_archive(&client, "debian", None, Some(&ppa)).is_err());
+    for archive_arg in [
+        "ppa:my-username/my-ppa",
+        "~my-username/+archive/ubuntu/my-ppa",
+        "https://api.example.test/devel/~my-username/+archive/ubuntu/my-ppa",
+    ] {
+        assert!(
+            resolve_queue_archive(&client, "debian", Some(archive_arg), None).is_err(),
+            "{archive_arg}"
+        );
+    }
+    assert!(resolve_queue_archive(&client, "ubuntu", Some("ppa:"), None).is_err());
+    assert!(resolve_queue_archive(&client, "ubuntu", Some("  "), None).is_err());
+}
+
+#[test]
+fn queue_ppa_reference_rejects_invalid_owner_or_name() {
+    for value in [
+        "owner",
+        "owner/",
+        "/name",
+        "owner/a/b",
+        "~owner/name",
+        "owner name/test",
+        "owner/na me",
+        "owner/test?status=Done",
+        "owner/test#fragment",
+        "owner/test&x=1",
+    ] {
+        assert!(parse_ppa_ref(value).is_err(), "{value}");
+    }
+}
+
+#[test]
+fn queue_commands_accept_archive_and_ppa_flags() {
+    for args in [
+        vec![
+            "lpcli",
+            "queue",
+            "search",
+            "--status",
+            "New",
+            "--ppa",
+            "owner/test",
+        ],
+        vec![
+            "lpcli",
+            "queue",
+            "download",
+            "--name",
+            "curl",
+            "--status",
+            "New",
+            "--arch",
+            "source",
+            "--ppa",
+            "owner/test",
+        ],
+        vec![
+            "lpcli",
+            "queue",
+            "info",
+            "--name",
+            "curl",
+            "--status",
+            "New",
+            "--arch",
+            "source",
+            "--ppa",
+            "owner/test",
+        ],
+        vec![
+            "lpcli",
+            "queue",
+            "accept",
+            "--name",
+            "curl",
+            "--arch",
+            "source",
+            "--ppa",
+            "owner/test",
+        ],
+        vec![
+            "lpcli",
+            "queue",
+            "reject",
+            "--name",
+            "curl",
+            "--arch",
+            "source",
+            "--ppa",
+            "owner/test",
+        ],
+    ] {
+        Cli::try_parse_from(&args).unwrap_or_else(|error| panic!("{args:?}: {error}"));
+    }
+
+    for args in [
+        vec![
+            "lpcli",
+            "queue",
+            "search",
+            "--status",
+            "New",
+            "--archive",
+            "primary",
+            "--ppa",
+            "owner/test",
+        ],
+        vec![
+            "lpcli",
+            "queue",
+            "accept",
+            "--name",
+            "curl",
+            "--arch",
+            "source",
+            "--archive",
+            "primary",
+            "--ppa",
+            "owner/test",
+        ],
+        vec![
+            "lpcli", "queue", "search", "--status", "New", "--ppa", "owner",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+    }
+}
+
+fn queue_upload_body(server: &mockito::Server) -> String {
+    serde_json::json!({
+        "entries": [{
+            "self_link": format!("{}/ubuntu/noble/+upload/1", server.url()),
+            "package_name": "curl",
+            "package_version": "8.5.0-2ubuntu10",
+            "display_arches": "source",
+            "status": "Unapproved"
+        }]
+    })
+    .to_string()
+}
+
+fn queue_upload_query(archive: &QueueArchive, status: &str) -> mockito::Matcher {
+    mockito::Matcher::AllOf(vec![
+        mockito::Matcher::UrlEncoded("ws.op".into(), "getPackageUploads".into()),
+        mockito::Matcher::UrlEncoded("archive".into(), archive.api_url.clone()),
+        mockito::Matcher::UrlEncoded("status".into(), status.into()),
+        mockito::Matcher::UrlEncoded("name".into(), "curl".into()),
+        mockito::Matcher::UrlEncoded("exact_match".into(), "true".into()),
+    ])
+}
+
+#[tokio::test]
+async fn queue_search_targets_ppa_archive() {
+    let mut server = mockito::Server::new_async().await;
+    let client = mock_read_client(&server, true);
+    let ppa = parse_ppa_ref("owner/test").unwrap();
+    let archive = resolve_queue_archive(&client, "ubuntu", None, Some(&ppa)).unwrap();
+    let body = queue_upload_body(&server);
+    let uploads = server
+        .mock("GET", "/ubuntu/noble")
+        .match_query(mockito::Matcher::AllOf(vec![
+            mockito::Matcher::UrlEncoded("ws.op".into(), "getPackageUploads".into()),
+            mockito::Matcher::UrlEncoded("archive".into(), archive.api_url.clone()),
+            mockito::Matcher::UrlEncoded("status".into(), "Done".into()),
+            mockito::Matcher::UrlEncoded("name".into(), "curl".into()),
+            mockito::Matcher::UrlEncoded("ws.size".into(), "30".into()),
+        ]))
+        .with_body(body)
+        .create_async()
+        .await;
+
+    handle_queue_search(
+        &Display::from_width(100),
+        &client,
+        None,
+        Some("Done".into()),
+        Some("curl".into()),
+        None,
+        false,
+        &archive,
+        "ubuntu".into(),
+        Some("noble".into()),
+        30,
+    )
+    .await
+    .unwrap();
+
+    uploads.assert_async().await;
+}
+
+#[tokio::test]
+async fn queue_search_reports_permission_errors_with_archive() {
+    let mut server = mockito::Server::new_async().await;
+    let client = mock_read_client(&server, true);
+    let ppa = parse_ppa_ref("owner/test").unwrap();
+    let archive = resolve_queue_archive(&client, "ubuntu", None, Some(&ppa)).unwrap();
+    let uploads = server
+        .mock("GET", "/ubuntu/noble")
+        .match_query(mockito::Matcher::AllOf(vec![
+            mockito::Matcher::UrlEncoded("ws.op".into(), "getPackageUploads".into()),
+            mockito::Matcher::UrlEncoded("archive".into(), archive.api_url.clone()),
+        ]))
+        .with_status(403)
+        .with_body("Forbidden")
+        .create_async()
+        .await;
+
+    match handle_queue_search(
+        &Display::from_width(100),
+        &client,
+        None,
+        Some("Done".into()),
+        None,
+        None,
+        false,
+        &archive,
+        "ubuntu".into(),
+        Some("noble".into()),
+        30,
+    )
+    .await
+    .unwrap_err()
+    {
+        lpcli::error::LpError::Unauthorized(message) => {
+            assert!(message.contains("permission to read"), "{message}");
+            assert!(message.contains("~owner/test"), "{message}");
+            assert!(message.contains("ubuntu/noble"), "{message}");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    uploads.assert_async().await;
+}
+
+#[tokio::test]
+async fn queue_accept_targets_ppa_archive() {
+    let mut server = mockito::Server::new_async().await;
+    let client = mock_read_client(&server, true);
+    let ppa = parse_ppa_ref("owner/test").unwrap();
+    let archive = resolve_queue_archive(&client, "ubuntu", None, Some(&ppa)).unwrap();
+    let body = queue_upload_body(&server);
+    let uploads = server
+        .mock("GET", "/ubuntu/noble")
+        .match_query(queue_upload_query(&archive, "Unapproved"))
+        .with_body(body)
+        .create_async()
+        .await;
+    let accept = server
+        .mock("POST", "/ubuntu/noble/+upload/1")
+        .match_body(mockito::Matcher::UrlEncoded(
+            "ws.op".into(),
+            "acceptFromQueue".into(),
+        ))
+        .with_status(200)
+        .create_async()
+        .await;
+
+    handle_queue_accept(
+        &client,
+        "curl".into(),
+        None,
+        "Unapproved".into(),
+        QueueArch::Source,
+        &archive,
+        "ubuntu".into(),
+        Some("noble".into()),
+    )
+    .await
+    .unwrap();
+
+    uploads.assert_async().await;
+    accept.assert_async().await;
+}
+
+#[tokio::test]
+async fn queue_reject_targets_ppa_archive_and_sends_comment() {
+    let mut server = mockito::Server::new_async().await;
+    let client = mock_read_client(&server, true);
+    let ppa = parse_ppa_ref("owner/test").unwrap();
+    let archive = resolve_queue_archive(&client, "ubuntu", None, Some(&ppa)).unwrap();
+    let body = queue_upload_body(&server);
+    let uploads = server
+        .mock("GET", "/ubuntu/noble")
+        .match_query(queue_upload_query(&archive, "Unapproved"))
+        .with_body(body)
+        .create_async()
+        .await;
+    let reject = server
+        .mock("POST", "/ubuntu/noble/+upload/1")
+        .match_body(mockito::Matcher::AllOf(vec![
+            mockito::Matcher::UrlEncoded("ws.op".into(), "rejectFromQueue".into()),
+            mockito::Matcher::UrlEncoded("comment".into(), "Needs a bug fix.".into()),
+        ]))
+        .with_status(200)
+        .create_async()
+        .await;
+
+    handle_queue_reject(
+        &client,
+        "curl".into(),
+        None,
+        "Unapproved".into(),
+        QueueArch::Source,
+        &archive,
+        Some("Needs a bug fix.".into()),
+        "ubuntu".into(),
+        Some("noble".into()),
+    )
+    .await
+    .unwrap();
+
+    uploads.assert_async().await;
+    reject.assert_async().await;
+}
+
+#[tokio::test]
+async fn queue_mutations_report_permission_errors_with_archive() {
+    for (action, status) in [("accept", 403u16), ("reject", 401u16)] {
+        let mut server = mockito::Server::new_async().await;
+        let client = mock_read_client(&server, true);
+        let ppa = parse_ppa_ref("owner/test").unwrap();
+        let archive = resolve_queue_archive(&client, "ubuntu", None, Some(&ppa)).unwrap();
+        let body = queue_upload_body(&server);
+        let uploads = server
+            .mock("GET", "/ubuntu/noble")
+            .match_query(queue_upload_query(&archive, "Unapproved"))
+            .with_body(body)
+            .create_async()
+            .await;
+        let mutation = server
+            .mock("POST", "/ubuntu/noble/+upload/1")
+            .with_status(status as usize)
+            .with_body("Forbidden")
+            .create_async()
+            .await;
+
+        let result = if action == "accept" {
+            handle_queue_accept(
+                &client,
+                "curl".into(),
+                None,
+                "Unapproved".into(),
+                QueueArch::Source,
+                &archive,
+                "ubuntu".into(),
+                Some("noble".into()),
+            )
+            .await
+        } else {
+            handle_queue_reject(
+                &client,
+                "curl".into(),
+                None,
+                "Unapproved".into(),
+                QueueArch::Source,
+                &archive,
+                None,
+                "ubuntu".into(),
+                Some("noble".into()),
+            )
+            .await
+        };
+
+        match result.unwrap_err() {
+            lpcli::error::LpError::Unauthorized(message) => {
+                assert!(message.contains("queue-admin permission"), "{message}");
+                assert!(message.contains(action), "{message}");
+                assert!(message.contains("~owner/test"), "{message}");
+                assert!(message.contains("ubuntu/noble"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        uploads.assert_async().await;
+        mutation.assert_async().await;
     }
 }
 
