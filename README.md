@@ -706,6 +706,32 @@ lpcli access-token revoke --token-url "https://api.launchpad.net/devel/launchpad
 
 ---
 
+### Agent Skills
+
+lpcli embeds its agent skill documentation (`SKILL.md`) in the binary at build
+time, so the full agent-facing usage guide is available from the binary alone:
+no network access, authentication, or Launchpad API client is required.
+
+```bash
+# Print the skill documentation (canonical command)
+lpcli skills
+
+# `skill` is a visible alias with identical output
+lpcli skill
+```
+
+The output is byte-for-byte identical to the `SKILL.md` in the repository;
+the command takes no flags or subcommands. To save the documentation into a
+skill directory for your agent tooling (adjust the destination to whatever
+skill directory your tool reads), redirect the output in your shell:
+
+```
+mkdir -p ~/.local/share/agent-skills/lpcli
+lpcli skills > ~/.local/share/agent-skills/lpcli/SKILL.md
+```
+
+---
+
 ## Using lpcli as a Rust Library
 
 Add it to your `Cargo.toml`:
