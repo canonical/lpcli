@@ -636,6 +636,17 @@ fn public_distribution_reads_do_not_require_auth() {
     }
 }
 
+/// Start a mock server outside mockito's shared server pool.
+///
+/// `tokio::try_join!` cancels sibling requests when one fails, but a
+/// cancelled request can still reach the server afterwards. Pooled servers
+/// are reset and reused (by a later loop iteration or another test), so such
+/// a late request would be counted against an unrelated mock. A dedicated
+/// server keeps its state, and any late requests, isolated.
+async fn isolated_mock_server() -> mockito::Server {
+    mockito::Server::new_with_opts_async(mockito::ServerOpts::default()).await
+}
+
 fn mock_read_client(server: &mockito::Server, signed: bool) -> LaunchpadClient {
     LaunchpadClient::new(signed.then(|| auth::Credentials::new("lpcli", "test-token", "secret")))
         .with_base_url(server.url())
@@ -882,7 +893,9 @@ async fn private_capable_metadata_is_signed_from_the_first_request() {
 #[tokio::test]
 async fn public_comments_do_not_load_auth_or_retry_on_denial() {
     for status in [200, 401, 403, 404, 500] {
-        let mut server = mockito::Server::new_async().await;
+        // Failing statuses cancel the concurrent attachments request, which
+        // may arrive late; see `isolated_mock_server`.
+        let mut server = isolated_mock_server().await;
         let comments = server
             .mock("GET", "/bugs/59/messages")
             .match_header("authorization", mockito::Matcher::Missing)
@@ -912,7 +925,9 @@ async fn public_comments_do_not_load_auth_or_retry_on_denial() {
 
 #[tokio::test]
 async fn failed_page_exposes_no_partial_data_and_is_not_replayed() {
-    let mut server = mockito::Server::new_async().await;
+    // The failed page cancels the concurrent attachments request, which may
+    // arrive late; see `isolated_mock_server`.
+    let mut server = isolated_mock_server().await;
     let first = server.mock("GET", "/bugs/59/messages")
         .with_body(serde_json::json!({"entries":[{"content":"must not render"}], "next_collection_link":format!("{}/next",server.url())}).to_string()).create_async().await;
     let next = server
