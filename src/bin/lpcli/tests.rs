@@ -3663,3 +3663,25 @@ fn read_description_from_reader_rejects_non_utf8() {
         .expect_err("non-UTF-8 input should be an error");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }
+
+// skills command (embedded agent skill documentation)
+// -----------------------------------------------------------------------
+
+/// Both root help forms surface the embedded agent skills command.
+#[test]
+fn root_help_lists_agent_skills_command() {
+    for args in [vec!["lpcli", "--help"], vec!["lpcli", "help"]] {
+        let err = Cli::try_parse_from(&args).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp, "{args:?}");
+        let help = err
+            .to_string()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(help.contains("skills"), "{args:?}: {help}");
+        assert!(
+            help.contains("Agent Skills (coding agents should read this first)"),
+            "{args:?}: {help}"
+        );
+    }
+}

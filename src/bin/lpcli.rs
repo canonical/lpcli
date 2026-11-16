@@ -3,6 +3,7 @@
 //! Parse command-line arguments with `clap` and dispatch to the `lpcli` library.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -323,6 +324,10 @@ struct Cli {
 enum Command {
     /// Check authentication status and verify the Launchpad server is reachable.
     Status,
+
+    /// Agent Skills (coding agents should read this first).
+    #[command(visible_alias = "skill")]
+    Skills,
 
     /// Authenticate with Launchpad (OAuth login).
     Login(LoginArgs),
@@ -2171,6 +2176,26 @@ enum AccessTokenCommand {
 }
 
 // ---------------------------------------------------------------------------
+// Skills command (embedded agent skill documentation)
+// ---------------------------------------------------------------------------
+
+/// The agent skill documentation (the repository-root `SKILL.md`), embedded in
+/// the binary at compile time.
+const SKILL_DOC: &str = include_str!("../../SKILL.md");
+
+/// Print the embedded agent skill documentation to stdout, byte for byte.
+///
+/// No authentication, network access, or Launchpad API client is involved:
+/// the documentation ships inside the binary itself.
+fn handle_skills() -> lpcli::error::Result<()> {
+    // Write the exact embedded bytes: no added newline, no terminal
+    // formatting.  I/O failures (e.g. a closed pipe) propagate through the
+    // standard error path instead of panicking.
+    std::io::stdout().lock().write_all(SKILL_DOC.as_bytes())?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -2330,6 +2355,7 @@ async fn run_command(
         Command::Snap(cmd) => handle_snap(cmd, &display, policy, cache_timeout).await?,
         Command::Queue(cmd) => handle_queue(cmd, &display, policy, cache_timeout).await?,
         Command::AccessToken(cmd) => handle_access_token(cmd, &display, cache_timeout).await?,
+        Command::Skills => handle_skills()?,
     }
 
     Ok(())
