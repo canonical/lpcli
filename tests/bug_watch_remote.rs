@@ -742,6 +742,149 @@ async fn link_bug_task_remote_propagates_task_patch_failure() {
     patch_task_mock.assert_async().await;
 }
 
+#[tokio::test]
+async fn add_bug_watch_read_back_failures_name_the_created_watch() {
+    // The addWatch POST succeeds, so the watch exists; a failed or malformed
+    // read-back must keep the underlying error and identify the watch for
+    // web-UI cleanup instead of reporting a bare API/JSON error.
+    for (status, body, fragment) in [
+        (403, "forbidden", "403"),
+        (500, "server exploded", "server exploded"),
+        (200, "{not json", "JSON error"),
+    ] {
+        let mut server = Server::new_async().await;
+        let watch_url = format!("{}/bugs/42/+watch/101", server.url());
+        let add_watch = server
+            .mock("POST", "/bugs/42")
+            .with_status(201)
+            .with_header("Location", &watch_url)
+            .expect(1)
+            .create_async()
+            .await;
+        let read_back = server
+            .mock("GET", "/bugs/42/+watch/101")
+            .with_status(status)
+            .with_body(body)
+            .expect(1)
+            .create_async()
+            .await;
+        let client = LaunchpadClient::new(None).with_base_url(server.url());
+        let tracker_url = format!("{}/bugs/bugtrackers/debbugs", server.url());
+        match bugs::add_bug_watch(&client, 42, &tracker_url, "1150409").await {
+            Err(LpError::Other(msg)) => {
+                for expected in [
+                    fragment,
+                    watch_url.as_str(),
+                    "Watch #101",
+                    "may remain",
+                    "bugs.launchpad.net/bugs/42/+watch/101",
+                    "lpcli bug watches -b 42",
+                ] {
+                    assert!(msg.contains(expected), "missing '{expected}' in: {msg}");
+                }
+            }
+            other => panic!("Expected cleanup guidance for {status}, got {other:?}"),
+        }
+        add_watch.assert_async().await;
+        read_back.assert_async().await;
+    }
+}
+
+#[tokio::test]
+async fn link_bug_task_remote_watch_read_back_failure_does_not_patch_task() {
+    // The linking workflow propagates the enriched read-back error and never
+    // patches the task with an unconfirmed watch.
+    let mut server = Server::new_async().await;
+    let get_task = mock_task_get(&mut server).await;
+    let tracker = server
+        .mock("GET", "/bugs/bugtrackers?ws.op=getByName&name=debbugs")
+        .with_body(bug_tracker_json(
+            &server.url(),
+            "debbugs",
+            "Debian Bug tracker",
+        ))
+        .create_async()
+        .await;
+    let list_watches = server
+        .mock("GET", "/bugs/42/bug_watches")
+        .with_body(r#"{"entries": [], "total_size": 0, "start": 0}"#)
+        .create_async()
+        .await;
+    let add_watch = server
+        .mock("POST", "/bugs/42")
+        .with_status(201)
+        .with_header("Location", &format!("{}/bugs/42/+watch/101", server.url()))
+        .expect(1)
+        .create_async()
+        .await;
+    let read_back = server
+        .mock("GET", "/bugs/42/+watch/101")
+        .with_status(500)
+        .with_body("read failed")
+        .expect(1)
+        .create_async()
+        .await;
+    let patch_task = server
+        .mock("PATCH", "/debian/+source/curl/+bug/42")
+        .expect(0)
+        .create_async()
+        .await;
+    let client = LaunchpadClient::new(None).with_base_url(server.url());
+    let task_url = format!("{}/debian/+source/curl/+bug/42", server.url());
+    match bugs::link_bug_task_remote(&client, 42, &task_url, "debbugs", "1150409").await {
+        Err(LpError::Other(msg)) => assert!(
+            msg.contains("read failed") && msg.contains("Watch #101") && msg.contains("may remain"),
+            "unexpected message: {msg}"
+        ),
+        other => panic!("Expected cleanup guidance, got {other:?}"),
+    }
+    for mock in [
+        get_task,
+        tracker,
+        list_watches,
+        add_watch,
+        read_back,
+        patch_task,
+    ] {
+        mock.assert_async().await;
+    }
+}
+
+#[tokio::test]
+async fn add_bug_watch_foreign_location_is_not_fetched_with_credentials() {
+    let mut api = Server::new_async().await;
+    let mut foreign = Server::new_async().await;
+    let add_watch = api
+        .mock("POST", "/bugs/42")
+        .with_status(201)
+        .with_header("Location", &format!("{}/bugs/42/+watch/101", foreign.url()))
+        .expect(1)
+        .create_async()
+        .await;
+    let foreign_request = foreign
+        .mock("GET", mockito::Matcher::Any)
+        .expect(0)
+        .create_async()
+        .await;
+    let credentials = lpcli::auth::Credentials::new("lpcli", "token", "secret");
+    let client = LaunchpadClient::new(Some(credentials)).with_base_url(api.url());
+    let tracker_url = format!("{}/bugs/bugtrackers/debbugs", api.url());
+    match bugs::add_bug_watch(&client, 42, &tracker_url, "1150409").await {
+        Err(LpError::Other(msg)) => {
+            assert!(
+                msg.contains("not on the configured API origin")
+                    && msg.contains("may have been created")
+                    && msg.contains("lpcli bug watches -b 42"),
+                "unexpected message: {msg}"
+            );
+            assert!(!msg.contains("secret"), "credentials leaked into: {msg}");
+        }
+        other => panic!("Expected an untrusted-location error, got {other:?}"),
+    }
+    add_watch.assert_async().await;
+    foreign_request.assert_async().await;
+}
+
 // ---------------------------------------------------------------------------
 // Bug tracker registration (ensureBugTracker) and the GitHub shorthand
 // ---------------------------------------------------------------------------
@@ -1053,6 +1196,74 @@ async fn ensure_bug_tracker_creates_tracker_via_location() {
 
 #[rustfmt::skip]
 #[tokio::test]
+async fn ensure_bug_tracker_foreign_location_is_not_fetched_with_credentials() {
+    // Regression test: ensureBugTracker's Location used to be fetched without
+    // an origin check, so a classic client would sign a request to it.
+    let mut api = Server::new_async().await;
+    let mut foreign = Server::new_async().await;
+    let base_url = "https://bugs.example.org/trac/proj";
+    let preflight = mock_query_by_base_url(&mut api, base_url, "null", 1).await;
+    let post = api
+        .mock("POST", "/bugs/bugtrackers")
+        .with_status(201)
+        .with_header("Location", &format!("{}/bugs/bugtrackers/my-tracker", foreign.url()))
+        .expect(1)
+        .create_async()
+        .await;
+    let foreign_request = foreign.mock("GET", mockito::Matcher::Any).expect(0).create_async().await;
+    let credentials = lpcli::auth::Credentials::new("lpcli", "token", "secret");
+    let client = LaunchpadClient::new(Some(credentials)).with_base_url(api.url());
+    match bugs::ensure_bug_tracker(&client, &ensure_params(base_url, "Trac", None)).await {
+        Err(LpError::Other(msg)) => {
+            assert!(
+                msg.contains("not on the configured API origin")
+                    && msg.contains("may have been created")
+                    && msg.contains("remote-bug-trackers --search"),
+                "unexpected message: {msg}"
+            );
+            assert!(!msg.contains("secret"), "credentials leaked into: {msg}");
+        }
+        other => panic!("Expected an untrusted-location error, got {other:?}"),
+    }
+    assert_all(&[preflight, post, foreign_request]).await;
+}
+
+#[rustfmt::skip]
+#[tokio::test]
+async fn ensure_bug_tracker_read_back_failure_reports_possible_creation() {
+    for (status, body, fragment) in [(500, "read failed", "read failed"), (200, "{not json", "JSON error")] {
+        let mut server = Server::new_async().await;
+        let base = server.url();
+        let base_url = "https://bugs.example.org/trac/proj";
+        let preflight = mock_query_by_base_url(&mut server, base_url, "null", 1).await;
+        let post = server
+            .mock("POST", "/bugs/bugtrackers")
+            .with_status(201)
+            .with_header("Location", &format!("{base}/bugs/bugtrackers/my-tracker"))
+            .expect(1)
+            .create_async()
+            .await;
+        let read_back = server
+            .mock("GET", "/bugs/bugtrackers/my-tracker")
+            .with_status(status)
+            .with_body(body)
+            .expect(1)
+            .create_async()
+            .await;
+        match bugs::ensure_bug_tracker(&client_for(&server), &ensure_params(base_url, "Trac", None)).await {
+            Err(LpError::Other(msg)) => {
+                for expected in [fragment, "/bugs/bugtrackers/my-tracker", "may have been created", base_url] {
+                    assert!(msg.contains(expected), "missing '{expected}' in: {msg}");
+                }
+            }
+            other => panic!("Expected possible-creation guidance, got {other:?}"),
+        }
+        assert_all(&[preflight, post, read_back]).await;
+    }
+}
+
+#[rustfmt::skip]
+#[tokio::test]
 async fn ensure_bug_tracker_reuses_existing_tracker_without_posting() {
     // The preflight finds a tracker for this base URL and is answered
     // without a mutation-capable POST; the *returned* entry is
@@ -1166,7 +1377,10 @@ async fn ensure_bug_tracker_propagates_api_errors_without_retry() {
         .await;
     let result = bugs::ensure_bug_tracker(&client_for(&server), &ensure_params("https://bugs.example.org/trac/proj", "Trac", None)).await;
     match result {
-        Err(error) => assert!(error.to_string().contains("Location"), "missing-Location must propagate: {error}"),
+        Err(error) => assert!(
+            error.to_string().contains("Location") && error.to_string().contains("may have been created"),
+            "missing-Location must propagate with recovery guidance: {error}"
+        ),
         Ok(outcome) => panic!("a body-shaped reply must not be success: {outcome:?}"),
     }
     assert_all(&[preflight, post]).await;

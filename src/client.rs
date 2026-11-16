@@ -401,7 +401,17 @@ impl LaunchpadClient {
     /// from a successful response.
     ///
     /// Use this for Launchpad operations that return `201 Created` with an
-    /// empty body and provide the created resource URL in `Location`.
+    /// empty body and provide the created resource URL in `Location`. The
+    /// location is resolved against the response URL and must be on the
+    /// configured API origin before it is returned, because callers fetch it
+    /// with this credential-bearing client.
+    ///
+    /// # Errors
+    ///
+    /// Besides HTTP status errors, returns [`LpError::Other`] when a
+    /// successful response has no valid `Location` header or reports a
+    /// location outside the configured API origin. The request may already
+    /// have succeeded in either case.
     pub async fn post_created_location(
         &self,
         path: &str,
@@ -813,6 +823,19 @@ impl LaunchpadClient {
 
     /// Like [`handle_response_ok`] but returns the `Location` header value on
     /// success.
+    ///
+    /// Callers fetch the returned location with this client, which signs
+    /// requests with any stored credentials. The location is therefore
+    /// resolved against the response URL and rejected unless it is on the
+    /// configured API origin (exact scheme, host and effective port), so a
+    /// foreign `Location` can never receive Launchpad credentials.
+    ///
+    /// # Errors
+    ///
+    /// Besides HTTP status errors, returns [`LpError::Other`] when a
+    /// successful response has no valid `Location` header, or when the
+    /// location is outside the configured API origin. In both cases the
+    /// request itself may already have succeeded.
     pub(crate) async fn handle_created_location(
         &self,
         mut resp: reqwest::Response,
@@ -869,11 +892,36 @@ impl LaunchpadClient {
             .and_then(|value| value.to_str().ok())
             .ok_or_else(|| {
                 LpError::Other(
-                    "Launchpad response did not include a valid Location header".to_string(),
+                    "Launchpad response did not include a valid Location header. The \
+                     request may already have succeeded; verify the result on Launchpad \
+                     before retrying."
+                        .to_string(),
                 )
             })?;
 
-        Ok(location.to_string())
+        self.trusted_created_location(resp.url(), location)
+    }
+
+    /// Resolve a created-resource `location` against the URL of the response
+    /// that carried it, and require the result to be on the configured API
+    /// origin before any caller fetches it with credentials.
+    fn trusted_created_location(&self, response_url: &url::Url, location: &str) -> Result<String> {
+        let resolved = response_url
+            .join(location)
+            .ok()
+            .filter(|resolved| same_origin(resolved.as_str(), &self.base_url));
+        resolved.map(String::from).ok_or_else(|| {
+            let api_origin = url::Url::parse(&self.base_url)
+                .map(|base| base.origin().ascii_serialization())
+                .unwrap_or_else(|_| self.base_url.clone());
+            LpError::Other(format!(
+                "Launchpad reported the created resource at '{location}', which is not \
+                 on the configured API origin '{api_origin}'. It was not fetched, \
+                 because requests from this client carry Launchpad credentials. The \
+                 request may already have succeeded; verify the result on Launchpad \
+                 before retrying."
+            ))
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -1563,6 +1611,89 @@ mod tests {
         assert!(!same_origin("https://launchpadlibrarian.net/1/file", base));
         assert!(!same_origin("http://api.launchpad.net/devel", base));
         assert!(!same_origin("not a url", base));
+    }
+
+    #[test]
+    fn created_locations_are_resolved_and_kept_on_the_api_origin() {
+        let client = LaunchpadClient::new(None).with_base_url("https://api.launchpad.net/devel");
+        let response = url::Url::parse("https://api.launchpad.net/devel/bugs/42").unwrap();
+        for (location, expected) in [
+            (
+                "https://api.launchpad.net/devel/bugs/42/+watch/7",
+                "https://api.launchpad.net/devel/bugs/42/+watch/7",
+            ),
+            (
+                "https://api.launchpad.net:443/devel/bugs/42/+watch/7",
+                "https://api.launchpad.net/devel/bugs/42/+watch/7",
+            ),
+            (
+                "/devel/bugs/42/+watch/7",
+                "https://api.launchpad.net/devel/bugs/42/+watch/7",
+            ),
+            (
+                "42/+watch/7",
+                "https://api.launchpad.net/devel/bugs/42/+watch/7",
+            ),
+        ] {
+            assert_eq!(
+                client
+                    .trusted_created_location(&response, location)
+                    .unwrap(),
+                expected,
+                "location '{location}'"
+            );
+        }
+        for foreign in [
+            "https://evil.example/bugs/42/+watch/7",
+            "https://api.launchpad.net.evil.example/devel/bugs/42/+watch/7",
+            "http://api.launchpad.net/devel/bugs/42/+watch/7",
+            "https://api.launchpad.net:8443/devel/bugs/42/+watch/7",
+            "//evil.example/bugs/42/+watch/7",
+            "ftp://api.launchpad.net/devel/bugs/42",
+            "https://[::1",
+        ] {
+            match client.trusted_created_location(&response, foreign) {
+                Err(LpError::Other(message)) => assert!(
+                    message.contains("not on the configured API origin")
+                        && message.contains("may already have succeeded"),
+                    "unexpected message for '{foreign}': {message}"
+                ),
+                other => panic!("'{foreign}' must be rejected, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn foreign_created_location_is_never_signed_or_fetched() {
+        use crate::auth::Credentials;
+        let mut api = mockito::Server::new_async().await;
+        let mut foreign = mockito::Server::new_async().await;
+        let create = api
+            .mock("POST", "/bugs/42")
+            .with_status(201)
+            .with_header("location", &format!("{}/bugs/42/+watch/7", foreign.url()))
+            .expect(1)
+            .create_async()
+            .await;
+        let foreign_request = foreign
+            .mock("GET", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let client = LaunchpadClient::new(Some(Credentials::new("lpcli", "token", "secret")))
+            .with_base_url(api.url());
+        let params = HashMap::from([("ws.op", "addWatch")]);
+        let error = client
+            .post_created_location("/bugs/42", &params)
+            .await
+            .expect_err("a foreign Location must be rejected");
+        assert!(
+            matches!(&error, LpError::Other(message) if message.contains("not on the configured API origin")),
+            "unexpected error: {error:?}"
+        );
+        assert!(!error.to_string().contains("secret"));
+        create.assert_async().await;
+        foreign_request.assert_async().await;
     }
 
     #[test]

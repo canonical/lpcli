@@ -2645,6 +2645,7 @@ fn cli_link_remote_aliases() {
         ];
         let cli = Cli::try_parse_from(full).expect("CLI parsing failed for alias");
         let Command::Bug(BugCommand::LinkRemote {
+            bug_id,
             bug_tracker,
             remote_bug,
             github,
@@ -2653,6 +2654,7 @@ fn cli_link_remote_aliases() {
         else {
             panic!("Expected LinkRemote for alias {alias}");
         };
+        assert_eq!(bug_id, 42, "alias {alias}");
         assert_eq!(bug_tracker.as_deref(), Some("debbugs"));
         assert_eq!(remote_bug.as_deref(), Some("12345"));
         assert!(github.is_none(), "explicit form must not set --github");
@@ -3265,6 +3267,9 @@ fn resolve_tracker_create_github_host_rules() {
         "https://user@github.com/canonical/apport/issues",
         "https://user:pass@github.com/canonical/apport/issues",
         "https://github.com:8443/canonical/apport/issues",
+        "https://github.com:443/canonical/apport/issues",
+        "https://github.com:/canonical/apport/issues",
+        "https:github.com/canonical/apport/issues",
         "https://github.com//canonical/apport/issues",
     ] {
         let inferred = resolve_tracker_create(base_url, None, None)
@@ -3438,6 +3443,24 @@ fn find_task_to_link_without_selector_auto_links_single_task() {
         }
         other => panic!("Expected the ambiguous-selection error, got {other:?}"),
     }
+    // Regression test: a sole series-less task must not be guessed when no
+    // selector was given (here Debian would previously have been chosen).
+    let mixed = vec![
+        task("apport (Debian)", "/debian/+source/apport"),
+        task("apport (Ubuntu Noble)", "/ubuntu/noble/+source/apport"),
+    ];
+    match find_task_to_link(&mixed, 2174521, &TaskLinkSelector::default()) {
+        Err(lpcli::error::LpError::Other(msg)) => {
+            for expected in ["Multiple matching tasks", "apport (Debian)", "apport (Ubuntu Noble)", "No task was selected or modified", "--task-url"] {
+                assert!(msg.contains(expected), "missing '{expected}' in: {msg}");
+            }
+        }
+        other => panic!("Expected the ambiguous-selection error, got {other:?}"),
+    }
+    // An explicit target keeps the documented series-less preference.
+    let selected = TaskLinkSelector { target: Some("apport".to_string()), ..Default::default() };
+    let found = find_task_to_link(&mixed, 2174521, &selected).expect("the target narrows the candidates");
+    assert_eq!(found.bug_target_display_name.as_deref(), Some("apport (Debian)"));
 }
 
 // -----------------------------------------------------------------------

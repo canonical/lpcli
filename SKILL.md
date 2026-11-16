@@ -283,7 +283,11 @@ lpcli bug watches -b 2174521
 ```
 
 - Name the task: `-t` (plus `-p` for a source-package task in a distribution)
-  or `-u/--task-url`; selector-less linking succeeds only for a single match.
+  or `-u/--task-url`. Without a selector, linking succeeds only when the bug
+  has exactly one task. When `-t`/`-p` match several tasks and `-s` is
+  omitted, a single series-less (distribution-level or upstream) task is
+  preferred; pass `-s` or `-u` to link a release task. Run
+  `lpcli bug tasks -b 2174521` first to check which task will change.
   `--github "OWNER/REPO#N"` takes a plain numeric N (issues and PRs share one
   numbering sequence) and avoids the legacy mis-typed `github-issues` tracker.
 - Expected watch URL: https://github.com/canonical/apport/issues/658

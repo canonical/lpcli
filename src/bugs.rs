@@ -862,6 +862,16 @@ pub async fn get_bug_tracker(client: &LaunchpadClient, tracker_url: &str) -> Res
 /// `remote_bug` is the bug number or identifier in the remote tracker (e.g. `"1150409"`).
 ///
 /// Returns the newly created [`BugWatch`].
+///
+/// # Errors
+///
+/// API failures of the creation request propagate unchanged. Creation is a
+/// POST followed by a GET of the reported location, and bug watches cannot
+/// be deleted through the REST API, so failures after Launchpad accepted the
+/// POST are reported as [`LpError::Other`] with recovery guidance: an
+/// untrusted or missing `Location`, or a failed or malformed read-back (which
+/// also names the watch and its web-UI page). The original error text is
+/// preserved in the message.
 pub async fn add_bug_watch(
     client: &LaunchpadClient,
     bug_id: u64,
@@ -876,8 +886,35 @@ pub async fn add_bug_watch(
     params.insert("remote_bug", clean_remote);
     let location = client
         .post_created_location(&format!("/bugs/{bug_id}"), &params)
-        .await?;
-    client.get_url(&location).await
+        .await
+        .map_err(|error| match error {
+            // `LpError::Other` is only produced here after the POST succeeded
+            // (a missing or untrusted `Location`), so the watch may exist.
+            LpError::Other(message) => LpError::Other(format!(
+                "{message} The bug watch may have been created on bug #{bug_id}; check \
+                 `lpcli bug watches -b {bug_id}` before retrying."
+            )),
+            other => other,
+        })?;
+    client
+        .get_url(&location)
+        .await
+        .map_err(|error| created_watch_read_failure(bug_id, &location, error))
+}
+
+/// Build the error for a bug watch that Launchpad created but that could not
+/// be read back: the watch exists and can only be deleted in the web UI, so
+/// the error names it while preserving the original failure.
+fn created_watch_read_failure(bug_id: u64, location: &str, error: LpError) -> LpError {
+    let watch = BugWatch {
+        self_link: Some(location.to_string()),
+        ..Default::default()
+    };
+    LpError::Other(format!(
+        "Launchpad created a bug watch at '{location}', but it could not be read \
+         back: {error}. {}",
+        watch_cleanup_guidance(bug_id, &watch)
+    ))
 }
 
 /// Fetch all bug watches associated with a bug.
@@ -1156,7 +1193,7 @@ pub fn parse_github_bug_ref(input: &str) -> Result<GitHubBugRef> {
         Ok(url) => url,
         Err(_) => return Err(malformed()),
     };
-    if !strict_github_url(&url) {
+    if !strict_github_url(trimmed, &url) {
         return Err(malformed());
     }
     let segments = match url_path_segments(url.path()) {
@@ -1212,7 +1249,7 @@ pub fn validate_github_watch_url(watch: &BugWatch, github_ref: &GitHubBugRef) ->
             "Bug watch URL '{url_text}' is not a valid URL: {e}"
         ))
     })?;
-    if !strict_github_url(&url) {
+    if !strict_github_url(url_text.trim(), &url) {
         return Err(mismatch());
     }
     let segments = url_path_segments(url.path()).ok_or_else(mismatch)?;
@@ -1321,9 +1358,13 @@ pub struct EnsureBugTrackerOutcome {
 /// Returns [`LpError::Other`] for an empty `base_url`, for an explicit
 /// `name` that is already used by a tracker with a different base URL, or
 /// when the returned tracker does not match the request (the tracker is
-/// never modified in that case). API failures (including permission errors —
-/// tracker registration requires an authenticated Launchpad account) are
-/// propagated unchanged.
+/// never modified in that case). API failures of the lookups and of the
+/// registration request (including permission errors — tracker registration
+/// requires an authenticated Launchpad account) are propagated unchanged.
+/// Failures after Launchpad accepted the registration (an untrusted or
+/// missing `Location`, or a failed or malformed read-back) are reported as
+/// [`LpError::Other`], preserving the original error text, because the
+/// tracker may already exist.
 pub async fn ensure_bug_tracker(
     client: &LaunchpadClient,
     params: &EnsureBugTrackerParams<'_>,
@@ -1392,13 +1433,41 @@ pub async fn ensure_bug_tracker(
         form.push(("summary", summary));
     }
 
-    let location = client.post_pairs_url_created_location(&url, &form).await?;
-    let tracker: BugTracker = client.get_url(&location).await?;
+    let location = client
+        .post_pairs_url_created_location(&url, &form)
+        .await
+        .map_err(|error| match error {
+            // `LpError::Other` is only produced here after the POST succeeded
+            // (a missing or untrusted `Location`), so the tracker may exist.
+            LpError::Other(message) => LpError::Other(format!(
+                "{message} {}",
+                unconfirmed_tracker_guidance(base_url)
+            )),
+            other => other,
+        })?;
+    let tracker: BugTracker = client.get_url(&location).await.map_err(|error| {
+        LpError::Other(format!(
+            "Launchpad accepted the bug tracker registration and reported it at \
+             '{location}', but it could not be read back: {error}. {}",
+            unconfirmed_tracker_guidance(base_url)
+        ))
+    })?;
     validate_ensure_tracker_result(&tracker, params)?;
     Ok(EnsureBugTrackerOutcome {
         tracker,
         created: true,
     })
+}
+
+/// Guidance for a tracker registration that Launchpad accepted but whose
+/// result could not be confirmed. Registration is keyed by base URL, so a
+/// retry finds the tracker rather than creating a duplicate.
+fn unconfirmed_tracker_guidance(base_url: &str) -> String {
+    format!(
+        "The bug tracker for base_url '{base_url}' may have been created; check \
+         `lpcli bug remote-bug-trackers --search \"{base_url}\"` before retrying \
+         (a retry reuses a tracker registered for the same base URL)."
+    )
 }
 
 /// Validate a tracker returned by `ensureBugTracker` against the requested
@@ -1796,10 +1865,22 @@ fn is_api_version_segment(segment: &str) -> bool {
 }
 
 /// Shared strictness for GitHub web URLs: `https`, `github.com`, no explicit
-/// (non-default) port, no userinfo, no query or fragment. Explicit default
-/// ports (`:443`) are normalised away by `url::Url` and therefore accepted.
-fn strict_github_url(url: &url::Url) -> bool {
-    url.scheme() == "https"
+/// port, no userinfo, no query or fragment.
+///
+/// `url::Url` normalises an explicit default port (`:443`) away and accepts
+/// some non-canonical spellings, so the raw `text` must also spell the
+/// authority exactly as `https://github.com` (host case-insensitive). This
+/// keeps non-canonical base URLs from being registered or accepted.
+fn strict_github_url(text: &str, url: &url::Url) -> bool {
+    let canonical_authority = text
+        .get(.."https://".len())
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+        && text["https://".len()..]
+            .split(['/', '?', '#'])
+            .next()
+            .is_some_and(|authority| authority.eq_ignore_ascii_case("github.com"));
+    canonical_authority
+        && url.scheme() == "https"
         && url.host_str() == Some("github.com")
         && url.port().is_none()
         && url.username().is_empty()
@@ -1851,7 +1932,7 @@ pub fn parse_github_issues_base_url(base_url: &str) -> Result<(String, String)> 
             "Bug tracker base URL '{base_url}' is not a valid URL: {e}"
         ))
     })?;
-    if !strict_github_url(&url) {
+    if !strict_github_url(base_url.trim(), &url) {
         return Err(malformed());
     }
     let segments = url_path_segments(url.path()).ok_or_else(malformed)?;
@@ -2321,6 +2402,10 @@ mod tests {
             "git://github.com/owner/repo/issues/5",
             "https://user:pass@github.com/owner/repo/issues/5",
             "https://github.com:8443/owner/repo/issues/5",
+            "https://github.com:443/owner/repo/issues/5",
+            "https://github.com:/owner/repo/issues/5",
+            "https:github.com/owner/repo/issues/5",
+            "https://@github.com/owner/repo/issues/5",
             "https://github.com//owner/repo/issues/5",
             "https://github.com/owner//repo/issues/5",
             "https://gitlab.com/owner/repo/issues/5",
@@ -2432,12 +2517,6 @@ mod tests {
             &r,
         )
         .unwrap();
-        // An explicit default port is normalised away by `url::Url`.
-        validate_github_watch_url(
-            &watch("https://github.com:443/canonical/apport/issues/658"),
-            &r,
-        )
-        .unwrap();
         // Equal owner/repo names and a repository named `issues` are valid:
         // the derived URL then contains equal adjacent segments.
         let same = GitHubBugRef::new("babel", "babel", 658).unwrap();
@@ -2462,6 +2541,20 @@ mod tests {
         };
         // The 'github-issues' Google Code trap shape.
         assert!(validate_github_watch_url(&watch("https://github.com/detail?id=658"), &r).is_err());
+        // `url::Url` normalises these spellings away, so the raw text is
+        // checked too: explicit ports and non-canonical authorities fail.
+        for non_canonical in [
+            "https://github.com:443/canonical/apport/issues/658",
+            "https://github.com:/canonical/apport/issues/658",
+            "https:github.com/canonical/apport/issues/658",
+            "https:\\\\github.com\\canonical\\apport\\issues\\658",
+            "https://@github.com/canonical/apport/issues/658",
+        ] {
+            assert!(
+                validate_github_watch_url(&watch(non_canonical), &r).is_err(),
+                "'{non_canonical}' must be rejected"
+            );
+        }
         assert!(
             validate_github_watch_url(&watch("https://github.com/canonical/apport/issues/657"), &r)
                 .is_err()
@@ -2549,6 +2642,10 @@ mod tests {
         assert!(parse_github_issues_base_url("http://github.com/o/r/issues").is_err());
         assert!(parse_github_issues_base_url("https://user:pass@github.com/o/r/issues").is_err());
         assert!(parse_github_issues_base_url("https://github.com:8443/o/r/issues").is_err());
+        assert!(parse_github_issues_base_url("https://github.com:443/o/r/issues").is_err());
+        assert!(parse_github_issues_base_url("https:github.com/o/r/issues").is_err());
+        // The host is case-insensitive.
+        assert!(parse_github_issues_base_url("HTTPS://GitHub.com/o/r/issues").is_ok());
         assert!(parse_github_issues_base_url("https://github.com/o//r/issues").is_err());
         assert!(parse_github_issues_base_url("https://github.com/o/o/r/issues").is_err());
         assert!(parse_github_issues_base_url("https://github.com/o/r/issues//").is_err());

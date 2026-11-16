@@ -3252,8 +3252,10 @@ async fn handle_bug(
             };
             // Task selection is identical for the explicit tracker form and
             // the --github shorthand: the shorthand only changes how the
-            // tracker and remote bug are resolved, it never guesses which
-            // task to modify.
+            // tracker and remote bug are resolved. Without any selector,
+            // only a bug with exactly one task is linked; see
+            // `find_task_to_link` for the series-less preference that
+            // applies once --target/--package narrow the candidates.
             let task = find_task_to_link(&tasks, bug_id, &selector)?;
             let effective_task_url = task.self_link.as_deref().ok_or_else(|| {
                 lpcli::error::LpError::NotFound(format!(
@@ -6472,8 +6474,11 @@ fn collect_matching_tasks<'a>(
 /// Otherwise, filters by `target` (matching package name, distro in URL, or display name),
 /// `package`, and `series`.
 ///
-/// If multiple tasks match and `series` was not specified, prefers series-less tasks
-/// (e.g. distribution-level or upstream tasks).
+/// Without any selector, the bug must have exactly one task: a mutation is
+/// never applied to a task chosen among several (for example a series-less
+/// Debian task over an Ubuntu release task). When `target` or `package`
+/// narrows the candidates and `series` was not specified, a single
+/// series-less task (e.g. distribution-level or upstream) is preferred.
 fn find_task_to_link<'a>(
     tasks: &'a [bugs::BugTask],
     bug_id: u64,
@@ -6494,6 +6499,24 @@ fn find_task_to_link<'a>(
                     "No task with self_link '{url}' found on bug #{bug_id}."
                 ))
             });
+    }
+
+    let has_selector =
+        selector.target.is_some() || selector.package.is_some() || selector.series.is_some();
+    if !has_selector && tasks.len() > 1 {
+        let names: Vec<&str> = tasks
+            .iter()
+            .filter_map(|t| {
+                t.bug_target_display_name
+                    .as_deref()
+                    .or(t.target_link.as_deref())
+            })
+            .collect();
+        return Err(lpcli::error::LpError::Other(format!(
+            "Multiple matching tasks on bug #{bug_id}: {}. No task was selected or \
+             modified; specify --target, --package, --series, or --task-url.",
+            names.join(", ")
+        )));
     }
 
     // Filter tasks based on target, package, and series.
