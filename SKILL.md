@@ -223,6 +223,7 @@ retry only the parts that failed.
 | Show a repo | `lpcli git show --path "~my-username/launchpad/+git/myrepo"` |
 | Show default repo | `lpcli git default --target launchpad` |
 | List person repos | `lpcli git list-person-repos --name my-username` |
+| List repos for a target | `lpcli git list --target launchpad` |
 | List refs (branches/tags) | `lpcli git refs --path "~my-username/launchpad/+git/myrepo"` |
 | List merge proposals | `lpcli git proposals --path "~my-username/launchpad/+git/myrepo"` |
 | Filter merge proposals | `lpcli git proposals --path "~my-username/launchpad/+git/myrepo" --status "Needs review"` |

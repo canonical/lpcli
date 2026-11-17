@@ -190,10 +190,11 @@ fn git_command(argv: &[&str]) -> GitCommand {
 
 #[test]
 fn every_git_read_supports_json_and_lists_support_tsv() {
-    let reads: [(&[&str], bool); 7] = [
+    let reads: [(&[&str], bool); 8] = [
         (&["show", "--path", REPO], false),
         (&["default", "--target", "project"], false),
         (&["list-person-repos", "--name", "owner"], true),
+        (&["list", "--target", "project"], true),
         (&["refs", "--path", REPO], true),
         (&["proposals", "--path", REPO], true),
         (&["comments", "--path", REPO, "--id", "1"], false),
@@ -300,21 +301,24 @@ async fn git_list_person_repos_follows_pages_into_one_collection() {
     let first = rebase(repository_json("one"), &base);
     let second = rebase(repository_json("two"), &base);
     let page_one = server
-        .mock("GET", "/~owner/+git")
-        .match_query(Matcher::Missing)
+        .mock("GET", "/+git")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("ws.op".into(), "getRepositories".into()),
+            Matcher::UrlEncoded("target".into(), format!("{base}/~owner")),
+        ]))
         .with_body(
             json!({
                 "total_size": 2,
                 "start": 0,
                 "entries": [first],
-                "next_collection_link": format!("{base}/~owner/+git?ws.start=1&ws.size=1"),
+                "next_collection_link": format!("{base}/+git?ws.op=getRepositories&target={base}%2F~owner&ws.start=1&ws.size=1"),
             })
             .to_string(),
         )
         .create_async()
         .await;
     let page_two = server
-        .mock("GET", "/~owner/+git")
+        .mock("GET", "/+git")
         .match_query(Matcher::UrlEncoded("ws.start".into(), "1".into()))
         .with_body(json!({"start": 1, "entries": [second]}).to_string())
         .create_async()
@@ -338,6 +342,35 @@ async fn git_list_person_repos_follows_pages_into_one_collection() {
     assert_json_report!("git_list_person_repos_json", stable(&report.json, &base));
     page_one.assert_async().await;
     page_two.assert_async().await;
+}
+
+#[tokio::test]
+async fn git_list_target_prints_the_launchpad_collection() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let body = collection(vec![
+        rebase(repository_json("one"), &base),
+        rebase(repository_json("two"), &base),
+    ]);
+    let mock = server
+        .mock("GET", "/+git")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("ws.op".into(), "getRepositories".into()),
+            Matcher::UrlEncoded("target".into(), format!("{base}/project")),
+        ]))
+        .with_body(body.to_string())
+        .create_async()
+        .await;
+    let client = mock_read_client(&server, false);
+    let report = git_report(&client, git_command(&["list", "--target", "project"]))
+        .await
+        .unwrap();
+    assert_eq!(report.json, body, "JSON must be the Launchpad collection");
+    assert_modes(&report);
+    let tsv = render(&report, OutputMode::Tsv);
+    assert_tsv_invariants(&tsv, 2);
+    assert_json_report!("git_list_target_json", stable(&report.json, &base));
+    mock.assert_async().await;
 }
 
 #[tokio::test]

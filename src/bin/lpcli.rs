@@ -1737,6 +1737,15 @@ enum GitCommand {
         #[arg(short, long)]
         name: String,
     },
+    /// List Git repositories for a target (includes personal forks).
+    List {
+        /// Project name (e.g. "launchpad"), distribution source package
+        /// slug (e.g. "ubuntu/+source/apt"), or ~person/~team name (e.g.
+        /// "~desktop-snappers"). Bare distribution names are not accepted
+        /// by the API.
+        #[arg(short, long)]
+        target: String,
+    },
     /// List refs (branches and tags) in a Git repository.
     Refs {
         /// Repository path (e.g. "~user/project/+git/repo").

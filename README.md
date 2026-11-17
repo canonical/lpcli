@@ -653,8 +653,14 @@ lpcli git show --path "~my-username/launchpad/+git/myrepo"
 # Show the default repository for a project
 lpcli git default --target launchpad
 
-# List repositories owned by a person
+# List repositories owned by a person or team
 lpcli git list-person-repos --name my-username
+
+# List repositories for a project (includes personal forks)
+lpcli git list --target launchpad
+
+# List repositories for a distribution source package
+lpcli git list --target "ubuntu/+source/apt"
 
 # List branches and tags in a repository
 lpcli git refs --path "~my-username/launchpad/+git/myrepo"

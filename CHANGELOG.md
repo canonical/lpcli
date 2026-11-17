@@ -10,6 +10,19 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 ## [Unreleased]
 
+### Added
+
+- `git list --target` to enumerate the Git repositories of a project,
+  distribution source package, or `~person`/`~team`, including personal
+  forks.
+
+### Fixed
+
+- `git list-person-repos` queried `~person/+git`, which is a web-UI page
+  that does not exist on the API host, and failed for every name. It now
+  uses the root `/+git` collection's `getRepositories` operation with a
+  `~owner` target, so person and team listings work.
+
 ## [0.5.0] - 2026-11-17
 
 This is a SemVer-incompatible release that implements Phases 0 and 1 of

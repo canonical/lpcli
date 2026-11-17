@@ -35,6 +35,9 @@ pub(crate) async fn git_report(
         GitCommand::ListPersonRepos { name } => {
             git_repositories_report(&git::list_person_git_repositories_raw(client, &name).await?)
         }
+        GitCommand::List { target } => {
+            git_repositories_report(&git::list_git_repositories_raw(client, &target).await?)
+        }
         GitCommand::Refs { path } => git_refs_report(&git::list_git_refs_raw(client, &path).await?),
         GitCommand::Proposals { path, status } => git_proposals_report(
             &git::list_merge_proposals_raw(client, &path, status.as_deref()).await?,
@@ -56,6 +59,7 @@ pub(crate) fn git_supports_tsv(command: &GitCommand) -> bool {
     matches!(
         command,
         GitCommand::ListPersonRepos { .. }
+            | GitCommand::List { .. }
             | GitCommand::Refs { .. }
             | GitCommand::Proposals { .. }
             | GitCommand::Diffs { .. }
