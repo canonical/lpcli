@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase1_bug.rs
+expression: redacted
+---
+bug_target_display_name	status	importance	assignee_link	bug_watch_link	target_link	self_link
+curl (Ubuntu)	Confirmed	Medium			https://api.launchpad.net/devel/ubuntu/+source/curl	[server]/ubuntu/+source/curl/+bug/42
+curl (Ubuntu noble)	Fix Released	Medium			https://api.launchpad.net/devel/ubuntu/noble/+source/curl	[server]/ubuntu/noble/+source/curl/+bug/42

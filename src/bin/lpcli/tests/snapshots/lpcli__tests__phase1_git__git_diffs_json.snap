@@ -1,0 +1,52 @@
+---
+source: src/bin/lpcli/tests/phase1_git.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "entries": [
+    {
+      "added_lines_count": 3,
+      "conflicts": null,
+      "date_created": "[timestamp]",
+      "diff_lines_count": 12,
+      "diff_text_link": "https://api.launchpad.net/devel/~owner/project/+git/repo/+merge/1/+preview-diff/76/diff_text",
+      "diffstat": {
+        "lib/model.py": [
+          3,
+          1
+        ]
+      },
+      "http_etag": "\"etag-diff\"",
+      "id": 76,
+      "removed_lines_count": 1,
+      "resource_type_link": "https://api.launchpad.net/devel/#preview_diff",
+      "self_link": "https://api.launchpad.net/devel/~owner/project/+git/repo/+merge/1/+preview-diff/76",
+      "source_revision_id": "0123456789abcdef0123456789abcdef01234567",
+      "target_revision_id": "fedcba9876543210fedcba9876543210fedcba98",
+      "title": null
+    },
+    {
+      "added_lines_count": 3,
+      "conflicts": null,
+      "date_created": "[timestamp]",
+      "diff_lines_count": 12,
+      "diff_text_link": "https://api.launchpad.net/devel/~owner/project/+git/repo/+merge/1/+preview-diff/77/diff_text",
+      "diffstat": {
+        "lib/model.py": [
+          3,
+          1
+        ]
+      },
+      "http_etag": "\"etag-diff\"",
+      "id": 77,
+      "removed_lines_count": 1,
+      "resource_type_link": "https://api.launchpad.net/devel/#preview_diff",
+      "self_link": "https://api.launchpad.net/devel/~owner/project/+git/repo/+merge/1/+preview-diff/77",
+      "source_revision_id": "0123456789abcdef0123456789abcdef01234567",
+      "target_revision_id": "fedcba9876543210fedcba9876543210fedcba98",
+      "title": null
+    }
+  ],
+  "start": 0,
+  "total_size": 2
+}

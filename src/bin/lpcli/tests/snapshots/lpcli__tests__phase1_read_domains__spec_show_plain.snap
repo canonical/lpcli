@@ -1,0 +1,12 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "render(&report, OutputMode::Plain)"
+---
+a-spec
+Title: Spec a-spec
+Priority: High
+Lifecycle: Started
+Implementation: Good progress
+Definition: Approved
+Summary: Make things better.
+URL: https://launchpad.net/launchpad/+spec/a-spec

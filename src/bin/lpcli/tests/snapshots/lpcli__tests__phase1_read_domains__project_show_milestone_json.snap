@@ -1,0 +1,16 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "code_name": null,
+  "date_targeted": "2025-06-01",
+  "http_etag": "\"etag-1234\"",
+  "is_active": false,
+  "name": "1.0",
+  "resource_type_link": "https://api.launchpad.net/devel/#milestone",
+  "self_link": "https://api.launchpad.net/devel/launchpad/+milestone/1.0",
+  "target_link": "https://api.launchpad.net/devel/launchpad",
+  "title": "Launchpad 1.0",
+  "web_link": "https://launchpad.net/launchpad/+milestone/1.0"
+}

@@ -17,7 +17,8 @@
 //! # Workflow
 //!
 //! 1. Log in classically and register a security key
-//!    ([`register_hardware_key`]).
+//!    ([`register_hardware_key`], or [`register_hardware_key_raw`] for
+//!    Launchpad's JSON of the registered key).
 //! 2. Issue a grant bound to that key ([`issue_hardware_bound_oauth_token`]).
 //! 3. Log in with the grant ([`login_with_hardware_token`]), which stores it.
 //! 4. Use [`load_session`] and [`LaunchpadClient::with_hardware_token`] for
@@ -90,7 +91,7 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::{self, Credentials};
-use crate::client::{Collection, LaunchpadClient};
+use crate::client::{Collection, LaunchpadClient, Raw};
 use crate::error::{LpError, Result};
 use crate::hardware_key::{
     Assertion, AssertionRequest, Authenticator, RegistrationRequest, ResidentKey, UserVerification,
@@ -2392,6 +2393,57 @@ pub async fn register_hardware_key(
     name: &str,
     authenticator: Arc<dyn Authenticator>,
 ) -> Result<RegisteredAuthenticator> {
+    let complete = complete_registration(client, name, authenticator).await?;
+    let location = client.handle_created_location(complete).await?;
+    client.get_url(&location).await
+}
+
+/// Like [`register_hardware_key`], but return the registered authenticator
+/// with its exact Launchpad JSON, read back from the reported location.
+///
+/// # Errors
+///
+/// Once Launchpad has accepted the registration, a missing or untrusted
+/// `Location` or a failed read-back is reported as [`LpError::Partial`]: the
+/// key is probably registered, so check the account's registered keys
+/// before registering it again.
+pub async fn register_hardware_key_raw(
+    client: &LaunchpadClient,
+    name: &str,
+    authenticator: Arc<dyn Authenticator>,
+) -> Result<Raw<RegisteredAuthenticator>> {
+    let guidance = format!(
+        "The security key '{name}' may already be registered; check \
+         `lpcli hardware-token keys` before registering it again."
+    );
+    let complete = complete_registration(client, name, authenticator).await?;
+    // Only a successful completion reaches the `Location` checks, which
+    // report `LpError::Other`; status errors mean registration failed.
+    let location = client
+        .handle_created_location(complete)
+        .await
+        .map_err(|error| match error {
+            LpError::Other(message) | LpError::Partial(message) => {
+                LpError::Partial(format!("{message} {guidance}"))
+            }
+            other => other,
+        })?;
+    client
+        .get_created_raw(&location, "Registering the security key")
+        .await
+        .map_err(|error| match error {
+            LpError::Partial(message) => LpError::Partial(format!("{message}. {guidance}")),
+            other => other,
+        })
+}
+
+/// Run the registration ceremony and return Launchpad's response to the
+/// completion request, before its status or `Location` is checked.
+async fn complete_registration(
+    client: &LaunchpadClient,
+    name: &str,
+    authenticator: Arc<dyn Authenticator>,
+) -> Result<reqwest::Response> {
     require_text(name, "security-key name")?;
     let me = current_person(client).await?;
 
@@ -2433,7 +2485,7 @@ pub async fn register_hardware_key(
     // JSON, so the JSON registration is encoded a second time.
     let response_param = serde_json::to_string(&serde_json::to_string(&registration_json)?)?;
 
-    let complete = client
+    client
         .post_pairs_url_raw(
             &me.self_link,
             &[
@@ -2443,9 +2495,7 @@ pub async fn register_hardware_key(
             ],
             cookie.as_deref(),
         )
-        .await?;
-    let location = client.handle_created_location(complete).await?;
-    client.get_url(&location).await
+        .await
 }
 
 /// Revoke a registered security key by its `self_link`.
@@ -4913,6 +4963,19 @@ mod tests {
         consumer: &str,
         token: &str,
     ) -> Vec<mockito::Mock> {
+        let entry = json!({"id": 42, "name": "new-key"}).to_string();
+        registration_mocks_reading_back(server, consumer, token, 200, &entry).await
+    }
+
+    /// [`registration_mocks`], with the read-back of the registered key
+    /// answering `status` and `read_back`.
+    async fn registration_mocks_reading_back(
+        server: &mut mockito::ServerGuard,
+        consumer: &str,
+        token: &str,
+        status: usize,
+        read_back: &str,
+    ) -> Vec<mockito::Mock> {
         let person = format!("{}/devel/~example-user", server.url());
         let location = format!("{person}/+authenticator/42");
         let auth = Matcher::Regex(format!(
@@ -4975,10 +5038,145 @@ mod tests {
             server
                 .mock("GET", "/devel/~example-user/+authenticator/42")
                 .match_header("authorization", auth)
-                .with_body(json!({"id": 42, "name": "new-key"}).to_string())
+                .with_status(status)
+                .with_body(read_back)
                 .create_async()
                 .await,
         ]
+    }
+
+    fn classic_registration_client(server: &mockito::ServerGuard) -> LaunchpadClient {
+        LaunchpadClient::new(Some(Credentials::new(
+            "classic-consumer",
+            "classic-access",
+            "classic-secret",
+        )))
+        .with_base_url(format!("{}/devel", server.url()))
+    }
+
+    #[tokio::test]
+    async fn raw_registration_returns_the_registered_key_unchanged() {
+        let mut server = mockito::Server::new_async().await;
+        let entry = json!({
+            "id": 42,
+            "name": "new-key",
+            "attestation_format": "packed",
+            "transports": ["usb"],
+            "date_created": "2026-01-02T03:04:05.123456+00:00",
+            "date_last_used": null,
+            "date_revoked": null,
+            "is_revoked": false,
+            "self_link": format!("{}/devel/~example-user/+authenticator/42", server.url()),
+            "resource_type_link": "https://api.launchpad.net/devel/#webauthn_authenticator",
+            "http_etag": "\"etag-42\"",
+        });
+        let mocks = registration_mocks_reading_back(
+            &mut server,
+            "classic-consumer",
+            "classic-access",
+            200,
+            &entry.to_string(),
+        )
+        .await;
+        let client = classic_registration_client(&server);
+        let new_key = new_registration_key();
+        let result = register_hardware_key_raw(&client, "new-key", new_key.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(result.raw, entry, "Launchpad's JSON, unchanged");
+        assert_eq!(result.value.id, Some(42));
+        assert!(result.value.is_active());
+        for mock in mocks {
+            mock.assert_async().await;
+        }
+        assert_new_registration(&new_key);
+    }
+
+    #[tokio::test]
+    async fn raw_registration_read_back_failure_is_partial() {
+        let mut server = mockito::Server::new_async().await;
+        let mocks = registration_mocks_reading_back(
+            &mut server,
+            "classic-consumer",
+            "classic-access",
+            503,
+            "Service unavailable",
+        )
+        .await;
+        let client = classic_registration_client(&server);
+        let err = register_hardware_key_raw(&client, "new-key", new_registration_key())
+            .await
+            .unwrap_err();
+
+        let LpError::Partial(message) = &err else {
+            panic!("expected a partial failure, got {err:?}");
+        };
+        assert!(
+            message.starts_with("Registering the security key succeeded"),
+            "{message}"
+        );
+        assert!(message.contains("lpcli hardware-token keys"), "{message}");
+        assert_eq!(err.exit_code(), 7);
+        for mock in mocks {
+            mock.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_registration_untrusted_location_is_partial_and_not_fetched() {
+        let mut server = mockito::Server::new_async().await;
+        let mut mocks = registration_mocks(&mut server, "classic-consumer", "classic-access").await;
+        // Replace the completion's Location with one on a foreign origin.
+        let read_back = mocks.pop().unwrap();
+        mocks.pop().unwrap().remove_async().await;
+        read_back.remove_async().await;
+        let foreign = server
+            .mock("POST", "/devel/~example-user")
+            .match_body(Matcher::Regex("completeWebAuthnRegistration".into()))
+            .with_status(201)
+            .with_header("location", "https://attacker.example/+authenticator/42")
+            .create_async()
+            .await;
+        let client = classic_registration_client(&server);
+        let err = register_hardware_key_raw(&client, "new-key", new_registration_key())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, LpError::Partial(_)), "{err:?}");
+        assert!(err.to_string().contains("lpcli hardware-token keys"));
+        foreign.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn raw_registration_rejected_by_launchpad_is_not_partial() {
+        let mut server = mockito::Server::new_async().await;
+        let mut mocks = registration_mocks(&mut server, "classic-consumer", "classic-access").await;
+        let read_back = mocks.pop().unwrap();
+        mocks.pop().unwrap().remove_async().await;
+        let rejected = server
+            .mock("POST", "/devel/~example-user")
+            .match_body(Matcher::Regex("completeWebAuthnRegistration".into()))
+            .with_status(400)
+            .with_body("Invalid attestation")
+            .create_async()
+            .await;
+        let read_back = {
+            read_back.remove_async().await;
+            server
+                .mock("GET", "/devel/~example-user/+authenticator/42")
+                .expect(0)
+                .create_async()
+                .await
+        };
+        let client = classic_registration_client(&server);
+        let err = register_hardware_key_raw(&client, "new-key", new_registration_key())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, LpError::Api { status: 400, .. }), "{err:?}");
+        rejected.assert_async().await;
+        read_back.assert_async().await;
     }
 
     fn new_registration_key() -> Arc<FakeAuthenticator> {

@@ -141,13 +141,13 @@ async fn get_bug_tracker_by_name_not_found_returns_error() {
     let result = bugs::get_bug_tracker_by_name(&client, "unknown").await;
 
     match result {
-        Err(LpError::NotFound(msg)) => {
+        Err(LpError::LocalNotFound(msg)) => {
             assert!(
                 msg.contains("unknown"),
                 "Expected message to mention tracker name: {msg}"
             );
         }
-        other => panic!("Expected LpError::NotFound, got {other:?}"),
+        other => panic!("Expected LpError::LocalNotFound, got {other:?}"),
     }
 
     mock.assert_async().await;

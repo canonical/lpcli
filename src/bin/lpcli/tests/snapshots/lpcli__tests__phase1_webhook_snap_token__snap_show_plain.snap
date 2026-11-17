@@ -1,0 +1,11 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_text(&rendered, base)"
+---
+my-snap
+A snap built from the main branch.
+Store name: my-snap
+Private: false
+Auto-upload: true
+Git path: refs/heads/main
+URL: https://launchpad.net/~jdoe/+snap/my-snap

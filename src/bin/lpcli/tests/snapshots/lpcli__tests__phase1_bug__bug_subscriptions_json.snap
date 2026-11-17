@@ -1,0 +1,30 @@
+---
+source: src/bin/lpcli/tests/phase1_bug.rs
+expression: value
+---
+{
+  "entries": [
+    {
+      "bug_link": "[server]/bugs/42",
+      "date_created": "[timestamp]",
+      "http_etag": "\"subscription-etag\"",
+      "person_link": "[server]/~reporter",
+      "resource_type_link": "[server]/#bug_subscription",
+      "self_link": "[server]/bugs/42/+subscription/reporter",
+      "subscribed_by_link": "[server]/~reporter",
+      "web_link": "https://bugs.launchpad.net/bugs/42/+subscription/reporter"
+    },
+    {
+      "bug_link": "[server]/bugs/42",
+      "date_created": "[timestamp]",
+      "http_etag": "\"subscription-etag\"",
+      "person_link": "[server]/~ubuntu-bugs",
+      "resource_type_link": "[server]/#bug_subscription",
+      "self_link": "[server]/bugs/42/+subscription/ubuntu-bugs",
+      "subscribed_by_link": "[server]/~reporter",
+      "web_link": "https://bugs.launchpad.net/bugs/42/+subscription/ubuntu-bugs"
+    }
+  ],
+  "start": 0,
+  "total_size": 2
+}

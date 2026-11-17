@@ -1,0 +1,10 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+✓ Logged in as ~example-owner with a hardware-bound grant.
+  Grant stored in /tmp/grant.json.
+
+  Now remove the classic bootstrap token, which does not need your key:
+  1. Revoke the "lpcli" authorization at https://launchpad.net/people/+me/+oauth-tokens
+  2. Run `lpcli logout --classic` to delete the local copy.

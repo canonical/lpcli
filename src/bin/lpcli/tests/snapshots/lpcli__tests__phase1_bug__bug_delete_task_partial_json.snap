@@ -1,0 +1,24 @@
+---
+source: src/bin/lpcli/tests/phase1_bug.rs
+expression: value
+---
+{
+  "lpcli": {
+    "bug_id": 42,
+    "deleted_task_links": [
+      "[server]/ubuntu/+source/curl/+bug/42"
+    ],
+    "failures": [
+      {
+        "error": {
+          "http_status": 403,
+          "kind": "permission_denied",
+          "message": "Launchpad API error 403: Permission denied. Verify your Launchpad account has the required permissions. "
+        },
+        "operation": "delete_task",
+        "target": "curl (Ubuntu noble)",
+        "task_link": "[server]/ubuntu/noble/+source/curl/+bug/42"
+      }
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+{
+  "lpcli": {
+    "classic_credentials": "removed",
+    "hardware_token_grant": "removed"
+  }
+}

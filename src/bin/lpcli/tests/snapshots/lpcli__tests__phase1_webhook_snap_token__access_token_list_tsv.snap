@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_text(&rendered, base)"
+---
+description	scopes	date_created	date_last_used	self_link
+CI token 1	repository:build_status, repository:push	2026-01-02	2026-01-02	https://api.launchpad.net/devel/launchpad/+access-token/1
+CI token 2	repository:build_status, repository:push	2026-01-02		https://api.launchpad.net/devel/launchpad/+access-token/2

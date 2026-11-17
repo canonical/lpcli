@@ -1,9 +1,11 @@
 # Plan: Improving the lpcli Command-Line Interface
 
 - **Date:** 2026-11-16
-- **Status:** Proposed
+- **Status:** Phases 0 and 1 implemented in lpcli 0.5.0 (2026-11-17);
+  Phases 2 to 4 proposed
 - **Baseline:** lpcli 0.4.0
-- **Target release:** lpcli 0.5.0 (a SemVer-incompatible release)
+- **Target release:** lpcli 0.5.0 (a SemVer-incompatible release) for
+  Phases 0 and 1
 - **Scope:** `src/bin/lpcli.rs`, `src/bin/lpcli/`, the library modules that return
   Launchpad entries, `src/download.rs`, `README.md`, `SKILL.md`, and the tests.
 
@@ -380,6 +382,86 @@ in later releases.
 
 ### Phase 1: Agent efficiency and the public contract
 
+**Status: implemented** in 0.5.0, released 2026-11-17. The contract is
+[`docs/json-output.md`](../docs/json-output.md), version 1. Decisions made
+during Phase 1:
+
+- **JSON coverage.** `--format json` covers every read and mutation command,
+  plus `status`, `schema`, `login`, `logout`, and every `hardware-token`
+  subcommand. `skills` is the only exception: its output is the embedded
+  `SKILL.md` itself. TSV covers list commands, `status`, and
+  `hardware-token keys`. The Phase 0 rule for unsupported modes is unchanged:
+  an explicit `--format` is a usage error, and a mode from `LPCLI_FORMAT` or
+  `display.format` falls back to the automatic mode with a warning.
+- **Raw library APIs.** Following decision record 0001, the library gained
+  `_raw` counterparts that return `client::Raw<T>` for the reads and the
+  mutations that produce Launchpad entries, across every domain module.
+  Lists use `Collection::fetch_all_raw` (every page, no
+  `next_collection_link`) or `Collection::fetch_page_raw` (one page, passed
+  through). The typed functions are unchanged apart from the error variants
+  noted below.
+- **Combined commands** use Launchpad link names for their members (`bug`,
+  `bug_tasks`, `attachments`, `messages`, `bug_watches`, `package_upload`,
+  `binary_properties`, and so on), and put computed values, such as
+  attachment download URLs, inline-comment locations, and download results,
+  under `lpcli`. Locally filtered lists (`bug remote-bug-trackers --search`,
+  `cve search --keyword`) include `total_size` only after a complete scan.
+- **Mutations** print the entry Launchpad returned or the entry read back from
+  the trusted `Location`. Operations without a resulting entry print an
+  lpcli-defined object under `lpcli`. Bug operations on several tasks print
+  `bug_tasks` plus `lpcli.failures`, each failure with a structured `error`.
+- **Identity JSON.** `hardware-token register` prints the registered key's
+  Launchpad entry. `hardware-token issue` prints an lpcli-defined summary
+  (`issued`, `security_key`, `grant` metadata, `login`, and
+  `remove_classic_bootstrap_token`) without the token key or secret.
+  `issue --print` keeps launchpadlib's grant format in every mode and even
+  with `--quiet`, because the grant is the requested result. `login`,
+  `logout`, `show`, `revoke`, `revoke-key`, and `clear-cache` print
+  lpcli-defined objects that never contain secrets or the token key.
+- **`--fields`** applies to Launchpad entries, identified by `self_link` or
+  `resource_type_link`, at any depth. It keeps collection metadata and leaves
+  the `lpcli` member unchanged. Field names are validated as Launchpad
+  attribute names. It requires JSON output, and an explicit non-JSON
+  `--format` is a usage error.
+- **`--quiet`** is accepted only by mutations; on reads it is a usage error.
+  It prints each resulting `self_link` on its own line, or nothing.
+  `access-token issue` and `issue-git` still print the secret, because it
+  cannot be read again.
+- **`--no-input`** is implied when stdin is not a terminal. Classic `login`
+  and `hardware-token register` are rejected by `validate_cli` (exit code 2)
+  before any configuration, credential, or network access. Security-key
+  ceremonies use `hardware_key::NonInteractiveConsole`, which fails PIN
+  prompts, key choices, and the registration pause before reading input, but
+  still writes touch notices to stderr. The classic login prompt moved to
+  stderr.
+- **Structured errors.** In JSON mode, runtime errors are
+  `{"error": {"kind", "message", "hint", "http_status"}}` on stderr, with
+  messages passed through secret redaction. Usage errors detected while
+  parsing arguments stay clap's text errors, because they occur before the
+  output mode is resolved; they still exit with 2.
+- **Exit codes.** `LpError::kind()` is the single mapping to
+  `error::ErrorKind` and its exit code, with a table-driven test covering
+  every variant. HTTP 401 maps to 3, 403 to 5, 404 and 410 to 4, and 408,
+  429, and 5xx to 6. Hardware-key failures map to 1, and a rejected
+  hardware-bound grant to 3. Two variants were added: `LpError::Usage` (2) and
+  `LpError::Partial` (7).
+- **Partial failures.** A command prints what succeeded and what failed, then
+  returns `LpError::Partial`. This covers downloads where only some files
+  fail (all failing is exit 1, since nothing was written), bug operations on
+  several tasks or series, `bug create` whose attachment fails, mutations
+  applied but not confirmed by a read-back, `logout` and `hardware-token
+  revoke` that leave a local copy behind, and `hardware-token issue` whose
+  follow-up login fails.
+- **`lpcli schema`** prints the contract version and a link to
+  `docs/json-output.md`, in JSON as
+  `{"lpcli": {"json_contract_version": 1, "documentation": "..."}}`.
+  Selecting a later contract version is deferred until version 2 exists.
+- **Snapshots** cover the JSON output of every Launchpad read command, TSV
+  for list commands, and the JSON of representative mutations and
+  partial-failure outputs, with `rich`/`plain` for representative commands.
+  Other mutations are covered by assertions on their JSON and `--quiet`
+  output rather than snapshots.
+
 1. Preserve the original Launchpad JSON for all read commands, and add JSON
    output for every read command.
 2. Write `docs/json-output.md` and add the `lpcli schema` command.
@@ -393,9 +475,9 @@ in later releases.
 8. Bump the crate version to 0.5.0, then move the `## [Unreleased]` entries
    in `CHANGELOG.md` under `## [0.5.0]` with the release date.
 
-**Release target:** 0.5.0 (D5). It is SemVer-incompatible with 0.4.x, so it
-may contain these breaking changes. Crates that depend on `lpcli = "0.4"`
-do not pick it up automatically.
+**Release:** 0.5.0 (D5), dated 2026-11-17. It is SemVer-incompatible with
+0.4.x, so it may contain these breaking changes. Crates that depend on
+`lpcli = "0.4"` do not pick it up automatically.
 
 **Done when:** every read command has snapshot-tested JSON output, every
 error variant has a tested exit code, and the documentation examples pass.
@@ -450,6 +532,7 @@ output layer.
 
 | Item | Mitigation |
 |---|---|
+| Disabling prompts when stdin is not a terminal breaks piped classic logins | Recorded as a breaking change in `CHANGELOG.md`; classic login and key registration need a terminal, and grant import reads `LPCLI_HARDWARE_GRANT_SECRET` |
 | Launchpad's `devel` API changes without notice | Document the contract's limits; consider a later decision on pinning the API version |
 | Preserving the original JSON changes public library types | Choose the approach in Phase 0; note any library API change in the release notes |
 | Removing `--json` breaks existing scripts immediately | Decided (D1): no deprecation period. clap's error only says the argument is unexpected, so `README.md`, `SKILL.md`, and `CHANGELOG.md` document the replacement, and `--format json` ships in the same release |

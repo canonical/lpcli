@@ -1,0 +1,21 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "entries": [
+    {
+      "date_created": "[timestamp]",
+      "http_etag": "\"etag-1234\"",
+      "path": "po/hello.pot",
+      "resource_type_link": "https://api.launchpad.net/devel/#translation_import_queue_entry",
+      "self_link": "https://api.launchpad.net/devel/+imports/1",
+      "sourcepackage_link": "https://api.launchpad.net/devel/ubuntu/noble/+source/hello",
+      "status": "Needs Review",
+      "uploader_link": "https://api.launchpad.net/devel/~jdoe",
+      "web_link": "https://launchpad.net/+imports/1"
+    }
+  ],
+  "start": 0,
+  "total_size": 1
+}

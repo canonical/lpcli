@@ -11,11 +11,15 @@
 //! | [`search_people`] | Search for people by display name |
 //! | [`get_team_members`] | List members of a team |
 //! | [`get_person_bugs`] | Bugs assigned to or filed by a person |
+//!
+//! Each read function has a `_raw` counterpart that also returns the exact
+//! JSON Launchpad sent: an entry, or a collection with `start`, `entries`, and
+//! `total_size` or `total_size_link`.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::client::{Collection, LaunchpadClient};
+use crate::client::{Collection, LaunchpadClient, Raw};
 use crate::error::Result;
 
 // ---------------------------------------------------------------------------
@@ -95,14 +99,23 @@ pub struct TeamMembership {
 ///
 /// Returns [`crate::error::LpError::NotFound`] when the person does not exist.
 pub async fn get_person(client: &LaunchpadClient, name: &str) -> Result<Person> {
-    client.get(&format!("/~{}", urlenc(name))).await
+    Ok(get_person_raw(client, name).await?.value)
+}
+
+/// Like [`get_person()`], but also keep the exact JSON Launchpad returned.
+pub async fn get_person_raw(client: &LaunchpadClient, name: &str) -> Result<Raw<Person>> {
+    client.get_raw(&format!("/~{}", urlenc(name))).await
 }
 
 /// Search for people by display name or Launchpad name.
 pub async fn search_people(client: &LaunchpadClient, query: &str) -> Result<Vec<Person>> {
-    let encoded = url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>();
-    let url = client.url(&format!("/people?ws.op=find&text={encoded}"));
-    Collection::fetch_all(client, &url).await
+    Ok(search_people_raw(client, query).await?.value)
+}
+
+/// Like [`search_people()`], but also keep Launchpad's collection JSON.
+pub async fn search_people_raw(client: &LaunchpadClient, query: &str) -> Result<Raw<Vec<Person>>> {
+    let url = client.url(&format!("/people?ws.op=find&text={}", urlenc(query)));
+    Collection::fetch_all_raw(client, &url).await
 }
 
 /// List the (approved) members of a Launchpad team.
@@ -114,8 +127,16 @@ pub async fn get_team_members(
     client: &LaunchpadClient,
     team_name: &str,
 ) -> Result<Vec<TeamMembership>> {
+    Ok(get_team_members_raw(client, team_name).await?.value)
+}
+
+/// Like [`get_team_members()`], but also keep Launchpad's collection JSON.
+pub async fn get_team_members_raw(
+    client: &LaunchpadClient,
+    team_name: &str,
+) -> Result<Raw<Vec<TeamMembership>>> {
     let url = client.url(&format!("/~{}/members_details", urlenc(team_name)));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all_raw(client, &url).await
 }
 
 /// List bug tasks filed by a person (bug reporter `~{name}`).
@@ -123,12 +144,20 @@ pub async fn get_person_bugs(
     client: &LaunchpadClient,
     name: &str,
 ) -> Result<Vec<crate::bugs::BugTask>> {
+    Ok(get_person_bugs_raw(client, name).await?.value)
+}
+
+/// Like [`get_person_bugs()`], but also keep Launchpad's collection JSON.
+pub async fn get_person_bugs_raw(
+    client: &LaunchpadClient,
+    name: &str,
+) -> Result<Raw<Vec<crate::bugs::BugTask>>> {
     let person_url = client.url(&format!("/~{}", urlenc(name)));
     let url = client.url(&format!(
         "/bugs?ws.op=searchTasks&bug_reporter={}",
         urlenc(&person_url)
     ));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all_raw(client, &url).await
 }
 
 /// List all PPAs (Personal Package Archives) owned by a person or team.
@@ -136,8 +165,16 @@ pub async fn list_person_ppas(
     client: &LaunchpadClient,
     person_name: &str,
 ) -> Result<Vec<crate::packages::Archive>> {
+    Ok(list_person_ppas_raw(client, person_name).await?.value)
+}
+
+/// Like [`list_person_ppas()`], but also keep Launchpad's collection JSON.
+pub async fn list_person_ppas_raw(
+    client: &LaunchpadClient,
+    person_name: &str,
+) -> Result<Raw<Vec<crate::packages::Archive>>> {
     let url = client.url(&format!("/~{}/ppas", urlenc(person_name)));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all_raw(client, &url).await
 }
 
 /// Return the Launchpad teams owned by a person.
@@ -145,8 +182,17 @@ pub async fn get_person_owned_teams(
     client: &LaunchpadClient,
     person_name: &str,
 ) -> Result<Vec<Person>> {
+    Ok(get_person_owned_teams_raw(client, person_name).await?.value)
+}
+
+/// Like [`get_person_owned_teams()`], but also keep Launchpad's collection
+/// JSON.
+pub async fn get_person_owned_teams_raw(
+    client: &LaunchpadClient,
+    person_name: &str,
+) -> Result<Raw<Vec<Person>>> {
     let url = client.url(&format!("/~{}?ws.op=getOwnedTeams", urlenc(person_name)));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all_raw(client, &url).await
 }
 
 // ---------------------------------------------------------------------------

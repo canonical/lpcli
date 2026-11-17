@@ -9,11 +9,14 @@
 //! | Resource | Path |
 //! |----------|------|
 //! | Package uploads | `/{distro}/{series}?ws.op=getPackageUploads` |
+//!
+//! Reads also have `*_raw` counterparts that keep the exact JSON Launchpad
+//! returned (see [`Raw`]).
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::client::{Collection, LaunchpadClient};
+use crate::client::{Collection, LaunchpadClient, Raw};
 use crate::error::Result;
 
 // ---------------------------------------------------------------------------
@@ -114,6 +117,42 @@ pub async fn get_package_uploads(
     series: &str,
     params: &QueueSearchParams<'_>,
 ) -> Result<Vec<PackageUpload>> {
+    Collection::fetch_all(client, &package_uploads_url(client, distro, series, params)).await
+}
+
+/// Like [`get_package_uploads()`], but return one page of results together
+/// with the exact JSON Launchpad returned for it.
+///
+/// [`QueueSearchParams::limit`] is sent as `ws.size`, and only that first page
+/// is fetched, so the raw page keeps Launchpad's collection shape including
+/// `next_collection_link` when the limit cut the results short. Without a
+/// limit, Launchpad's default page size applies.
+pub async fn get_package_uploads_page_raw(
+    client: &LaunchpadClient,
+    distro: &str,
+    series: &str,
+    params: &QueueSearchParams<'_>,
+) -> Result<Raw<Collection<PackageUpload>>> {
+    Collection::fetch_page_raw(client, &package_uploads_url(client, distro, series, params)).await
+}
+
+/// Like [`get_package_uploads()`], but follow every page and return
+/// Launchpad's collection shape with every entry unmodified.
+pub async fn get_package_uploads_raw(
+    client: &LaunchpadClient,
+    distro: &str,
+    series: &str,
+    params: &QueueSearchParams<'_>,
+) -> Result<Raw<Vec<PackageUpload>>> {
+    Collection::fetch_all_raw(client, &package_uploads_url(client, distro, series, params)).await
+}
+
+fn package_uploads_url(
+    client: &LaunchpadClient,
+    distro: &str,
+    series: &str,
+    params: &QueueSearchParams<'_>,
+) -> String {
     let series_url = client.url(&format!("/{}/{}", enc(distro), enc(series)));
     let mut query = format!("{}?ws.op=getPackageUploads", series_url);
 
@@ -138,8 +177,16 @@ pub async fn get_package_uploads(
     if let Some(limit) = params.limit {
         query.push_str(&format!("&ws.size={limit}"));
     }
+    query
+}
 
-    Collection::fetch_all(client, &query).await
+/// Fetch a single package upload entry by its API self-link, keeping the
+/// exact Launchpad JSON.
+pub async fn get_package_upload_raw(
+    client: &LaunchpadClient,
+    upload_self_link: &str,
+) -> Result<Raw<PackageUpload>> {
+    client.get_url_raw(upload_self_link).await
 }
 
 /// Resolve the current Ubuntu development series name.
@@ -184,6 +231,16 @@ pub async fn get_source_file_urls(
     client.get_url_string_list(&url).await
 }
 
+/// Like [`get_source_file_urls()`], but also keep the exact JSON array
+/// Launchpad returned.
+pub async fn get_source_file_urls_raw(
+    client: &LaunchpadClient,
+    upload_self_link: &str,
+) -> Result<Raw<Vec<String>>> {
+    let url = format!("{upload_self_link}?ws.op=sourceFileUrls");
+    client.get_url_raw(&url).await
+}
+
 /// Get the binary file URLs for a package upload.
 ///
 /// Calls the `binaryFileUrls` custom GET method on a `package_upload` entry.
@@ -195,6 +252,16 @@ pub async fn get_binary_file_urls(
 ) -> Result<Vec<String>> {
     let url = format!("{upload_self_link}?ws.op=binaryFileUrls");
     client.get_url_string_list(&url).await
+}
+
+/// Like [`get_binary_file_urls()`], but also keep the exact JSON array
+/// Launchpad returned.
+pub async fn get_binary_file_urls_raw(
+    client: &LaunchpadClient,
+    upload_self_link: &str,
+) -> Result<Raw<Vec<String>>> {
+    let url = format!("{upload_self_link}?ws.op=binaryFileUrls");
+    client.get_url_raw(&url).await
 }
 
 /// Properties of a single binary package in a queue upload.
@@ -249,6 +316,16 @@ pub async fn get_binary_properties(
     client.get_url(&url).await
 }
 
+/// Like [`get_binary_properties()`], but also keep the exact JSON array
+/// Launchpad returned, including fields lpcli does not model.
+pub async fn get_binary_properties_raw(
+    client: &LaunchpadClient,
+    upload_self_link: &str,
+) -> Result<Raw<Vec<BinaryProperties>>> {
+    let url = format!("{upload_self_link}?ws.op=getBinaryProperties");
+    client.get_url_raw(&url).await
+}
+
 // ---------------------------------------------------------------------------
 // Queue actions
 // ---------------------------------------------------------------------------
@@ -263,6 +340,26 @@ pub async fn get_binary_properties(
 pub async fn accept_from_queue(client: &LaunchpadClient, upload_self_link: &str) -> Result<()> {
     let params = [("ws.op", "acceptFromQueue")];
     client.post_pairs_url_ok(upload_self_link, &params).await
+}
+
+/// Like [`accept_from_queue()`], but read the upload back afterwards and
+/// return its exact Launchpad JSON.
+///
+/// `acceptFromQueue` returns no entry, so the upload is re-fetched from
+/// `upload_self_link`.
+///
+/// # Errors
+///
+/// If the accept succeeds but the read-back fails, returns
+/// [`LpError::Partial`](crate::error::LpError::Partial).
+pub async fn accept_from_queue_raw(
+    client: &LaunchpadClient,
+    upload_self_link: &str,
+) -> Result<Raw<PackageUpload>> {
+    accept_from_queue(client, upload_self_link).await?;
+    client
+        .get_created_raw(upload_self_link, "Accepting the upload")
+        .await
 }
 
 /// Reject a package upload from the queue.
@@ -282,6 +379,24 @@ pub async fn reject_from_queue(
         params.push(("comment", c));
     }
     client.post_pairs_url_ok(upload_self_link, &params).await
+}
+
+/// Like [`reject_from_queue()`], but read the upload back afterwards and
+/// return its exact Launchpad JSON.
+///
+/// # Errors
+///
+/// If the reject succeeds but the read-back fails, returns
+/// [`LpError::Partial`](crate::error::LpError::Partial).
+pub async fn reject_from_queue_raw(
+    client: &LaunchpadClient,
+    upload_self_link: &str,
+    comment: Option<&str>,
+) -> Result<Raw<PackageUpload>> {
+    reject_from_queue(client, upload_self_link, comment).await?;
+    client
+        .get_created_raw(upload_self_link, "Rejecting the upload")
+        .await
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +429,15 @@ pub async fn get_upload_logs(
     logs_collection_url: &str,
 ) -> Result<Vec<PackageUploadLog>> {
     Collection::fetch_all(client, logs_collection_url).await
+}
+
+/// Like [`get_upload_logs()`], but return Launchpad's collection shape with
+/// every page's entries unmodified.
+pub async fn get_upload_logs_raw(
+    client: &LaunchpadClient,
+    logs_collection_url: &str,
+) -> Result<Raw<Vec<PackageUploadLog>>> {
+    Collection::fetch_all_raw(client, logs_collection_url).await
 }
 
 // ---------------------------------------------------------------------------

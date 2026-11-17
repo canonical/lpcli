@@ -496,6 +496,30 @@ mod runtime_errors {
     }
 
     #[test]
+    fn secret_redaction_handles_json_form_encoded_and_multiple_authorization_headers() {
+        let message = concat!(
+            "body: {\"oauth_token_secret\": \"json-secret\", ",
+            "\"oauth_token\":\"json-token\"}; ",
+            "oauth_signature=signature-secret&refresh_token: 'refresh-secret'\n",
+            "Authorization: OAuth oauth_token=header-token\n",
+            "authorization: Bearer second-header-token"
+        );
+        let redacted = output::redact_secrets(message);
+        for secret in [
+            "json-secret",
+            "json-token",
+            "signature-secret",
+            "refresh-secret",
+            "header-token",
+            "second-header-token",
+        ] {
+            assert!(!redacted.contains(secret), "{secret} leaked in: {redacted}");
+        }
+        assert_eq!(redacted.matches("Authorization: [redacted]").count(), 2);
+        assert!(redacted.contains("\"oauth_token_secret\": \"[redacted]\""));
+    }
+
+    #[test]
     fn plain_errors_follow_flag_env_config_and_accessibility_even_with_forced_color() {
         for source in ["flag", "env", "config", "accessible", "dumb"] {
             let args = if source == "flag" {
@@ -515,11 +539,11 @@ mod runtime_errors {
             settings.display.accessible = source == "accessible";
             let output = resolve_command_output(&cli, &settings, &env, (true, true)).unwrap();
             assert_eq!(
-                output.render_error("request failed"),
+                output.render_error_message("request failed"),
                 "Error: request failed\n",
                 "{source}"
             );
-            output::tests::assert_plain_invariants(&output.render_error("request failed"));
+            output::tests::assert_plain_invariants(&output.render_error_message("request failed"));
         }
     }
 
@@ -536,7 +560,7 @@ mod runtime_errors {
                     (stdout_terminal, stderr_terminal),
                 )
                 .unwrap();
-                let rendered = output.render_error("request failed");
+                let rendered = output.render_error_message("request failed");
                 assert_eq!(rendered.contains('\u{1b}'), stderr_terminal, "{mode}");
                 assert!(rendered.ends_with(" request failed\n"));
                 assert!(serde_json::from_str::<serde_json::Value>(&rendered).is_err());
@@ -559,7 +583,10 @@ mod runtime_errors {
                 ..Default::default()
             };
             let output = initial_error_output(&cli, &env, (true, true));
-            assert_eq!(output.render_error("bad config"), "Error: bad config\n");
+            assert_eq!(
+                output.render_error_message("bad config"),
+                "Error: bad config\n"
+            );
         }
     }
 
@@ -592,7 +619,7 @@ mod runtime_errors {
             .await
             .unwrap_err();
             assert_eq!(reads.get(), 1);
-            let rendered = output.render_error(&err.to_string());
+            let rendered = output.render_error(&err);
             assert!(rendered.starts_with("Error: "));
             assert!(rendered.contains("bad config"));
             output::tests::assert_plain_invariants(&rendered);
@@ -632,7 +659,7 @@ mod runtime_errors {
             .unwrap_err();
             assert_eq!(reads.get(), 1);
             assert!(matches!(err, lpcli::error::LpError::HardwareToken(_)));
-            let rendered = output.render_error(&err.to_string());
+            let rendered = output.render_error(&err);
             assert!(rendered.starts_with("Error: "));
             assert!(rendered.contains("--account is required"));
             output::tests::assert_plain_invariants(&rendered);
@@ -669,7 +696,7 @@ mod runtime_errors {
         )
         .await
         .unwrap_err();
-        let rendered = output.render_error(&err.to_string());
+        let rendered = output.render_error(&err);
         assert!(rendered.starts_with("Error: "));
         assert!(rendered.contains("cache unavailable"));
         output::tests::assert_plain_invariants(&rendered);
@@ -1366,7 +1393,7 @@ async fn queue_info_targets_the_resolved_archive() {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, lpcli::error::LpError::NotFound(_)));
+        assert!(matches!(err, lpcli::error::LpError::LocalNotFound(_)));
         uploads.assert_async().await;
     }
 }
@@ -3948,19 +3975,27 @@ mod output_layer {
 
     #[test]
     fn structured_formats_are_usage_errors_for_unported_commands() {
-        for format in ["json", "tsv"] {
-            for argv in [
-                &["lpcli", "--format", format, "bug", "show", "--bug-id", "1"][..],
-                &["lpcli", "--format", format, "package", "list-series"],
-                &["lpcli", "--format", format, "hardware-token", "clear-cache"],
-            ] {
+        for (format, argv) in [
+            ("json", &["lpcli", "--format", "json", "skills"][..]),
+            ("tsv", &["lpcli", "--format", "tsv", "skills"]),
+            (
+                "tsv",
+                &["lpcli", "--format", "tsv", "bug", "show", "--bug-id", "1"],
+            ),
+            ("tsv", &["lpcli", "--format", "tsv", "package", "distro"]),
+            (
+                "tsv",
+                &["lpcli", "--format", "tsv", "hardware-token", "clear-cache"],
+            ),
+        ] {
+            {
                 let cli = Cli::try_parse_from(argv).unwrap();
                 let error = validate_cli(&cli).unwrap_err();
                 assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
                 assert_eq!(error.exit_code(), 2);
                 let message = error.to_string();
                 assert!(message.contains(&format!("--format {format}")), "{message}");
-                assert!(message.contains("bug remote-bug-trackers"), "{message}");
+                assert!(message.contains("rich or --format plain"), "{message}");
             }
         }
         for format in ["rich", "plain"] {
@@ -3970,6 +4005,9 @@ mod output_layer {
         }
         for argv in [
             &["lpcli", "--format", "json", "status"][..],
+            &["lpcli", "--format", "json", "bug", "show", "-b", "1"],
+            &["lpcli", "--format", "json", "package", "list-series"],
+            &["lpcli", "--format", "json", "hardware-token", "clear-cache"],
             &["lpcli", "--format", "tsv", "bug", "search"],
             &[
                 "lpcli",
@@ -4950,3 +4988,38 @@ fn root_help_lists_agent_skills_command() {
         );
     }
 }
+
+#[test]
+fn early_error_output_tolerates_fields_until_configuration_selects_json() {
+    let cli = Cli::try_parse_from(["lpcli", "--fields", "name", "status"]).unwrap();
+    validate_cli(&cli).unwrap();
+    let output = initial_error_output(&cli, &output::Environment::default(), (false, false));
+    assert_eq!(output.mode(), OutputMode::Rich);
+
+    let env = output::Environment::default();
+    let error = resolve_command_output(&cli, &config::AppConfig::default(), &env, (false, false))
+        .unwrap_err();
+    assert!(error.contains("--fields requires JSON output"));
+
+    let mut settings = config::AppConfig::default();
+    settings.display.format = Some(OutputMode::Json);
+    assert_eq!(
+        resolve_command_output(&cli, &settings, &env, (false, false))
+            .unwrap()
+            .mode(),
+        OutputMode::Json
+    );
+}
+
+#[path = "tests/phase1_bug.rs"]
+mod phase1_bug;
+#[path = "tests/phase1_git.rs"]
+mod phase1_git;
+#[path = "tests/phase1_identity.rs"]
+mod phase1_identity;
+#[path = "tests/phase1_queue.rs"]
+mod phase1_queue;
+#[path = "tests/phase1_read_domains.rs"]
+mod phase1_read_domains;
+#[path = "tests/phase1_webhook_snap_token.rs"]
+mod phase1_webhook_snap_token;

@@ -1,0 +1,10 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+{
+  "lpcli": {
+    "credentials": "oauth",
+    "hardware_token_grant_takes_precedence": true
+  }
+}

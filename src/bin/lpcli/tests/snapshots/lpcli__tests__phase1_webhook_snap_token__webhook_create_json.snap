@@ -1,0 +1,20 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_json(&parsed, base)"
+---
+{
+  "active": false,
+  "date_created": "[timestamp]",
+  "date_last_modified": "[timestamp]",
+  "delivery_url": "https://ci.example.com/hooks/3",
+  "event_types": [
+    "git:push:0.1",
+    "merge-proposal:0.1"
+  ],
+  "http_etag": "\"etag-webhook\"",
+  "registrant_link": "[server url]/~jdoe",
+  "resource_type_link": "[server url]/#webhook",
+  "self_link": "[server url]/launchpad/+webhook/3",
+  "target_link": "[server url]/launchpad",
+  "web_link": "https://launchpad.net/launchpad/+webhook/3"
+}

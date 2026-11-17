@@ -1,0 +1,19 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "date_created": "[timestamp]",
+  "definition_status": "Approved",
+  "http_etag": "\"etag-1234\"",
+  "implementation_status": "Good progress",
+  "lifecycle_status": "Started",
+  "name": "a-spec",
+  "priority": "High",
+  "resource_type_link": "https://api.launchpad.net/devel/#specification",
+  "self_link": "https://api.launchpad.net/devel/launchpad/+spec/a-spec",
+  "specification_url": null,
+  "summary": "Make things better.",
+  "title": "Spec a-spec",
+  "web_link": "https://launchpad.net/launchpad/+spec/a-spec"
+}

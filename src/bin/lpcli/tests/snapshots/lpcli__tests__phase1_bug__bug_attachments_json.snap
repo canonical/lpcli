@@ -1,0 +1,46 @@
+---
+source: src/bin/lpcli/tests/phase1_bug.rs
+expression: value
+---
+{
+  "attachments": {
+    "entries": [
+      {
+        "bug_link": "[server]/bugs/42",
+        "data_link": "[server]/bugs/42/+attachment/1/data",
+        "http_etag": "\"attachment-etag\"",
+        "message_link": "[server]/bugs/42/comments/1",
+        "resource_type_link": "[server]/#bug_attachment",
+        "self_link": "[server]/bugs/42/+attachment/1",
+        "title": "trace-1.txt",
+        "type": "Patch",
+        "web_link": "https://bugs.launchpad.net/bugs/42/+attachment/1"
+      },
+      {
+        "bug_link": "[server]/bugs/42",
+        "data_link": null,
+        "http_etag": "\"attachment-etag\"",
+        "message_link": "[server]/bugs/42/comments/1",
+        "resource_type_link": "[server]/#bug_attachment",
+        "self_link": "[server]/bugs/42/+attachment/2",
+        "title": "trace-2.txt",
+        "type": "Unspecified",
+        "web_link": "https://bugs.launchpad.net/bugs/42/+attachment/2"
+      }
+    ],
+    "start": 0,
+    "total_size": 2
+  },
+  "lpcli": {
+    "attachment_download_urls": [
+      {
+        "attachment_link": "[server]/bugs/42/+attachment/1",
+        "download_url": "https://launchpadlibrarian.net/1/trace-1.txt"
+      },
+      {
+        "attachment_link": "[server]/bugs/42/+attachment/2",
+        "download_url": null
+      }
+    ]
+  }
+}

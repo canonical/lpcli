@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_text(&rendered, base)"
+---
+OK: Build request submitted.
+Status: Pending
+Request URL: [server url]/~jdoe/+snap/my-snap/+build-request/5

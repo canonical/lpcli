@@ -1,0 +1,5 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+id	name	date_created	date_last_used	status

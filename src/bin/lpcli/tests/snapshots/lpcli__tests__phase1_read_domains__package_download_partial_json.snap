@@ -1,0 +1,44 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: fixture.stable_json(&report)
+---
+{
+  "lpcli": {
+    "downloaded": 1,
+    "downloads": [
+      {
+        "filename": "hello_2.10-3.dsc",
+        "path": "[output dir]/out/hello_2.10-3.dsc",
+        "size": 3,
+        "status": "downloaded"
+      },
+      {
+        "error": "Launchpad API error 404: Failed to download https://api.launchpad.net/devel/+files/hello_2.10.orig.tar.gz: HTTP 404 — ",
+        "filename": "hello_2.10.orig.tar.gz",
+        "status": "failed"
+      }
+    ],
+    "failed": 1,
+    "output_directory": "[output dir]/out",
+    "source_file_urls": [
+      "https://api.launchpad.net/devel/+files/hello_2.10-3.dsc",
+      "https://api.launchpad.net/devel/+files/hello_2.10.orig.tar.gz"
+    ]
+  },
+  "source_package_publishing_history": {
+    "archive_link": "https://api.launchpad.net/devel/ubuntu/+archive/primary",
+    "component_name": "main",
+    "date_published": "[timestamp]",
+    "date_superseded": null,
+    "distro_series_link": "https://api.launchpad.net/devel/ubuntu/noble",
+    "http_etag": "\"etag-1234\"",
+    "pocket": "Release",
+    "resource_type_link": "https://api.launchpad.net/devel/#source_package_publishing_history",
+    "section_name": "devel",
+    "self_link": "https://api.launchpad.net/devel/ubuntu/+archive/primary/+sourcepub/1",
+    "source_package_name": "hello",
+    "source_package_version": "2.10-3",
+    "status": "Published",
+    "web_link": "https://launchpad.net/ubuntu/+archive/primary/+sourcepub/1"
+  }
+}

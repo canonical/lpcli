@@ -1,0 +1,16 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_json(&parsed, base)"
+---
+{
+  "builds_collection_link": "[server url]/~jdoe/+snap/my-snap/+build-request/5/builds",
+  "date_finished": null,
+  "date_requested": "[timestamp]",
+  "error_message": null,
+  "http_etag": "\"etag-request\"",
+  "resource_type_link": "[server url]/#snap_build_request",
+  "self_link": "[server url]/~jdoe/+snap/my-snap/+build-request/5",
+  "snap_link": "[server url]/~jdoe/+snap/my-snap",
+  "status": "Pending",
+  "web_link": "https://launchpad.net/~jdoe/+snap/my-snap/+build-request/5"
+}

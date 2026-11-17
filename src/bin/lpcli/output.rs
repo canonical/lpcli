@@ -225,8 +225,12 @@ pub struct Settings<'a> {
     pub accessible: bool,
     /// The resolved table width.
     pub display: Display,
-    /// Whether the command supports `json` and `tsv` output.
-    pub structured_output: bool,
+    /// Whether the command supports `json` output.
+    pub json_output: bool,
+    /// Whether the command supports `tsv` output.
+    pub tsv_output: bool,
+    /// Launchpad attribute names selected with `--fields`.
+    pub fields: Option<Vec<String>>,
     /// The captured environment.
     pub env: &'a Environment,
     /// Whether stdout is a terminal.
@@ -243,6 +247,7 @@ pub struct Output {
     stderr: Style,
     pretty_json: bool,
     warning: Option<String>,
+    fields: Option<Vec<String>>,
 }
 
 impl Output {
@@ -262,7 +267,12 @@ impl Output {
         )?;
         let mut mode = choice.mode;
         let mut warning = None;
-        if mode.is_structured() && !settings.structured_output {
+        let supported = match mode {
+            OutputMode::Json => settings.json_output,
+            OutputMode::Tsv => settings.tsv_output,
+            OutputMode::Rich | OutputMode::Plain => true,
+        };
+        if !supported {
             let origin = match choice.source {
                 ModeSource::Flag => {
                     return Err(format!(
@@ -283,6 +293,9 @@ impl Output {
             ));
             mode = fallback;
         }
+        if settings.fields.is_some() && mode != OutputMode::Json {
+            return Err("--fields requires JSON output; add --format json.".into());
+        }
         let width = settings.display.width();
         Ok(Self {
             mode,
@@ -300,6 +313,7 @@ impl Output {
             },
             pretty_json: settings.stdout_terminal,
             warning,
+            fields: settings.fields,
         })
     }
 
@@ -317,11 +331,18 @@ impl Output {
             stderr: style,
             pretty_json: true,
             warning: None,
+            fields: None,
         }
     }
 
-    /// The effective output mode.
+    /// Use `--fields` selection, for tests.
     #[cfg(test)]
+    pub fn with_fields(mut self, fields: &[&str]) -> Self {
+        self.fields = Some(fields.iter().map(|field| (*field).to_string()).collect());
+        self
+    }
+
+    /// The effective output mode.
     pub fn mode(&self) -> OutputMode {
         self.mode
     }
@@ -329,6 +350,26 @@ impl Output {
     /// Styling for stdout.
     pub fn stdout_style(&self) -> Style {
         self.stdout
+    }
+
+    /// Prepare legacy, already-formatted text for stdout using this output's
+    /// explicit stdout color decision.
+    pub fn style_legacy_text(&self, text: &str) -> String {
+        if self.stdout.color {
+            text.to_string()
+        } else {
+            strip_sgr(text)
+        }
+    }
+
+    /// Prepare legacy, already-formatted text for stderr using this output's
+    /// explicit stderr color decision.
+    pub fn style_legacy_stderr_text(&self, text: &str) -> String {
+        if self.stderr.color {
+            text.to_string()
+        } else {
+            strip_sgr(text)
+        }
     }
 
     /// A notice about the mode selection, to show on stderr.
@@ -343,6 +384,7 @@ impl Output {
             OutputMode::Plain => Box::new(PlainRenderer),
             OutputMode::Json => Box::new(JsonRenderer {
                 pretty: self.pretty_json,
+                fields: self.fields.clone(),
             }),
             OutputMode::Tsv => Box::new(TsvRenderer),
         }
@@ -361,9 +403,38 @@ impl Output {
         Ok(())
     }
 
-    /// Format a runtime error for stderr. Structured errors are deferred to Phase 1.
-    pub fn render_error(&self, message: &str) -> String {
-        let message = clean(message);
+    /// Write an unchanged Launchpad or lpcli-defined JSON value to stdout.
+    pub fn print_json(&self, value: &serde_json::Value) -> lpcli::error::Result<()> {
+        self.print(&Report::json(value.clone()))
+    }
+
+    /// Write a mutation result's `self_link`, if it has one.
+    pub fn print_quiet(&self, value: &serde_json::Value) -> lpcli::error::Result<()> {
+        if let Some(link) = value.get("self_link").and_then(serde_json::Value::as_str) {
+            let mut stdout = std::io::stdout().lock();
+            writeln!(stdout, "{}", clean(link))?;
+        }
+        Ok(())
+    }
+
+    /// Format a runtime error for stderr.
+    pub fn render_error(&self, error: &lpcli::error::LpError) -> String {
+        let message = redact_secrets(&error.to_string());
+        if self.mode == OutputMode::Json {
+            let value = serde_json::json!({"error": {
+                "kind": error.kind().name(),
+                "message": message,
+                "hint": error.hint(),
+                "http_status": error.http_status(),
+            }});
+            return format!("{value}\n");
+        }
+        self.render_error_message(&message)
+    }
+
+    /// Format a text runtime error message for stderr.
+    pub fn render_error_message(&self, message: &str) -> String {
+        let message = clean(&redact_secrets(message));
         if self.mode == OutputMode::Plain {
             format!("Error: {message}\n")
         } else {
@@ -373,7 +444,7 @@ impl Output {
 
     /// Format a warning for stderr.
     pub fn render_warning(&self, message: &str) -> String {
-        let message = clean(message);
+        let message = clean(&redact_secrets(message));
         if self.mode == OutputMode::Plain {
             format!("Warning: {message}\n")
         } else {
@@ -401,6 +472,92 @@ pub fn terminals() -> (bool, bool) {
     )
 }
 
+/// Remove credential-like values from error text before it is shown.
+pub fn redact_secrets(message: &str) -> String {
+    const KEYS: [&str; 8] = [
+        "oauth_token_secret",
+        "oauth_token",
+        "oauth_signature",
+        "oauth_consumer_key",
+        "consumer_secret",
+        "refresh_token_secret",
+        "refresh_token",
+        "access_token",
+    ];
+    let mut redacted = message.to_string();
+    for key in KEYS {
+        let key_lower = key.to_ascii_lowercase();
+        let mut search = 0;
+        loop {
+            let lower = redacted.to_ascii_lowercase();
+            let Some(found) = lower.get(search..).and_then(|tail| tail.find(&key_lower)) else {
+                break;
+            };
+            let key_start = search + found;
+            let mut cursor = key_start + key.len();
+            let bytes = redacted.as_bytes();
+            if bytes.get(cursor) == Some(&b'"') {
+                cursor += 1;
+            }
+            while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+                cursor += 1;
+            }
+            if bytes.get(cursor) != Some(&b':') && bytes.get(cursor) != Some(&b'=') {
+                search = key_start + key.len();
+                continue;
+            }
+            cursor += 1;
+            while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+                cursor += 1;
+            }
+            if bytes.get(cursor) == Some(&b'"') || bytes.get(cursor) == Some(&b'\'') {
+                let quote = bytes[cursor];
+                let value_start = cursor + 1;
+                let mut value_end = value_start;
+                while value_end < bytes.len() {
+                    if bytes[value_end] == b'\\' {
+                        value_end = (value_end + 2).min(bytes.len());
+                    } else if bytes[value_end] == quote {
+                        break;
+                    } else {
+                        value_end += 1;
+                    }
+                }
+                redacted.replace_range(value_start..value_end, "[redacted]");
+                search = value_start + "[redacted]".len();
+            } else {
+                let value_start = cursor;
+                let value_end = redacted[value_start..]
+                    .find(|c: char| c.is_whitespace() || matches!(c, '&' | ',' | ';' | '}'))
+                    .map_or(redacted.len(), |offset| value_start + offset);
+                if value_start == value_end {
+                    search = key_start + key.len();
+                } else {
+                    redacted.replace_range(value_start..value_end, "[redacted]");
+                    search = value_start + "[redacted]".len();
+                }
+            }
+        }
+    }
+    let mut search = 0;
+    loop {
+        let lower = redacted.to_ascii_lowercase();
+        let Some(found) = lower
+            .get(search..)
+            .and_then(|tail| tail.find("authorization:"))
+        else {
+            break;
+        };
+        let start = search + found;
+        let end = redacted[start..]
+            .find('\n')
+            .map_or(redacted.len(), |offset| start + offset);
+        redacted.replace_range(start..end, "Authorization: [redacted]");
+        search = start + "Authorization: [redacted]".len();
+    }
+    redacted
+}
+
 /// The `error:` prefix for runtime errors on stderr.
 pub fn error_prefix(color: bool) -> String {
     paint("error:", ERROR, color)
@@ -419,6 +576,20 @@ pub struct Report {
     pub json: serde_json::Value,
     /// The records printed in `tsv` mode, and by [`Block::List`].
     pub records: Records,
+}
+
+impl Report {
+    /// A report for JSON-only results.
+    pub fn json(json: serde_json::Value) -> Self {
+        Self {
+            blocks: Vec::new(),
+            json,
+            records: Records {
+                columns: Vec::new(),
+                rows: Vec::new(),
+            },
+        }
+    }
 }
 
 /// Tabular records with a fixed set of columns.
@@ -513,6 +684,40 @@ pub struct PlainRenderer;
 /// Launchpad-compatible JSON, pretty-printed for terminals.
 pub struct JsonRenderer {
     pub pretty: bool,
+    pub fields: Option<Vec<String>>,
+}
+
+/// Keep only selected attributes in Launchpad entries. Collection metadata
+/// and lpcli-defined wrappers are retained; unknown attributes are omitted.
+pub fn select_fields(value: &serde_json::Value, fields: &[String]) -> serde_json::Value {
+    fn is_entry(map: &serde_json::Map<String, serde_json::Value>) -> bool {
+        map.contains_key("self_link") || map.contains_key("resource_type_link")
+    }
+    match value {
+        serde_json::Value::Object(map) if is_entry(map) => fields
+            .iter()
+            .filter_map(|field| map.get(field).map(|value| (field.clone(), value.clone())))
+            .collect::<serde_json::Map<_, _>>()
+            .into(),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(key, value)| {
+                let selected = if key == "lpcli" {
+                    value.clone()
+                } else {
+                    select_fields(value, fields)
+                };
+                (key.clone(), selected)
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into(),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(|value| select_fields(value, fields))
+            .collect::<Vec<_>>()
+            .into(),
+        value => value.clone(),
+    }
 }
 
 /// A header row, then one tab-separated record per line.
@@ -543,6 +748,29 @@ fn paint(text: &str, style: AnsiStyle, color: bool) -> String {
 /// Make Launchpad text safe to show on a terminal: control characters other
 /// than newlines (for example, escape sequences in a title) are replaced, and
 /// tabs become spaces.
+/// Remove ANSI SGR styling sequences (`ESC [ digits/semicolons m`) emitted
+/// by legacy formatters. Anything else, including other escape sequences,
+/// is kept unchanged for the renderer's own sanitizing.
+fn strip_sgr(text: &str) -> String {
+    let mut stripped = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("\u{1b}[") {
+        stripped.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let params = after
+            .find(|c: char| !(c.is_ascii_digit() || c == ';'))
+            .unwrap_or(after.len());
+        if after[params..].starts_with('m') {
+            rest = &after[params + 1..];
+        } else {
+            stripped.push_str("\u{1b}[");
+            rest = after;
+        }
+    }
+    stripped.push_str(rest);
+    stripped
+}
+
 fn clean(text: &str) -> String {
     text.chars()
         .map(|c| match c {
@@ -715,10 +943,14 @@ impl Renderer for JsonRenderer {
     fn render(&self, report: &Report) -> String {
         // Serializing a `serde_json::Value` cannot fail: its map keys are
         // always strings.
+        let value = self.fields.as_ref().map_or_else(
+            || report.json.clone(),
+            |fields| select_fields(&report.json, fields),
+        );
         let mut text = if self.pretty {
-            serde_json::to_string_pretty(&report.json)
+            serde_json::to_string_pretty(&value)
         } else {
-            serde_json::to_string(&report.json)
+            serde_json::to_string(&value)
         }
         .expect("a JSON value always serializes");
         text.push('\n');
@@ -785,7 +1017,9 @@ pub(crate) mod tests {
             config_format: None,
             accessible: false,
             display: Display::from_width(80),
-            structured_output: true,
+            json_output: true,
+            tsv_output: true,
+            fields: None,
             env,
             stdout_terminal: true,
             stderr_terminal: true,
@@ -989,7 +1223,8 @@ pub(crate) mod tests {
             ..env()
         };
         let output = Output::resolve(Settings {
-            structured_output: false,
+            json_output: false,
+            tsv_output: false,
             ..settings(&env)
         })
         .unwrap();
@@ -997,7 +1232,8 @@ pub(crate) mod tests {
         assert!(output.warning().unwrap().contains("LPCLI_FORMAT=json"));
 
         let output = Output::resolve(Settings {
-            structured_output: false,
+            json_output: false,
+            tsv_output: false,
             accessible: true,
             config_format: Some(OutputMode::Tsv),
             ..settings(&Environment::default())
@@ -1016,7 +1252,8 @@ pub(crate) mod tests {
         );
 
         let error = Output::resolve(Settings {
-            structured_output: false,
+            json_output: false,
+            tsv_output: false,
             format: Some(OutputMode::Tsv),
             ..settings(&env)
         })
@@ -1024,7 +1261,8 @@ pub(crate) mod tests {
         assert!(error.contains("--format tsv"), "{error}");
 
         let output = Output::resolve(Settings {
-            structured_output: false,
+            json_output: false,
+            tsv_output: false,
             format: Some(OutputMode::Plain),
             ..settings(&env)
         })
@@ -1085,8 +1323,16 @@ pub(crate) mod tests {
     #[test]
     fn json_is_the_report_value_pretty_only_for_terminals() {
         let report = sample();
-        let pretty = JsonRenderer { pretty: true }.render(&report);
-        let compact = JsonRenderer { pretty: false }.render(&report);
+        let pretty = JsonRenderer {
+            pretty: true,
+            fields: None,
+        }
+        .render(&report);
+        let compact = JsonRenderer {
+            pretty: false,
+            fields: None,
+        }
+        .render(&report);
         assert_eq!(compact, "{\"entries\":[],\"start\":0,\"total_size\":2}\n");
         assert!(pretty.contains("\n  \"entries\""));
         for text in [pretty, compact] {
@@ -1131,6 +1377,90 @@ pub(crate) mod tests {
             !json.contains('\u{1b}'),
             "JSON escapes control characters: {json:?}"
         );
+    }
+
+    #[test]
+    fn credential_redaction_covers_json_values_form_values_and_every_header() {
+        let input = concat!(
+            "{\"oauth_token_secret\": \"json-secret\", \"oauth_token\":\"json-token\"} ",
+            "oauth_signature=form-secret&refresh_token: 'refresh-secret'\n",
+            "Authorization: OAuth oauth_token=header-one\n",
+            "authorization: Bearer header-two"
+        );
+        let output = redact_secrets(input);
+        for value in [
+            "json-secret",
+            "json-token",
+            "form-secret",
+            "refresh-secret",
+            "header-one",
+            "header-two",
+        ] {
+            assert!(!output.contains(value), "{value} leaked: {output}");
+        }
+        assert_eq!(
+            output.matches("Authorization: [redacted]").count(),
+            2,
+            "{output}"
+        );
+        assert!(output.contains("\"oauth_token_secret\": \"[redacted]\""));
+    }
+
+    #[test]
+    fn warnings_and_runtime_messages_also_redact_secrets() {
+        for rendered in [
+            Output::fixed(OutputMode::Plain, false, 80)
+                .render_error_message("OAuth failure: {\"oauth_token_secret\":\"s3cret\"}"),
+            Output::fixed(OutputMode::Plain, false, 80)
+                .render_warning("response Authorization: Bearer topsecret"),
+        ] {
+            assert!(!rendered.contains("s3cret"), "{rendered}");
+            assert!(!rendered.contains("topsecret"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn legacy_text_honours_explicit_color_decision() {
+        let text = "\u{1b}[1;32m✓\u{1b}[0m done\n";
+        assert_eq!(
+            Output::fixed(OutputMode::Rich, false, 80).style_legacy_text(text),
+            "✓ done\n"
+        );
+        assert_eq!(
+            Output::fixed(OutputMode::Rich, true, 80).style_legacy_text(text),
+            text
+        );
+    }
+
+    #[test]
+    fn legacy_stdout_and_stderr_text_use_their_own_stream_decision() {
+        let env = Environment::default();
+        let output = Output::resolve(Settings {
+            stdout_terminal: true,
+            stderr_terminal: false,
+            ..settings(&env)
+        })
+        .unwrap();
+        let text = "\u{1b}[33mwarning\u{1b}[0m";
+        assert_eq!(output.style_legacy_text(text), text);
+        assert_eq!(output.style_legacy_stderr_text(text), "warning");
+    }
+
+    #[test]
+    fn sgr_stripping_never_alters_non_sgr_text() {
+        for (input, expected) in [
+            ("plain text, no escapes", "plain text, no escapes"),
+            ("\u{1b}[mreset", "reset"),
+            (
+                "\u{1b}[2J clear, then more text",
+                "\u{1b}[2J clear, then more text",
+            ),
+            ("unterminated \u{1b}[12", "unterminated \u{1b}[12"),
+            ("\u{1b}]52;c;payload\u{7}", "\u{1b}]52;c;payload\u{7}"),
+            ("café \u{1b}[1m✓\u{1b}[0m", "café ✓"),
+        ] {
+            assert_eq!(strip_sgr(input), expected, "{input:?}");
+        }
     }
 
     #[test]

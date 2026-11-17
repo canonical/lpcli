@@ -1,0 +1,63 @@
+---
+source: src/bin/lpcli/tests/phase1_queue.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "entries": [
+    {
+      "archive_link": "https://api.launchpad.net/devel/ubuntu/+archive/primary",
+      "changes_file_url": "https://launchpad.net/ubuntu/noble/+upload/1/+files/curl_8.5.0-2ubuntu10_source.changes",
+      "component_name": "main",
+      "contains_build": false,
+      "contains_copy": false,
+      "contains_source": true,
+      "copy_source_archive_link": null,
+      "custom_file_urls": [],
+      "date_created": "[timestamp]",
+      "display_arches": "source",
+      "display_name": "curl",
+      "display_version": "8.5.0-2ubuntu10",
+      "distroseries_link": "https://api.launchpad.net/devel/ubuntu/noble",
+      "http_etag": "\"etag-upload\"",
+      "id": 1,
+      "logs_collection_link": "https://api.launchpad.net/devel/ubuntu/noble/+upload/1/logs",
+      "package_name": "curl",
+      "package_version": "8.5.0-2ubuntu10",
+      "pocket": "Proposed",
+      "resource_type_link": "https://api.launchpad.net/devel/#package_upload",
+      "section_name": "web",
+      "self_link": "https://api.launchpad.net/devel/ubuntu/noble/+upload/1",
+      "status": "New",
+      "web_link": "https://launchpad.net/ubuntu/noble/+upload/1"
+    },
+    {
+      "archive_link": "https://api.launchpad.net/devel/ubuntu/+archive/primary",
+      "changes_file_url": "https://launchpad.net/ubuntu/noble/+upload/2/+files/curl_8.5.0-2ubuntu10_source.changes",
+      "component_name": "main",
+      "contains_build": true,
+      "contains_copy": false,
+      "contains_source": false,
+      "copy_source_archive_link": null,
+      "custom_file_urls": [],
+      "date_created": "[timestamp]",
+      "display_arches": "amd64, arm64",
+      "display_name": "curl",
+      "display_version": "8.5.0-2ubuntu10",
+      "distroseries_link": "https://api.launchpad.net/devel/ubuntu/noble",
+      "http_etag": "\"etag-upload\"",
+      "id": 2,
+      "logs_collection_link": "https://api.launchpad.net/devel/ubuntu/noble/+upload/2/logs",
+      "package_name": "curl",
+      "package_version": "8.5.0-2ubuntu10",
+      "pocket": "Proposed",
+      "resource_type_link": "https://api.launchpad.net/devel/#package_upload",
+      "section_name": "web",
+      "self_link": "https://api.launchpad.net/devel/ubuntu/noble/+upload/2",
+      "status": "New",
+      "web_link": "https://launchpad.net/ubuntu/noble/+upload/2"
+    }
+  ],
+  "next_collection_link": "https://api.launchpad.net/devel/ubuntu/noble?ws.op=getPackageUploads&ws.size=2&memo=2&ws.start=2",
+  "start": 0,
+  "total_size": 3
+}

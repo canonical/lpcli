@@ -1,0 +1,17 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_text(&rendered, base)"
+---
+2 webhooks found. Use the Webhook URL value with --webhook-url.
+
+Delivery URL: https://ci.example.com/hooks/1
+Active: true
+Events: git:push:0.1, merge-proposal:0.1
+Created: 2026-01-02
+Webhook URL: https://api.launchpad.net/devel/launchpad/+webhook/1
+
+Delivery URL: https://ci.example.com/hooks/2
+Active: false
+Events: none
+Created: 2026-01-02
+Webhook URL: https://api.launchpad.net/devel/launchpad/+webhook/2

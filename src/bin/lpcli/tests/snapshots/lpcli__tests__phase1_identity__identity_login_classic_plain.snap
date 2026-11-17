@@ -1,0 +1,5 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+OK: Logged in to Launchpad and stored the OAuth credentials.

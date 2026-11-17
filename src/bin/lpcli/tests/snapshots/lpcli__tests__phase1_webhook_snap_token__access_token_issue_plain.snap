@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_text(&rendered, base)"
+---
+OK: Access token issued.
+Warning: Save this secret; it will not be shown again.
+Secret: [secret]

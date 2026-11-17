@@ -1,0 +1,9 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+{
+  "lpcli": {
+    "hardware_token_grant": null
+  }
+}

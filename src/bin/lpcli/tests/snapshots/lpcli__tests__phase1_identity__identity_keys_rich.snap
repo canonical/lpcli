@@ -1,0 +1,11 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+┌────┬─────────────┬────────────┬────────────┬─────────┐
+│ ID ┆ Name        ┆ Registered ┆ Last Used  ┆ Status  │
+╞════╪═════════════╪════════════╪════════════╪═════════╡
+│ 7  ┆ Primary key ┆ 2026-01-02 ┆ 2026-02-03 ┆ active  │
+│ 8  ┆ Old         ┆ 2026-01-02 ┆ —          ┆ revoked │
+└────┴─────────────┴────────────┴────────────┴─────────┘
+2 security keys found.

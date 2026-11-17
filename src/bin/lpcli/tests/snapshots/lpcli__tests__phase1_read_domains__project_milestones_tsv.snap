@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "render(&report, OutputMode::Tsv)"
+---
+name	title	is_active	date_targeted
+1.0	Launchpad 1.0	false	2025-06-01
+2.0	Launchpad 2.0	true	2025-06-01

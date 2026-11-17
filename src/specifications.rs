@@ -7,11 +7,15 @@
 //! | [`get_specification`] | Fetch a single specification by target and slug |
 //! | [`list_project_specifications`] | List all specs for a project |
 //! | [`list_valid_project_specifications`] | List non-obsolete specs for a project |
+//!
+//! Each read function has a `_raw` counterpart that also returns the exact
+//! JSON Launchpad sent: an entry, or a collection with `start`, `entries`, and
+//! `total_size` or `total_size_link`.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::client::{Collection, LaunchpadClient};
+use crate::client::{Collection, LaunchpadClient, Raw};
 use crate::error::Result;
 
 // ---------------------------------------------------------------------------
@@ -68,8 +72,18 @@ pub async fn get_specification(
     target: &str,
     name: &str,
 ) -> Result<Specification> {
+    Ok(get_specification_raw(client, target, name).await?.value)
+}
+
+/// Like [`get_specification()`], but also keep the exact JSON Launchpad
+/// returned.
+pub async fn get_specification_raw(
+    client: &LaunchpadClient,
+    target: &str,
+    name: &str,
+) -> Result<Raw<Specification>> {
     client
-        .get(&format!("/{}/+spec/{}", urlenc(target), urlenc(name)))
+        .get_raw(&format!("/{}/+spec/{}", urlenc(target), urlenc(name)))
         .await
 }
 
@@ -78,8 +92,19 @@ pub async fn list_project_specifications(
     client: &LaunchpadClient,
     project: &str,
 ) -> Result<Vec<Specification>> {
+    Ok(list_project_specifications_raw(client, project)
+        .await?
+        .value)
+}
+
+/// Like [`list_project_specifications()`], but also keep Launchpad's
+/// collection JSON.
+pub async fn list_project_specifications_raw(
+    client: &LaunchpadClient,
+    project: &str,
+) -> Result<Raw<Vec<Specification>>> {
     let url = client.url(&format!("/{}/all_specifications", urlenc(project)));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all_raw(client, &url).await
 }
 
 /// List non-obsolete specifications for a project.
@@ -87,8 +112,19 @@ pub async fn list_valid_project_specifications(
     client: &LaunchpadClient,
     project: &str,
 ) -> Result<Vec<Specification>> {
+    Ok(list_valid_project_specifications_raw(client, project)
+        .await?
+        .value)
+}
+
+/// Like [`list_valid_project_specifications()`], but also keep Launchpad's
+/// collection JSON.
+pub async fn list_valid_project_specifications_raw(
+    client: &LaunchpadClient,
+    project: &str,
+) -> Result<Raw<Vec<Specification>>> {
     let url = client.url(&format!("/{}/valid_specifications", urlenc(project)));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all_raw(client, &url).await
 }
 
 // ---------------------------------------------------------------------------

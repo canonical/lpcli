@@ -1,0 +1,12 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+{
+  "lpcli": {
+    "account": "someone",
+    "credentials": "hardware_token",
+    "grant_storage": "file",
+    "path": "/tmp/grant.json"
+  }
+}

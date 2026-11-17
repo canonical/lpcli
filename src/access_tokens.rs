@@ -12,11 +12,16 @@
 //! | [`list_project_access_tokens`] | List tokens for a project |
 //! | [`list_git_access_tokens`] | List tokens for a Git repository |
 //! | [`revoke_access_token`] | Revoke a token by its `self_link` URL |
+//!
+//! The list operations also have `*_raw` counterparts that keep the exact
+//! JSON Launchpad returned (see [`Raw`]). Issuing a token returns only the
+//! plaintext secret, not a Launchpad entry, and revoking returns nothing, so
+//! those operations have no raw counterparts.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::client::{Collection, LaunchpadClient};
+use crate::client::{Collection, LaunchpadClient, Raw};
 use crate::error::Result;
 
 // ---------------------------------------------------------------------------
@@ -95,8 +100,20 @@ pub async fn list_project_access_tokens(
     client: &LaunchpadClient,
     project: &str,
 ) -> Result<Vec<AccessToken>> {
-    let url = client.url(&format!("/{}?ws.op=getAccessTokens", urlenc(project)));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all(client, &project_tokens_url(client, project)).await
+}
+
+/// Like [`list_project_access_tokens()`], but return Launchpad's collection
+/// shape with every page's entries unmodified.
+pub async fn list_project_access_tokens_raw(
+    client: &LaunchpadClient,
+    project: &str,
+) -> Result<Raw<Vec<AccessToken>>> {
+    Collection::fetch_all_raw(client, &project_tokens_url(client, project)).await
+}
+
+fn project_tokens_url(client: &LaunchpadClient, project: &str) -> String {
+    client.url(&format!("/{}?ws.op=getAccessTokens", urlenc(project)))
 }
 
 /// List personal access tokens for a Git repository.
@@ -104,9 +121,21 @@ pub async fn list_git_access_tokens(
     client: &LaunchpadClient,
     repo_path: &str,
 ) -> Result<Vec<AccessToken>> {
+    Collection::fetch_all(client, &git_tokens_url(client, repo_path)).await
+}
+
+/// Like [`list_git_access_tokens()`], but return Launchpad's collection shape
+/// with every page's entries unmodified.
+pub async fn list_git_access_tokens_raw(
+    client: &LaunchpadClient,
+    repo_path: &str,
+) -> Result<Raw<Vec<AccessToken>>> {
+    Collection::fetch_all_raw(client, &git_tokens_url(client, repo_path)).await
+}
+
+fn git_tokens_url(client: &LaunchpadClient, repo_path: &str) -> String {
     let clean = repo_path.trim_start_matches('/');
-    let url = client.url(&format!("/{clean}?ws.op=getAccessTokens"));
-    Collection::fetch_all(client, &url).await
+    client.url(&format!("/{clean}?ws.op=getAccessTokens"))
 }
 
 /// Revoke a personal access token.

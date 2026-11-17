@@ -1,0 +1,14 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+{
+  "lpcli": {
+    "revoked": true,
+    "security_key": {
+      "id": 7,
+      "name": "Primary",
+      "self_link": "https://api.launchpad.net/devel/~example-owner/+authenticator/7"
+    }
+  }
+}

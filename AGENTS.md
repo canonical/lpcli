@@ -14,7 +14,8 @@ presentation belong in the binary.
 Authentication uses OAuth 1.0a credentials stored in the OS keyring with a
 plaintext-file fallback, or hardware-bound OAuth grants backed by USB FIDO2
 security keys. Classic login (`lpcli login`) prints a browser authorization URL
-and waits for the user to authorize access and press Enter. Logout (`lpcli logout`)
+on stderr and waits for the user to authorize access and press Enter, so it
+needs an interactive terminal. Logout (`lpcli logout`)
 removes locally stored classic credentials and hardware-bound grants; server-side
 revocation is a separate operation. USB hardware-token support and persisted
 access-token coordination are currently implemented on Linux.
@@ -27,9 +28,13 @@ access-token coordination are currently implemented on Linux.
 - `src/hardware_key.rs` and `src/hardware_key/`: security-key interfaces, CTAP2,
   PIN/UV protocols, CBOR, and Linux hidraw transport.
 - `src/bin/lpcli.rs`: CLI argument parsing, validation, authentication policy, and dispatch.
+- `src/bin/lpcli/commands/`: command handlers and their `Report`s, by domain.
 - `src/bin/lpcli/config.rs`: configuration loading and validation.
-- `src/bin/lpcli/display.rs`: terminal output formatting.
+- `src/bin/lpcli/display.rs`: terminal table formatting.
+- `src/bin/lpcli/output.rs`: output modes, renderers, `--fields`, and structured errors.
 - `src/bin/lpcli/tests.rs`: CLI parsing, documentation-example, and handler-helper tests.
+- `src/bin/lpcli/tests/`: per-domain command snapshot tests.
+- `docs/json-output.md`: the versioned JSON output contract.
 - `tests/`: mocked HTTP integration tests; library modules also contain inline unit tests.
 - `.github/workflows/`: build, lint, test, documentation, audit, and publishing workflows.
 - `.devcontainer/`: the Ubuntu 26.04 / Rust 1.97 development environment.
@@ -60,6 +65,28 @@ access-token coordination are currently implemented on Linux.
   as fallback. Preserve ownership checks, cross-process locking, and generation fencing.
 - Follow the existing signing and redirect restrictions so credentials remain
   scoped to trusted Launchpad endpoints.
+- Keep `--no-input` (implied when stdin is not a terminal) failing before any
+  prompt reads input; security-key touch notices still go to stderr.
+
+## Output and the JSON Contract
+
+JSON output is a versioned public contract (`docs/json-output.md`, version 1,
+reported by `lpcli schema`). Every command except `skills` supports
+`--format json`; list commands, `status`, and `hardware-token keys` also
+support `--format tsv`. Within a contract version, only add commands,
+optional lpcli-defined members, or error kinds. Renaming or removing an
+lpcli-defined key, or changing the meaning of an exit code, needs a new
+contract version.
+
+- Print Launchpad entries and collections unchanged; put computed values
+  under an `lpcli` member, never inside Launchpad entries.
+- Map errors to exit codes only through `LpError::kind()` (0 success,
+  1 general, 2 usage, 3 not authenticated, 4 not found, 5 permission denied,
+  6 network, 7 partial). Return `LpError::Partial` after printing what
+  succeeded when Launchpad or the filesystem may already reflect part of an
+  operation.
+- `--quiet` is for mutations only and prints resulting `self_link`s.
+  `--fields` requires JSON output.
 
 ## Upload Queues and PPAs
 
@@ -87,10 +114,11 @@ account. Documentation examples should pass both clap parsing and `validate_cli`
 the CLI test suite checks examples in `README.md`, `AGENTS.md`, and `SKILL.md`
 without dispatching commands or making network requests.
 
-Commands ported to the output layer (`src/bin/lpcli/output.rs`) build a
-`Report` and are snapshot-tested in all four modes (`rich`, `plain`, `json`,
-`tsv`) with [insta](https://insta.rs). Snapshots live in `snapshots/` next to
-the tests; CI sets `INSTA_UPDATE=no`, so new or changed snapshots fail. Review
+Command output is snapshot-tested with [insta](https://insta.rs): the JSON of
+every read command and of representative mutations and partial failures, TSV
+for list commands, and `rich`/`plain` for representative commands. Commands on the output layer (`src/bin/lpcli/output.rs`) build a
+`Report` rendered in all four modes (`rich`, `plain`, `json`, `tsv`).
+Snapshots live in `snapshots/` next to the tests; CI sets `INSTA_UPDATE=no`, so new or changed snapshots fail. Review
 changes with `cargo insta review` (or `INSTA_UPDATE=always cargo test` and
 `git diff`). Redact timestamps and mock-server URLs, and never snapshot
 credentials. JSON output must come from Launchpad's raw JSON (`client::Raw`);

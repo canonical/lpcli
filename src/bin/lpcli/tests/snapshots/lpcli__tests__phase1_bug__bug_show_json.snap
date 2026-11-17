@@ -1,0 +1,111 @@
+---
+source: src/bin/lpcli/tests/phase1_bug.rs
+expression: value
+---
+{
+  "attachments": {
+    "entries": [
+      {
+        "bug_link": "[server]/bugs/42",
+        "data_link": "[server]/bugs/42/+attachment/1/data",
+        "http_etag": "\"attachment-etag\"",
+        "message_link": "[server]/bugs/42/comments/1",
+        "resource_type_link": "[server]/#bug_attachment",
+        "self_link": "[server]/bugs/42/+attachment/1",
+        "title": "trace-1.txt",
+        "type": "Patch",
+        "web_link": "https://bugs.launchpad.net/bugs/42/+attachment/1"
+      },
+      {
+        "bug_link": "[server]/bugs/42",
+        "data_link": null,
+        "http_etag": "\"attachment-etag\"",
+        "message_link": "[server]/bugs/42/comments/1",
+        "resource_type_link": "[server]/#bug_attachment",
+        "self_link": "[server]/bugs/42/+attachment/2",
+        "title": "trace-2.txt",
+        "type": "Unspecified",
+        "web_link": "https://bugs.launchpad.net/bugs/42/+attachment/2"
+      }
+    ],
+    "start": 0,
+    "total_size": 2
+  },
+  "bug": {
+    "bug_tasks_collection_link": "[server]/bugs/42/bug_tasks",
+    "date_created": "[timestamp]",
+    "date_last_updated": "[timestamp]",
+    "description": "Steps:\n1. curl 'http://x'\n2. crash",
+    "duplicate_of_link": null,
+    "heat": 12,
+    "http_etag": "\"bug-etag\"",
+    "id": 42,
+    "information_type": "Public",
+    "owner_link": "[server]/~reporter",
+    "resource_type_link": "[server]/#bug",
+    "self_link": "[server]/bugs/42",
+    "tags": [
+      "crash",
+      "noble"
+    ],
+    "title": "curl crashes on \"quoted\" URLs",
+    "users_affected_count": 3,
+    "web_link": "https://bugs.launchpad.net/bugs/42"
+  },
+  "bug_tasks": {
+    "entries": [
+      {
+        "assignee_link": null,
+        "bug_link": "[server]/bugs/42",
+        "bug_target_display_name": "curl (Ubuntu)",
+        "bug_target_name": "curl (Ubuntu)",
+        "bug_watch_link": null,
+        "date_created": "[timestamp]",
+        "date_fix_released": null,
+        "http_etag": "\"task-etag\"",
+        "importance": "Medium",
+        "is_complete": false,
+        "milestone_link": null,
+        "resource_type_link": "[server]/#bug_task",
+        "self_link": "[server]/ubuntu/+source/curl/+bug/42",
+        "status": "Confirmed",
+        "target_link": "https://api.launchpad.net/devel/ubuntu/+source/curl",
+        "title": "Bug #42 in curl: \"crash\"",
+        "web_link": "https://bugs.launchpad.net/ubuntu/+source/curl/+bug/42"
+      },
+      {
+        "assignee_link": null,
+        "bug_link": "[server]/bugs/42",
+        "bug_target_display_name": "curl (Ubuntu noble)",
+        "bug_target_name": "curl (Ubuntu noble)",
+        "bug_watch_link": null,
+        "date_created": "[timestamp]",
+        "date_fix_released": null,
+        "http_etag": "\"task-etag\"",
+        "importance": "Medium",
+        "is_complete": false,
+        "milestone_link": null,
+        "resource_type_link": "[server]/#bug_task",
+        "self_link": "[server]/ubuntu/noble/+source/curl/+bug/42",
+        "status": "In Progress",
+        "target_link": "https://api.launchpad.net/devel/ubuntu/noble/+source/curl",
+        "title": "Bug #42 in curl: \"crash\"",
+        "web_link": "https://bugs.launchpad.net/ubuntu/noble/+source/curl/+bug/42"
+      }
+    ],
+    "start": 0,
+    "total_size": 2
+  },
+  "lpcli": {
+    "attachment_download_urls": [
+      {
+        "attachment_link": "[server]/bugs/42/+attachment/1",
+        "download_url": "https://launchpadlibrarian.net/1/trace-1.txt"
+      },
+      {
+        "attachment_link": "[server]/bugs/42/+attachment/2",
+        "download_url": null
+      }
+    ]
+  }
+}

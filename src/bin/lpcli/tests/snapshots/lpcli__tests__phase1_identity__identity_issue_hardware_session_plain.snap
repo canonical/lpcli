@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+OK: Logged in as ~example-owner with a hardware-bound grant.
+Using the stored grant.

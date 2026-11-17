@@ -219,7 +219,7 @@ async fn created_location_requires_location_header() {
         .expect_err("201 Created without Location must return an error");
 
     match err {
-        LpError::Other(msg) => {
+        LpError::Partial(msg) => {
             assert!(msg.contains("Location"));
         }
         other => panic!("unexpected error variant: {other}"),

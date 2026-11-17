@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+OK: Cleared the local hardware access-token cache.
+The stored grant is unchanged; nothing was revoked on Launchpad.

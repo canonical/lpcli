@@ -1,0 +1,10 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_json(&parsed, base)"
+---
+{
+  "lpcli": {
+    "access_token_link": "[server url]/launchpad/+access-token/1",
+    "revoked": true
+  }
+}

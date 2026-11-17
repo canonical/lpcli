@@ -288,35 +288,79 @@ The mode is chosen, from highest priority to lowest, by `--format`, the
 finally automatically: `plain` when `display.accessible = true` or `TERM=dumb`,
 and `rich` otherwise. An invalid `LPCLI_FORMAT` value is an error.
 
-`json` and `tsv` are available for `status`, `bug search`, and
-`bug remote-bug-trackers`; other commands will follow. Passing
-`--format json` or `--format tsv` to another command is a usage error. When
-`json` or `tsv` comes from `LPCLI_FORMAT` or `display.format` instead, other
-commands print a warning on stderr and use their normal output.
+`json` is available for every command except `skills`, which prints the
+embedded `SKILL.md` as is. `tsv` is available for list commands, `status`, and
+`hardware-token keys`. Passing `--format json` or `--format tsv` to a command
+without that output is a usage error. When `json` or `tsv` comes from
+`LPCLI_FORMAT` or `display.format` instead, such commands print a warning on
+stderr and use their normal output.
 
 ```bash
 lpcli --format json bug search --target ubuntu --package curl --limit 5
+lpcli --format json --fields id,title,web_link bug show --bug-id 123456
 lpcli bug remote-bug-trackers --search debian --format tsv
 lpcli --format plain status
+lpcli --format json schema
 ```
 
-In `json` mode:
+JSON output is a versioned public contract, described in
+[`docs/json-output.md`](docs/json-output.md); `lpcli schema` reports its
+version (currently 1). In `json` mode:
 
 - Entries are exactly as Launchpad returns them, with the same field names,
   `null` values, `*_link` fields, and values.
 - Lists use Launchpad's collection shape: `total_size`, `start`, and
-  `entries`. `bug search` passes Launchpad's result page through, including
-  `next_collection_link` when `--limit` cut the results short, and
-  `total_size_link` when Launchpad sends it instead of `total_size`.
-- `bug remote-bug-trackers --search` filters locally, so `total_size` is the
-  number of matches and is included only when every tracker was checked.
-  When `--limit` stops the search early, both `total_size` and
-  `next_collection_link` are omitted.
-- `status` has no Launchpad entry to pass through, so it prints an
-  lpcli-defined object under an `lpcli` member, for example
+  `entries`. `next_collection_link` is kept when `--limit` cut the results
+  short, and `total_size_link` is passed through when Launchpad sends it
+  instead of `total_size`.
+- Locally filtered lists, such as `bug remote-bug-trackers --search` and
+  `cve search --keyword`, include `total_size` only when every entry was
+  checked, and never include `next_collection_link`.
+- Commands that combine several requests, such as `bug show` (`bug`,
+  `bug_tasks`, `attachments`), print an object whose members are unmodified
+  Launchpad entries or collections. Values that lpcli works out itself go
+  under an `lpcli` member. Commands with no Launchpad entry to print, such as
+  `status`, `login`, and `webhook delete`, print only an `lpcli` member, for
+  example
   `{"lpcli": {"authentication": {"credentials": "oauth", "account": "someone", "verified": true}, "server": {...}}}`.
-  It never contains credentials.
+  Output never contains credentials, grant secrets, PINs, or assertions.
+- Mutations print the entry Launchpad returned, or read back afterwards.
 - JSON is indented when stdout is a terminal and compact otherwise.
+
+### Options for scripts and agents
+
+| Option | Effect |
+|---|---|
+| `--fields NAME,...` | Keep only the named Launchpad attributes in each JSON entry. Collection keys such as `total_size` and the `lpcli` member are kept. Requires JSON output. |
+| `--quiet` | For mutations only: print just the `self_link` of each resulting entry, one per line, or nothing when there is none. Secrets that cannot be shown again, from `access-token issue` and `hardware-token issue --print`, are still printed. |
+| `--no-input` | Fail instead of prompting. Enabled automatically when stdin is not a terminal. Classic `login` and `hardware-token register` need a terminal; security-key touches cannot be skipped, so lpcli reports on stderr when it waits for one. |
+
+```bash
+lpcli --format json --quiet bug set-status --bug-id 123456 --target curl \
+    --series noble --status triaged
+```
+
+In JSON mode, errors are written to stderr as
+`{"error": {"kind": "not_found", "message": "...", "hint": null, "http_status": 404}}`.
+Command-line usage errors are reported as text by the argument parser.
+
+### Exit codes
+
+| Code | Meaning |
+|---:|---|
+| 0 | Success |
+| 1 | General error |
+| 2 | Usage or validation error |
+| 3 | Not authenticated |
+| 4 | Not found |
+| 5 | Permission denied |
+| 6 | Network failure, timeout, or rate limiting |
+| 7 | Partial success |
+
+Exit code 7 means part of the operation was applied: for example, some files
+of a download were written, or a bug change succeeded for some series but not
+others. The output lists what succeeded and what failed. Before 0.5.0, every
+failure exited with 1 and partial failures exited with 0.
 
 Color follows `--color auto|always|never`. With `auto`, the default,
 `CLICOLOR_FORCE` set to anything other than `0` turns color on, a non-empty
@@ -897,20 +941,46 @@ async fn main() -> lpcli::error::Result<()> {
 }
 ```
 
+### Exact Launchpad JSON
+
+The typed structs keep only the fields lpcli models. To get the JSON exactly as
+Launchpad returned it, use the `_raw` counterpart of a function, such as
+`bugs::get_bug_raw`, `bugs::search_bugs_raw`, or `bugs::set_bug_status_raw`.
+These return `client::Raw<T>`, which holds the typed `value` and the unmodified
+`raw` JSON. Lists use Launchpad's collection shape.
+
+```rust
+use lpcli::{bugs, client::LaunchpadClient};
+
+#[tokio::main]
+async fn main() -> lpcli::error::Result<()> {
+    let lp = LaunchpadClient::new(None);
+    let bug = bugs::get_bug_raw(&lp, 123456).await?;
+    println!("Bug #{}: {}", bug.value.id, bug.value.title);
+    println!("{}", bug.raw["web_link"]);
+    Ok(())
+}
+```
+
 ### Error handling
 
 Fallible API operations use `lpcli::error::Result<T>`, which is an alias for
-`std::result::Result<T, lpcli::error::LpError>`. Meaningful variants include:
+`std::result::Result<T, lpcli::error::LpError>`. `LpError::kind()` classifies
+an error as an `error::ErrorKind`, and `LpError::exit_code()` gives the CLI
+exit code for it. Meaningful variants include:
 
 | Variant | When raised |
 |---------|-------------|
 | `LpError::NotAuthenticated` | No usable authentication credentials are available; run `lpcli login` |
-| `LpError::NotFound` | The requested resource does not exist on Launchpad |
+| `LpError::NotFound` | Launchpad returned HTTP 404 for the requested resource |
+| `LpError::LocalNotFound` | A successful response contained no matching result |
 | `LpError::Api` | Launchpad returned a non-success HTTP status |
 | `LpError::RateLimit` | Launchpad throttled the request (HTTP 429) |
 | `LpError::Timeout` | The request timed out |
 | `LpError::HardwareKey` | A security-key operation failed (no key, permissions, wrong PIN) |
 | `LpError::HardwareTokenGrantRejected` | Launchpad rejected a hardware-bound grant |
+| `LpError::Usage` | A caller-supplied value is invalid |
+| `LpError::Partial` | Part of an operation was applied, or a mutation was applied but its result could not be confirmed |
 
 ### Hardware-bound usage
 
@@ -966,9 +1036,15 @@ src/
   bin/
     lpcli.rs        — CLI binary (clap argument parsing, authentication policy, dispatch)
     lpcli/
+      commands/     — Command handlers and their reports, by domain
       config.rs     — Configuration loading and validation
-      display.rs    — Terminal output formatting
+      display.rs    — Terminal table formatting
+      output.rs     — Output modes, renderers, field selection, and structured errors
       tests.rs      — CLI argument, documentation-example, and handler-helper tests
+      tests/        — Command snapshot tests
+
+docs/
+  json-output.md    — The versioned JSON output contract
 
 tests/              — Mocked HTTP integration tests
 ```
@@ -997,8 +1073,8 @@ cargo test --locked --doc
 
 CI also checks tracked filenames for ASCII-only names and audits dependencies
 against the RustSec advisory database. CLI tests parse the `lpcli` examples in this
-README and `AGENTS.md`, including argument validation, without executing commands
-or making Launchpad requests.
+README, `AGENTS.md`, and `SKILL.md`, including argument validation, without
+executing commands or making Launchpad requests.
 
 ---
 

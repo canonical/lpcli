@@ -1,0 +1,11 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_text(&rendered, base)"
+---
+┌──────────────────┬────────────┬─────────────┬─────────┐
+│ Sent             ┆ Successful ┆ Status Code ┆ Pending │
+╞══════════════════╪════════════╪═════════════╪═════════╡
+│ 2026-01-02 03:04 ┆ true       ┆ 200         ┆ false   │
+│ 2026-01-02 03:04 ┆ —          ┆ —           ┆ true    │
+└──────────────────┴────────────┴─────────────┴─────────┘
+2 deliveries found.

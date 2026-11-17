@@ -27,6 +27,8 @@
 //! [`Interaction`] receives touch prompts, PIN requests and device choices.
 //! [`ConsoleInteraction`] prompts on the terminal; [`NonInteractive`] fails
 //! instead of prompting, which cannot bypass what the key itself requires.
+//! [`NonInteractiveConsole`] also fails instead of prompting, but still tells
+//! the user on stderr when the key is waiting for a touch.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -244,11 +246,11 @@ impl Interaction for ConsoleInteraction {
     }
 
     fn prompt_touch(&self) {
-        eprintln!("Touch your security key to continue...");
+        eprintln!("{TOUCH_NOTICE}");
     }
 
     fn prompt_uv(&self) {
-        eprintln!("Verify yourself on your security key (for example, with your fingerprint)...");
+        eprintln!("{UV_NOTICE}");
     }
 
     fn request_pin(&self, attempt: u32) -> Result<Zeroizing<String>> {
@@ -278,6 +280,13 @@ impl Interaction for ConsoleInteraction {
         read_selection(&mut std::io::stdin().lock(), kind, labels.len())
     }
 }
+
+/// Shown on stderr when the key waits for user presence.
+const TOUCH_NOTICE: &str = "Touch your security key to continue...";
+
+/// Shown on stderr when the key verifies the user with built-in verification.
+const UV_NOTICE: &str =
+    "Verify yourself on your security key (for example, with your fingerprint)...";
 
 /// Maximum prompt-line length in bytes, including the newline.
 const MAX_PROMPT_LINE_BYTES: usize = 1024;
@@ -346,6 +355,40 @@ impl Interaction for NonInteractive {
         Err(LpError::HardwareKey(format!(
             "Several {kind}s are available, but prompting is disabled."
         )))
+    }
+}
+
+/// Never reads input, but reports on stderr, like [`ConsoleInteraction`],
+/// when the key is waiting for a touch or built-in verification, which no
+/// software can skip.
+///
+/// PIN requests and device choices fail as with [`NonInteractive`], and so
+/// does registration, because it pauses for the user to connect the new key.
+/// Every failure happens before anything is read from stdin or the terminal.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NonInteractiveConsole;
+
+impl Interaction for NonInteractiveConsole {
+    fn prepare_registration(&self) -> Result<()> {
+        Err(LpError::HardwareKey(
+            "Hardware key registration requires an interactive session.".to_string(),
+        ))
+    }
+
+    fn prompt_touch(&self) {
+        ConsoleInteraction.prompt_touch();
+    }
+
+    fn prompt_uv(&self) {
+        ConsoleInteraction.prompt_uv();
+    }
+
+    fn request_pin(&self, attempt: u32) -> Result<Zeroizing<String>> {
+        NonInteractive.request_pin(attempt)
+    }
+
+    fn choose(&self, kind: &str, labels: &[String]) -> Result<usize> {
+        NonInteractive.choose(kind, labels)
     }
 }
 
@@ -721,6 +764,71 @@ mod tests {
             NonInteractive
                 .choose("security key", &["a".into()])
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn non_interactive_console_fails_before_prompts_but_reports_touches_on_stderr() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        const CHILD_ENV: &str = "LPCLI_TEST_NON_INTERACTIVE_CONSOLE";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let interaction = NonInteractiveConsole;
+            interaction.prepare_assertion().unwrap();
+            assert!(matches!(
+                interaction.prepare_registration(),
+                Err(LpError::HardwareKey(_))
+            ));
+            for attempt in [0, 1] {
+                assert!(matches!(
+                    interaction.request_pin(attempt),
+                    Err(LpError::HardwareKey(_))
+                ));
+            }
+            assert!(matches!(
+                interaction.choose("security key", &["a".into(), "b".into()]),
+                Err(LpError::HardwareKey(_))
+            ));
+            interaction.prompt_touch();
+            interaction.prompt_uv();
+            return;
+        }
+
+        // A subprocess captures the real stdout and stderr. Its stdin is a
+        // pipe holding valid answers, which must never be consumed.
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "hardware_key::tests::non_interactive_console_fails_before_prompts_but_reports_touches_on_stderr",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        if let Some(mut input) = child.stdin.take() {
+            match input.write_all(b"\n1234\n1\n") {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(e) => panic!("cannot write test input: {e}"),
+            }
+        }
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "child failed: {stdout} {stderr}");
+        assert!(stderr.contains(TOUCH_NOTICE), "{stderr}");
+        assert!(stderr.contains(UV_NOTICE), "{stderr}");
+        for prompt in ["PIN:", "Choose a", "Press Enter", "Several"] {
+            assert!(!stderr.contains(prompt), "{stderr}");
+            assert!(!stdout.contains(prompt), "{stdout}");
+        }
+        assert!(
+            !stdout.contains(TOUCH_NOTICE),
+            "touch notices belong on stderr"
         );
     }
 }

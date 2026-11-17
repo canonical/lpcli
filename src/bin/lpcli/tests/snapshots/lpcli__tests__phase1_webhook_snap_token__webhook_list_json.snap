@@ -1,0 +1,39 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_json(&parsed, base)"
+---
+{
+  "entries": [
+    {
+      "active": true,
+      "date_created": "[timestamp]",
+      "date_last_modified": "[timestamp]",
+      "delivery_url": "https://ci.example.com/hooks/1",
+      "event_types": [
+        "git:push:0.1",
+        "merge-proposal:0.1"
+      ],
+      "http_etag": "\"etag-webhook\"",
+      "registrant_link": "https://api.launchpad.net/devel/~jdoe",
+      "resource_type_link": "https://api.launchpad.net/devel/#webhook",
+      "self_link": "https://api.launchpad.net/devel/launchpad/+webhook/1",
+      "target_link": "https://api.launchpad.net/devel/launchpad",
+      "web_link": "https://launchpad.net/launchpad/+webhook/1"
+    },
+    {
+      "active": false,
+      "date_created": "[timestamp]",
+      "date_last_modified": "[timestamp]",
+      "delivery_url": "https://ci.example.com/hooks/2",
+      "event_types": null,
+      "http_etag": "\"etag-webhook\"",
+      "registrant_link": "https://api.launchpad.net/devel/~jdoe",
+      "resource_type_link": "https://api.launchpad.net/devel/#webhook",
+      "self_link": "https://api.launchpad.net/devel/launchpad/+webhook/2",
+      "target_link": "https://api.launchpad.net/devel/launchpad",
+      "web_link": "https://launchpad.net/launchpad/+webhook/2"
+    }
+  ],
+  "start": 0,
+  "total_size": 2
+}

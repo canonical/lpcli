@@ -7,11 +7,15 @@
 //! | [`get_cve`] | Fetch a single CVE by sequence number |
 //! | [`search_cves`] | Advanced CVE search with optional filters |
 //! | [`get_bug_cves`] | List CVEs linked to a specific bug |
+//!
+//! Each read function has a `_raw` counterpart that also keeps the exact
+//! JSON Launchpad sent. [`search_cves_raw`] filters locally, so it returns a
+//! [`CveSearch`] rather than a Launchpad collection.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::client::{Collection, LaunchpadClient};
+use crate::client::{Collection, LaunchpadClient, Raw};
 use crate::error::Result;
 
 // ---------------------------------------------------------------------------
@@ -48,7 +52,8 @@ pub struct CveSearchParams<'a> {
     pub not_in_distribution: Option<&'a str>,
     /// An ISO 8601 timestamp string; only return CVEs modified after this.
     pub modified_since: Option<&'a str>,
-    /// Maximum number of results to return.
+    /// Maximum number of CVEs Launchpad returns, before
+    /// [`Self::search_text`] is applied.
     pub limit: Option<u32>,
     /// Keyword filter applied client-side against the CVE sequence number,
     /// title, and description (case-insensitive substring match).
@@ -65,7 +70,26 @@ pub struct CveSearchParams<'a> {
 /// Returns [`crate::error::LpError::NotFound`] when the sequence does not
 /// correspond to a tracked CVE.
 pub async fn get_cve(client: &LaunchpadClient, sequence: &str) -> Result<Cve> {
-    client.get(&format!("/bugs/cve/{}", enc(sequence))).await
+    Ok(get_cve_raw(client, sequence).await?.value)
+}
+
+/// Like [`get_cve()`], but also keep the exact JSON Launchpad returned.
+pub async fn get_cve_raw(client: &LaunchpadClient, sequence: &str) -> Result<Raw<Cve>> {
+    client
+        .get_raw(&format!("/bugs/cve/{}", enc(sequence)))
+        .await
+}
+
+/// CVEs found by [`search_cves_raw()`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct CveSearch {
+    /// Matching CVEs, in the order Launchpad returned them, each with the
+    /// exact JSON Launchpad returned for it.
+    pub cves: Vec<Raw<Cve>>,
+    /// `true` when every CVE matching the server-side filters was checked,
+    /// so `cves` holds every match. `false` when Launchpad's result limit may
+    /// have left further CVEs unchecked.
+    pub complete: bool,
 }
 
 /// Search for CVEs with optional distribution and date filters.
@@ -79,6 +103,23 @@ pub async fn search_cves(
     client: &LaunchpadClient,
     params: &CveSearchParams<'_>,
 ) -> Result<Vec<Cve>> {
+    let found = search_cves_raw(client, params).await?;
+    Ok(found.cves.into_iter().map(|cve| cve.value).collect())
+}
+
+/// Like [`search_cves()`], but keep the exact JSON of each CVE and report
+/// whether the result is complete.
+///
+/// Launchpad applies [`CveSearchParams::limit`] before the local
+/// [`CveSearchParams::search_text`] filter, so no Launchpad link or count can
+/// describe the filtered list. [`CveSearch::complete`] is `true` only when
+/// Launchpad returned fewer CVEs than `limit`. Without a limit, Launchpad
+/// applies its own default batch size, so the result is never reported as
+/// complete.
+pub async fn search_cves_raw(
+    client: &LaunchpadClient,
+    params: &CveSearchParams<'_>,
+) -> Result<CveSearch> {
     let mut query = "/bugs/cve?ws.op=advancedSearch".to_string();
 
     if let Some(dist) = params.in_distribution {
@@ -96,35 +137,54 @@ pub async fn search_cves(
         query.push_str(&format!("&limit={limit}"));
     }
 
-    let url = client.url(&query);
-    let mut results: Vec<Cve> = Collection::fetch_all(client, &url).await?;
-
-    if let Some(keyword) = params.search_text {
-        let needle = keyword.to_lowercase();
-        results.retain(|cve| {
-            cve.sequence.to_lowercase().contains(&needle)
-                || cve
-                    .title
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .contains(&needle)
-                || cve
-                    .description
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .contains(&needle)
-        });
+    let mut page_url = client.url(&query);
+    let needle = params.search_text.map(str::to_lowercase);
+    let mut fetched: u64 = 0;
+    let mut cves = Vec::new();
+    loop {
+        let page: Collection<serde_json::Value> = client.get_url(&page_url).await?;
+        for entry in page.entries {
+            fetched += 1;
+            let cve = Raw::<Cve>::from_value(entry)?;
+            if needle
+                .as_deref()
+                .is_none_or(|needle| cve_matches(&cve.value, needle))
+            {
+                cves.push(cve);
+            }
+        }
+        match page.next_collection_link {
+            Some(next) => page_url = next,
+            None => break,
+        }
     }
 
-    Ok(results)
+    // Without an explicit limit, Launchpad's unknown default limit applies.
+    let complete = params.limit.is_some_and(|limit| fetched < u64::from(limit));
+    Ok(CveSearch { cves, complete })
+}
+
+/// Case-insensitive substring match; `needle` must already be lower case.
+fn cve_matches(cve: &Cve, needle: &str) -> bool {
+    [
+        Some(cve.sequence.as_str()),
+        cve.title.as_deref(),
+        cve.description.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|text| text.to_lowercase().contains(needle))
 }
 
 /// List all CVEs linked to a specific Launchpad bug.
 pub async fn get_bug_cves(client: &LaunchpadClient, bug_id: u64) -> Result<Vec<Cve>> {
+    Ok(get_bug_cves_raw(client, bug_id).await?.value)
+}
+
+/// Like [`get_bug_cves()`], but also keep Launchpad's collection JSON.
+pub async fn get_bug_cves_raw(client: &LaunchpadClient, bug_id: u64) -> Result<Raw<Vec<Cve>>> {
     let url = client.url(&format!("/bugs/{bug_id}/cves"));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all_raw(client, &url).await
 }
 
 // ---------------------------------------------------------------------------

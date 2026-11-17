@@ -1,0 +1,17 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+2 security keys found.
+
+ID: 7
+Name: Primary key
+Registered: 2026-01-02
+Last Used: 2026-02-03
+Status: active
+
+ID: 8
+Name: Old
+Registered: 2026-01-02
+Last Used: none
+Status: revoked

@@ -8,11 +8,15 @@
 //! | [`get_question`] | Fetch a question from a specific target |
 //! | [`search_questions`] | Search questions on a project or distribution |
 //! | [`get_question_messages`] | List messages (answers) on a question |
+//!
+//! Each read function has a `_raw` counterpart that also returns the exact
+//! JSON Launchpad sent: an entry, or a collection with `start`, `entries`, and
+//! `total_size` or `total_size_link`.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::client::{Collection, LaunchpadClient};
+use crate::client::{Collection, LaunchpadClient, Raw};
 use crate::error::Result;
 
 // ---------------------------------------------------------------------------
@@ -82,10 +86,19 @@ pub struct QuestionSearchParams<'a> {
 
 /// Fetch a question by its global numeric ID.
 pub async fn get_question_by_id(client: &LaunchpadClient, question_id: u64) -> Result<Question> {
+    Ok(get_question_by_id_raw(client, question_id).await?.value)
+}
+
+/// Like [`get_question_by_id()`], but also keep the exact JSON Launchpad
+/// returned.
+pub async fn get_question_by_id_raw(
+    client: &LaunchpadClient,
+    question_id: u64,
+) -> Result<Raw<Question>> {
     let url = client.url(&format!(
         "/questions?ws.op=getByID&question_id={question_id}"
     ));
-    client.get_url(&url).await
+    client.get_url_raw(&url).await
 }
 
 /// Fetch a question from a specific target by its ID.
@@ -96,8 +109,17 @@ pub async fn get_question(
     target: &str,
     question_id: u64,
 ) -> Result<Question> {
+    Ok(get_question_raw(client, target, question_id).await?.value)
+}
+
+/// Like [`get_question()`], but also keep the exact JSON Launchpad returned.
+pub async fn get_question_raw(
+    client: &LaunchpadClient,
+    target: &str,
+    question_id: u64,
+) -> Result<Raw<Question>> {
     client
-        .get(&format!("/{}/+question/{question_id}", urlenc(target)))
+        .get_raw(&format!("/{}/+question/{question_id}", urlenc(target)))
         .await
 }
 
@@ -109,6 +131,15 @@ pub async fn search_questions(
     target: &str,
     params: &QuestionSearchParams<'_>,
 ) -> Result<Vec<Question>> {
+    Ok(search_questions_raw(client, target, params).await?.value)
+}
+
+/// Like [`search_questions()`], but also keep Launchpad's collection JSON.
+pub async fn search_questions_raw(
+    client: &LaunchpadClient,
+    target: &str,
+    params: &QuestionSearchParams<'_>,
+) -> Result<Raw<Vec<Question>>> {
     let mut query = format!("/{}?ws.op=searchQuestions", urlenc(target));
     if let Some(text) = params.search_text {
         query.push_str(&format!("&search_text={}", urlenc(text)));
@@ -117,7 +148,7 @@ pub async fn search_questions(
         query.push_str(&format!("&status={}", urlenc(status)));
     }
     let url = client.url(&query);
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all_raw(client, &url).await
 }
 
 /// List messages on a question.
@@ -126,11 +157,23 @@ pub async fn get_question_messages(
     target: &str,
     question_id: u64,
 ) -> Result<Vec<QuestionMessage>> {
+    Ok(get_question_messages_raw(client, target, question_id)
+        .await?
+        .value)
+}
+
+/// Like [`get_question_messages()`], but also keep Launchpad's collection
+/// JSON.
+pub async fn get_question_messages_raw(
+    client: &LaunchpadClient,
+    target: &str,
+    question_id: u64,
+) -> Result<Raw<Vec<QuestionMessage>>> {
     let url = client.url(&format!(
         "/{}/+question/{question_id}/messages",
         urlenc(target)
     ));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all_raw(client, &url).await
 }
 
 // ---------------------------------------------------------------------------

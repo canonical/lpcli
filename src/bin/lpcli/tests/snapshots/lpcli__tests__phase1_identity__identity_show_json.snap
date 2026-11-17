@@ -1,0 +1,15 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+{
+  "lpcli": {
+    "hardware_token_grant": {
+      "consumer": "lpcli-hardware",
+      "credential_id": "AAEC",
+      "path": "/home/example/.config/lpcli/grant.json",
+      "service_root": "https://api.launchpad.net/",
+      "storage": "file"
+    }
+  }
+}

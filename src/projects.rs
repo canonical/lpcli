@@ -12,11 +12,15 @@
 //! | All milestones | `/{project}/all_milestones` |
 //! | Active milestones | `/{project}/active_milestones` |
 //! | Releases | `/{project}/{milestone_name}/release` |
+//!
+//! Each read function has a `_raw` counterpart that also returns the exact
+//! JSON Launchpad sent: an entry, or a collection with `start`, `entries`, and
+//! `total_size` or `total_size_link`.
 
 use jiff::{Timestamp, civil::Date};
 use serde::{Deserialize, Serialize};
 
-use crate::client::{Collection, LaunchpadClient};
+use crate::client::{Collection, LaunchpadClient, Raw};
 use crate::error::Result;
 
 // ---------------------------------------------------------------------------
@@ -100,14 +104,26 @@ pub struct Release {
 ///
 /// Returns [`crate::error::LpError::NotFound`] when no such project exists.
 pub async fn get_project(client: &LaunchpadClient, name: &str) -> Result<Project> {
-    client.get(&format!("/{}", urlenc(name))).await
+    Ok(get_project_raw(client, name).await?.value)
+}
+
+/// Like [`get_project()`], but also keep the exact JSON Launchpad returned.
+pub async fn get_project_raw(client: &LaunchpadClient, name: &str) -> Result<Raw<Project>> {
+    client.get_raw(&format!("/{}", urlenc(name))).await
 }
 
 /// Search Launchpad projects by keyword.
 pub async fn search_projects(client: &LaunchpadClient, query: &str) -> Result<Vec<Project>> {
-    let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
-    let url = client.url(&format!("/projects?ws.op=search&text={encoded}"));
-    Collection::fetch_all(client, &url).await
+    Ok(search_projects_raw(client, query).await?.value)
+}
+
+/// Like [`search_projects()`], but also keep Launchpad's collection JSON.
+pub async fn search_projects_raw(
+    client: &LaunchpadClient,
+    query: &str,
+) -> Result<Raw<Vec<Project>>> {
+    let url = client.url(&format!("/projects?ws.op=search&text={}", urlenc(query)));
+    Collection::fetch_all_raw(client, &url).await
 }
 
 /// List all milestones for a project or distribution.
@@ -115,8 +131,16 @@ pub async fn search_projects(client: &LaunchpadClient, query: &str) -> Result<Ve
 /// Uses the `all_milestones` collection link exposed by both `project` and
 /// `distribution` resources in the Launchpad API.
 pub async fn list_milestones(client: &LaunchpadClient, project: &str) -> Result<Vec<Milestone>> {
+    Ok(list_milestones_raw(client, project).await?.value)
+}
+
+/// Like [`list_milestones()`], but also keep Launchpad's collection JSON.
+pub async fn list_milestones_raw(
+    client: &LaunchpadClient,
+    project: &str,
+) -> Result<Raw<Vec<Milestone>>> {
     let url = client.url(&format!("/{}/all_milestones", urlenc(project)));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all_raw(client, &url).await
 }
 
 /// List only the active milestones for a project or distribution.
@@ -127,8 +151,17 @@ pub async fn list_active_milestones(
     client: &LaunchpadClient,
     project: &str,
 ) -> Result<Vec<Milestone>> {
+    Ok(list_active_milestones_raw(client, project).await?.value)
+}
+
+/// Like [`list_active_milestones()`], but also keep Launchpad's collection
+/// JSON.
+pub async fn list_active_milestones_raw(
+    client: &LaunchpadClient,
+    project: &str,
+) -> Result<Raw<Vec<Milestone>>> {
     let url = client.url(&format!("/{}/active_milestones", urlenc(project)));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all_raw(client, &url).await
 }
 
 /// Fetch a specific milestone by name.
@@ -137,8 +170,19 @@ pub async fn get_milestone(
     project: &str,
     milestone_name: &str,
 ) -> Result<Milestone> {
+    Ok(get_milestone_raw(client, project, milestone_name)
+        .await?
+        .value)
+}
+
+/// Like [`get_milestone()`], but also keep the exact JSON Launchpad returned.
+pub async fn get_milestone_raw(
+    client: &LaunchpadClient,
+    project: &str,
+    milestone_name: &str,
+) -> Result<Raw<Milestone>> {
     client
-        .get(&format!(
+        .get_raw(&format!(
             "/{}/+milestone/{}",
             urlenc(project),
             urlenc(milestone_name)
@@ -152,8 +196,19 @@ pub async fn get_release(
     project: &str,
     milestone_name: &str,
 ) -> Result<Release> {
+    Ok(get_release_raw(client, project, milestone_name)
+        .await?
+        .value)
+}
+
+/// Like [`get_release()`], but also keep the exact JSON Launchpad returned.
+pub async fn get_release_raw(
+    client: &LaunchpadClient,
+    project: &str,
+    milestone_name: &str,
+) -> Result<Raw<Release>> {
     client
-        .get(&format!(
+        .get_raw(&format!(
             "/{}/+milestone/{}/release",
             urlenc(project),
             urlenc(milestone_name)
@@ -195,8 +250,20 @@ pub async fn get_project_series(
     project: &str,
     series_name: &str,
 ) -> Result<ProjectSeries> {
+    Ok(get_project_series_raw(client, project, series_name)
+        .await?
+        .value)
+}
+
+/// Like [`get_project_series()`], but also keep the exact JSON Launchpad
+/// returned.
+pub async fn get_project_series_raw(
+    client: &LaunchpadClient,
+    project: &str,
+    series_name: &str,
+) -> Result<Raw<ProjectSeries>> {
     client
-        .get(&format!("/{}/{}", urlenc(project), urlenc(series_name)))
+        .get_raw(&format!("/{}/{}", urlenc(project), urlenc(series_name)))
         .await
 }
 
@@ -205,8 +272,16 @@ pub async fn list_project_series(
     client: &LaunchpadClient,
     project: &str,
 ) -> Result<Vec<ProjectSeries>> {
+    Ok(list_project_series_raw(client, project).await?.value)
+}
+
+/// Like [`list_project_series()`], but also keep Launchpad's collection JSON.
+pub async fn list_project_series_raw(
+    client: &LaunchpadClient,
+    project: &str,
+) -> Result<Raw<Vec<ProjectSeries>>> {
     let url = client.url(&format!("/{}/series", urlenc(project)));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all_raw(client, &url).await
 }
 
 /// List all releases in a project series.
@@ -215,12 +290,23 @@ pub async fn list_series_releases(
     project: &str,
     series_name: &str,
 ) -> Result<Vec<Release>> {
+    Ok(list_series_releases_raw(client, project, series_name)
+        .await?
+        .value)
+}
+
+/// Like [`list_series_releases()`], but also keep Launchpad's collection JSON.
+pub async fn list_series_releases_raw(
+    client: &LaunchpadClient,
+    project: &str,
+    series_name: &str,
+) -> Result<Raw<Vec<Release>>> {
     let url = client.url(&format!(
         "/{}/{}/releases",
         urlenc(project),
         urlenc(series_name)
     ));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all_raw(client, &url).await
 }
 
 // ---------------------------------------------------------------------------

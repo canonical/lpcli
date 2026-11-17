@@ -1,0 +1,16 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "active": true,
+  "date_created": "[timestamp]",
+  "display_name": "noble",
+  "http_etag": "\"etag-1234\"",
+  "name": "noble",
+  "resource_type_link": "https://api.launchpad.net/devel/#distro_series",
+  "self_link": "https://api.launchpad.net/devel/ubuntu/noble",
+  "status": "Supported",
+  "version": "24.04",
+  "web_link": "https://launchpad.net/ubuntu/noble"
+}

@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+id	name	date_created	date_last_used	status
+7	Primary\tkey	2026-01-02	2026-02-03	active
+8	Old	2026-01-02		revoked

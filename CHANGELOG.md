@@ -10,10 +10,12 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 ## [Unreleased]
 
-These changes are for **0.5.0**, a SemVer-incompatible release, and follow
+## [0.5.0] - 2026-11-17
+
+This is a SemVer-incompatible release that implements Phases 0 and 1 of
 [`plans/improve_user_interface_2026-11-16.md`](plans/improve_user_interface_2026-11-16.md).
-Entries move to a `0.5.0` section when that release is tagged. Entries marked
-*(planned)* are not implemented yet.
+The JSON output contract is documented in
+[`docs/json-output.md`](docs/json-output.md).
 
 ### Added
 
@@ -25,21 +27,49 @@ Entries move to a `0.5.0` section when that release is tagged. Entries marked
   or `TERM=dumb`, makes `plain` the default.
 - A global `--color auto|always|never` option. `auto` follows `CLICOLOR_FORCE`,
   `NO_COLOR`, and `TERM=dumb`, and decides separately for stdout and stderr.
-- JSON and TSV output for `status`, `bug search`, and
-  `bug remote-bug-trackers`. JSON follows the Launchpad web API's own
-  representation, and lists use Launchpad's collection shape: `total_size`,
-  `start`, and `entries`. Other commands reject `--format json|tsv` with a
-  usage error for now.
-- Library: `client::Raw`, `LaunchpadClient::get_url_raw`,
-  `Collection::fetch_page_raw`, `bugs::search_bugs_raw`, and
-  `bugs::search_bug_trackers_raw`, which keep the exact JSON Launchpad
-  returned.
-- *(planned)* JSON output for every read command, a versioned and documented
-  JSON output contract, and a `lpcli schema` command that reports its
-  version.
-- *(planned)* Structured JSON errors on stderr in JSON mode.
-- *(planned)* `--fields`, `--quiet`, and `--no-input` options for scripts and
-  agents.
+- `--format json` for every read and mutation command, and for `status`,
+  `schema`, `login`, `logout`, and the `hardware-token` commands. `skills` is
+  the only command without JSON output. JSON follows the Launchpad web API's
+  own representation: entries are passed through unchanged, and lists use
+  Launchpad's collection shape, `total_size`, `start`, and `entries`.
+  Commands that combine several requests print an lpcli-defined object whose
+  members are unmodified Launchpad entries or collections, with values
+  computed by lpcli under an `lpcli` member.
+- `--format tsv` for list commands, `status`, and `hardware-token keys`.
+- A versioned JSON output contract, documented in `docs/json-output.md`, and
+  `lpcli schema`, which reports the contract version (currently 1).
+- Structured JSON errors on stderr in JSON mode:
+  `{"error": {"kind", "message", "hint", "http_status"}}`. Error output never
+  contains credentials, grant secrets, PINs, or assertions.
+- `--fields NAME,...`, which keeps only the named Launchpad attributes in each
+  JSON entry. It requires JSON output.
+- `--quiet`, which makes a mutation print only the `self_link` of each
+  resulting entry. It is a usage error on commands that are not mutations.
+- `--no-input`, which makes prompts fail instead of waiting for input. It is
+  enabled automatically when stdin is not a terminal. Security-key touch
+  notices are still written to stderr.
+- `hardware-token register` prints the registered key's Launchpad entry in
+  JSON, and `hardware-token issue` prints an lpcli-defined summary of the
+  issued grant and the resulting login, without any secret.
+- Library: `client::Raw`, which pairs a typed value with the exact JSON
+  Launchpad returned, and `_raw` counterparts of the read and mutation
+  functions in `bugs`, `people`, `packages`, `projects`, `cves`, `git`,
+  `specifications`, `questions`, `translations`, `webhooks`, `snaps`,
+  `queue`, `access_tokens`, and `hardware_tokens` (for example
+  `bugs::get_bug_raw`, `bugs::set_bug_status_raw`, and
+  `hardware_tokens::register_hardware_key_raw`). `LaunchpadClient` gains
+  `get_raw`, `get_url_raw`, and `get_created_raw`, and `Collection` gains
+  `fetch_all_raw` and `fetch_page_raw`.
+- Library: `error::ErrorKind`, and `LpError::kind`, `LpError::exit_code`,
+  `LpError::http_status`, and `LpError::hint`, which classify errors for exit
+  codes and structured errors.
+- Library: the `LpError::Usage`, `LpError::Partial`, and
+  `LpError::LocalNotFound` variants. Raw mutations that Launchpad has already
+  applied, but whose result cannot be confirmed, return `LpError::Partial`
+  with recovery guidance. `LocalNotFound` reports a missing match without
+  claiming that Launchpad returned HTTP 404.
+- Library: `hardware_key::NonInteractiveConsole`, which fails instead of
+  prompting but still reports security-key touches on stderr.
 
 ### Changed
 
@@ -54,7 +84,7 @@ Entries move to a `0.5.0` section when that release is tagged. Entries marked
   words, such as `2 bugs found.`, instead of `2 bug(s) found.`.
 - Colored output on stdout now also turns off when stdout is not a terminal,
   `NO_COLOR` is set, or `TERM=dumb`, for every command.
-- **Breaking** *(planned)*: commands exit with a code that identifies the kind of failure,
+- **Breaking:** commands exit with a code that identifies the kind of failure,
   instead of always exiting with 1:
 
   | Code | Meaning |
@@ -69,10 +99,35 @@ Entries move to a `0.5.0` section when that release is tagged. Entries marked
   | 7 | Partial success |
 
   Scripts that check for exit code 1 specifically should check for a non-zero
-  exit code instead, or handle the specific codes above.
-- **Breaking** *(planned)*: operations that only partly succeed exit with code 7
-  instead of 0. This includes downloads where some files fail, and changes to
-  several targets or series where only some succeed.
+  exit code instead, or handle the specific codes above. The mapping is listed
+  in `docs/json-output.md`.
+- **Breaking:** operations that only partly succeed exit with code 7 instead
+  of 0. This includes downloads where some files fail, bug changes to several
+  targets or series where only some succeed, mutations that Launchpad applied
+  but whose result could not be read back, and `logout` or
+  `hardware-token revoke` that could not remove every local copy. The output
+  lists what succeeded and what failed before the error.
+- **Breaking:** when stdin is not a terminal, prompting is disabled as if
+  `--no-input` were given. Classic `login` and `hardware-token register` then
+  fail with exit code 2 before contacting Launchpad, and security-key PIN
+  prompts fail instead of reading from stdin. Run them from a terminal, and
+  pass a grant secret to `login --hardware-token --grant-token` through
+  `LPCLI_HARDWARE_GRANT_SECRET`.
+- **Behavior change:** the classic `login` authorization URL and
+  instructions are written to stderr instead of stdout, so stdout carries only
+  the result.
+- **Breaking (library):** `auth::login` writes its prompt to stderr and
+  returns `LpError::Usage` when stdin reaches end-of-file; `auth::login` and
+  `auth::logout` no longer print a success message, so callers report the
+  result themselves.
+- **Breaking (library):** some typed functions now return the new error
+  variants: `bugs::delete_bug_comment` reports a partially applied deletion as
+  `LpError::Partial`, and a zero `bugs::search_bug_trackers` limit is an
+  `LpError::Usage`. Successful mutations with a missing, malformed, or
+  untrusted `Location` now return `LpError::Partial`. Local misses, such as a
+  named bug tracker lookup returning `null`, return `LpError::LocalNotFound`.
+  Exhaustive `match` expressions on `LpError` must handle `Usage`, `Partial`,
+  and `LocalNotFound`.
 
 ### Removed
 
@@ -104,7 +159,7 @@ Entries move to a `0.5.0` section when that release is tagged. Entries marked
   before it links the task.
 - `bug tracker create`, which registers a remote bug tracker.
 - `--json` output for `bug remote-bug-trackers`. This option is removed in
-  0.5.0; see "Unreleased".
+  0.5.0; see "0.5.0".
 - A "Linked Tasks" column in `bug watches`.
 - `bug set-description`, which edits a bug's description from
   `--description` or `--description-file` (`-` reads standard input).
@@ -185,7 +240,8 @@ Entries move to a `0.5.0` section when that release is tagged. Entries marked
 
 First tagged release.
 
-[Unreleased]: https://github.com/canonical/lpcli/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/canonical/lpcli/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/canonical/lpcli/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/canonical/lpcli/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/canonical/lpcli/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/canonical/lpcli/compare/v0.3.0...v0.3.1

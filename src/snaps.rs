@@ -9,12 +9,15 @@
 //! | [`find_snaps_by_store_name`] | Find snaps by registered store name |
 //! | [`get_snap_pending_builds`] | List pending builds for a snap |
 //! | [`request_snap_builds`] | Request builds for a snap recipe |
+//!
+//! Reads and entry-creating mutations also have `*_raw` counterparts that
+//! keep the exact JSON Launchpad returned (see [`Raw`]).
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::client::{Collection, LaunchpadClient};
+use crate::client::{Collection, LaunchpadClient, Raw};
 use crate::error::Result;
 
 // ---------------------------------------------------------------------------
@@ -102,17 +105,36 @@ pub struct SnapBuildRequest {
 ///
 /// `owner` is the Launchpad name without `~`; `name` is the recipe name.
 pub async fn get_snap(client: &LaunchpadClient, owner: &str, name: &str) -> Result<Snap> {
-    client
-        .get(&format!("/~{}/+snap/{}", urlenc(owner), urlenc(name)))
-        .await
+    client.get(&snap_path(owner, name)).await
+}
+
+/// Like [`get_snap()`], but also keep the exact Launchpad JSON.
+pub async fn get_snap_raw(client: &LaunchpadClient, owner: &str, name: &str) -> Result<Raw<Snap>> {
+    client.get_raw(&snap_path(owner, name)).await
+}
+
+fn snap_path(owner: &str, name: &str) -> String {
+    format!("/~{}/+snap/{}", urlenc(owner), urlenc(name))
 }
 
 /// List snap recipes owned by a Launchpad person or team.
 pub async fn find_snaps_by_owner(client: &LaunchpadClient, owner: &str) -> Result<Vec<Snap>> {
+    Collection::fetch_all(client, &snaps_by_owner_url(client, owner)).await
+}
+
+/// Like [`find_snaps_by_owner()`], but return Launchpad's collection shape
+/// with every page's entries unmodified.
+pub async fn find_snaps_by_owner_raw(
+    client: &LaunchpadClient,
+    owner: &str,
+) -> Result<Raw<Vec<Snap>>> {
+    Collection::fetch_all_raw(client, &snaps_by_owner_url(client, owner)).await
+}
+
+fn snaps_by_owner_url(client: &LaunchpadClient, owner: &str) -> String {
     let owner_url = client.url(&format!("/~{}", urlenc(owner)));
     let enc: String = url::form_urlencoded::byte_serialize(owner_url.as_bytes()).collect();
-    let url = client.url(&format!("/+snaps?ws.op=findByOwner&owner={enc}"));
-    Collection::fetch_all(client, &url).await
+    client.url(&format!("/+snaps?ws.op=findByOwner&owner={enc}"))
 }
 
 /// Find snap recipes by their registered store package name.
@@ -120,9 +142,21 @@ pub async fn find_snaps_by_store_name(
     client: &LaunchpadClient,
     store_name: &str,
 ) -> Result<Vec<Snap>> {
+    Collection::fetch_all(client, &snaps_by_store_name_url(client, store_name)).await
+}
+
+/// Like [`find_snaps_by_store_name()`], but return Launchpad's collection
+/// shape with every page's entries unmodified.
+pub async fn find_snaps_by_store_name_raw(
+    client: &LaunchpadClient,
+    store_name: &str,
+) -> Result<Raw<Vec<Snap>>> {
+    Collection::fetch_all_raw(client, &snaps_by_store_name_url(client, store_name)).await
+}
+
+fn snaps_by_store_name_url(client: &LaunchpadClient, store_name: &str) -> String {
     let enc: String = url::form_urlencoded::byte_serialize(store_name.as_bytes()).collect();
-    let url = client.url(&format!("/+snaps?ws.op=findByStoreName&store_name={enc}"));
-    Collection::fetch_all(client, &url).await
+    client.url(&format!("/+snaps?ws.op=findByStoreName&store_name={enc}"))
 }
 
 /// List pending builds for a snap recipe.
@@ -131,12 +165,19 @@ pub async fn get_snap_pending_builds(
     owner: &str,
     name: &str,
 ) -> Result<Vec<SnapBuild>> {
-    let url = client.url(&format!(
-        "/~{}/+snap/{}/pending_builds",
-        urlenc(owner),
-        urlenc(name)
-    ));
+    let url = client.url(&format!("{}/pending_builds", snap_path(owner, name)));
     Collection::fetch_all(client, &url).await
+}
+
+/// Like [`get_snap_pending_builds()`], but return Launchpad's collection
+/// shape with every page's entries unmodified.
+pub async fn get_snap_pending_builds_raw(
+    client: &LaunchpadClient,
+    owner: &str,
+    name: &str,
+) -> Result<Raw<Vec<SnapBuild>>> {
+    let url = client.url(&format!("{}/pending_builds", snap_path(owner, name)));
+    Collection::fetch_all_raw(client, &url).await
 }
 
 /// Request builds for a snap recipe.
@@ -153,17 +194,44 @@ pub async fn request_snap_builds(
     archive_url: &str,
     pocket: &str,
 ) -> Result<SnapBuildRequest> {
+    let location = request_snap_builds_location(client, owner, name, archive_url, pocket).await?;
+    client.get_url(&location).await
+}
+
+/// Like [`request_snap_builds()`], but return the created build request's
+/// exact Launchpad JSON.
+///
+/// # Errors
+///
+/// If Launchpad accepts the request but reading it back from the reported
+/// location fails, returns [`LpError::Partial`](crate::error::LpError::Partial).
+pub async fn request_snap_builds_raw(
+    client: &LaunchpadClient,
+    owner: &str,
+    name: &str,
+    archive_url: &str,
+    pocket: &str,
+) -> Result<Raw<SnapBuildRequest>> {
+    let location = request_snap_builds_location(client, owner, name, archive_url, pocket).await?;
+    client
+        .get_created_raw(&location, "Requesting snap builds")
+        .await
+}
+
+async fn request_snap_builds_location(
+    client: &LaunchpadClient,
+    owner: &str,
+    name: &str,
+    archive_url: &str,
+    pocket: &str,
+) -> Result<String> {
     let mut params = HashMap::new();
     params.insert("ws.op", "requestBuilds");
     params.insert("archive", archive_url);
     params.insert("pocket", pocket);
-    let location = client
-        .post_created_location(
-            &format!("/~{}/+snap/{}", urlenc(owner), urlenc(name)),
-            &params,
-        )
-        .await?;
-    client.get_url(&location).await
+    client
+        .post_created_location(&snap_path(owner, name), &params)
+        .await
 }
 
 // ---------------------------------------------------------------------------

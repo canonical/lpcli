@@ -14,11 +14,15 @@
 //! | [`get_merge_proposal_comments`] | Fetch review comments for a merge proposal |
 //! | [`get_inline_comments`] | Fetch inline (diff) comments for a merge proposal |
 //! | [`get_preview_diffs`] | List all preview diffs for a merge proposal |
+//!
+//! Every read also has a `*_raw` counterpart that keeps the exact JSON
+//! Launchpad returned (see [`Raw`]). Collection readers return Launchpad's
+//! collection shape with unmodified entries.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::client::{Collection, LaunchpadClient};
+use crate::client::{Collection, LaunchpadClient, Raw};
 use crate::error::Result;
 
 // ---------------------------------------------------------------------------
@@ -294,6 +298,15 @@ pub async fn get_git_repository(client: &LaunchpadClient, path: &str) -> Result<
     client.get(&format!("/{clean}")).await
 }
 
+/// Like [`get_git_repository()`], but also keep the exact Launchpad JSON.
+pub async fn get_git_repository_raw(
+    client: &LaunchpadClient,
+    path: &str,
+) -> Result<Raw<GitRepository>> {
+    let clean = path.trim_start_matches('/');
+    client.get_raw(&format!("/{clean}")).await
+}
+
 /// Look up a Git repository by its unique Launchpad name.
 ///
 /// `unique_name` is in `~person/project/+git/name` format.
@@ -301,9 +314,25 @@ pub async fn get_git_repository_by_unique_name(
     client: &LaunchpadClient,
     unique_name: &str,
 ) -> Result<GitRepository> {
+    client
+        .get_url(&repository_by_unique_name_url(client, unique_name))
+        .await
+}
+
+/// Like [`get_git_repository_by_unique_name()`], but also keep the exact
+/// Launchpad JSON.
+pub async fn get_git_repository_by_unique_name_raw(
+    client: &LaunchpadClient,
+    unique_name: &str,
+) -> Result<Raw<GitRepository>> {
+    client
+        .get_url_raw(&repository_by_unique_name_url(client, unique_name))
+        .await
+}
+
+fn repository_by_unique_name_url(client: &LaunchpadClient, unique_name: &str) -> String {
     let enc: String = url::form_urlencoded::byte_serialize(unique_name.as_bytes()).collect();
-    let url = client.url(&format!("/+git?ws.op=getByPath&path={enc}"));
-    client.get_url(&url).await
+    client.url(&format!("/+git?ws.op=getByPath&path={enc}"))
 }
 
 /// Return the default Git repository for a project, distribution, or
@@ -314,10 +343,26 @@ pub async fn get_default_git_repository(
     client: &LaunchpadClient,
     target: &str,
 ) -> Result<GitRepository> {
+    client
+        .get_url(&default_repository_url(client, target))
+        .await
+}
+
+/// Like [`get_default_git_repository()`], but also keep the exact Launchpad
+/// JSON.
+pub async fn get_default_git_repository_raw(
+    client: &LaunchpadClient,
+    target: &str,
+) -> Result<Raw<GitRepository>> {
+    client
+        .get_url_raw(&default_repository_url(client, target))
+        .await
+}
+
+fn default_repository_url(client: &LaunchpadClient, target: &str) -> String {
     let target_url = client.url(&format!("/{target}"));
     let enc: String = url::form_urlencoded::byte_serialize(target_url.as_bytes()).collect();
-    let url = client.url(&format!("/+git?ws.op=getDefaultRepository&target={enc}"));
-    client.get_url(&url).await
+    client.url(&format!("/+git?ws.op=getDefaultRepository&target={enc}"))
 }
 
 /// List Git repositories owned by a Launchpad person or team.
@@ -325,18 +370,42 @@ pub async fn list_person_git_repositories(
     client: &LaunchpadClient,
     person_name: &str,
 ) -> Result<Vec<GitRepository>> {
+    Collection::fetch_all(client, &person_repositories_url(client, person_name)).await
+}
+
+/// Like [`list_person_git_repositories()`], but return Launchpad's
+/// collection shape with every page's entries unmodified.
+pub async fn list_person_git_repositories_raw(
+    client: &LaunchpadClient,
+    person_name: &str,
+) -> Result<Raw<Vec<GitRepository>>> {
+    Collection::fetch_all_raw(client, &person_repositories_url(client, person_name)).await
+}
+
+fn person_repositories_url(client: &LaunchpadClient, person_name: &str) -> String {
     let enc: String = url::form_urlencoded::byte_serialize(person_name.as_bytes()).collect();
-    let url = client.url(&format!("/~{enc}/+git"));
-    Collection::fetch_all(client, &url).await
+    client.url(&format!("/~{enc}/+git"))
 }
 
 /// List references (branches and tags) in a Git repository.
 ///
 /// `repo_path` is the repository slug, e.g. `"~person/project/+git/name"`.
 pub async fn list_git_refs(client: &LaunchpadClient, repo_path: &str) -> Result<Vec<GitRef>> {
+    Collection::fetch_all(client, &refs_url(client, repo_path)).await
+}
+
+/// Like [`list_git_refs()`], but return Launchpad's collection shape with
+/// every page's entries unmodified.
+pub async fn list_git_refs_raw(
+    client: &LaunchpadClient,
+    repo_path: &str,
+) -> Result<Raw<Vec<GitRef>>> {
+    Collection::fetch_all_raw(client, &refs_url(client, repo_path)).await
+}
+
+fn refs_url(client: &LaunchpadClient, repo_path: &str) -> String {
     let clean = repo_path.trim_start_matches('/');
-    let url = client.url(&format!("/{clean}/refs"));
-    Collection::fetch_all(client, &url).await
+    client.url(&format!("/{clean}/refs"))
 }
 
 /// List merge proposals for a Git repository, optionally filtered by status.
@@ -348,13 +417,32 @@ pub async fn list_merge_proposals(
     repo_path: &str,
     status: Option<&str>,
 ) -> Result<Vec<MergeProposal>> {
+    Collection::fetch_all(client, &merge_proposals_url(client, repo_path, status)).await
+}
+
+/// Like [`list_merge_proposals()`], but return Launchpad's collection shape
+/// with every page's entries unmodified.
+pub async fn list_merge_proposals_raw(
+    client: &LaunchpadClient,
+    repo_path: &str,
+    status: Option<&str>,
+) -> Result<Raw<Vec<MergeProposal>>> {
+    Collection::fetch_all_raw(client, &merge_proposals_url(client, repo_path, status)).await
+}
+
+fn merge_proposals_url(client: &LaunchpadClient, repo_path: &str, status: Option<&str>) -> String {
     let clean = repo_path.trim_start_matches('/');
     let mut url = client.url(&format!("/{clean}?ws.op=getMergeProposals"));
     if let Some(s) = status {
         let enc: String = url::form_urlencoded::byte_serialize(s.as_bytes()).collect();
         url.push_str(&format!("&status={enc}"));
     }
-    Collection::fetch_all(client, &url).await
+    url
+}
+
+fn merge_proposal_url(client: &LaunchpadClient, repo_path: &str, mp_id: u64) -> String {
+    let clean = repo_path.trim_start_matches('/');
+    client.url(&format!("/{clean}/+merge/{mp_id}"))
 }
 
 /// Fetch all code review comments for a merge proposal.
@@ -366,9 +454,25 @@ pub async fn get_merge_proposal_comments(
     repo_path: &str,
     mp_id: u64,
 ) -> Result<Vec<CodeReviewComment>> {
-    let clean = repo_path.trim_start_matches('/');
-    let url = client.url(&format!("/{clean}/+merge/{mp_id}/all_comments"));
+    let url = format!(
+        "{}/all_comments",
+        merge_proposal_url(client, repo_path, mp_id)
+    );
     Collection::fetch_all(client, &url).await
+}
+
+/// Like [`get_merge_proposal_comments()`], but return Launchpad's collection
+/// shape with every page's entries unmodified.
+pub async fn get_merge_proposal_comments_raw(
+    client: &LaunchpadClient,
+    repo_path: &str,
+    mp_id: u64,
+) -> Result<Raw<Vec<CodeReviewComment>>> {
+    let url = format!(
+        "{}/all_comments",
+        merge_proposal_url(client, repo_path, mp_id)
+    );
+    Collection::fetch_all_raw(client, &url).await
 }
 
 /// Fetch a single merge proposal by its repository path and ID.
@@ -377,9 +481,20 @@ pub async fn get_merge_proposal(
     repo_path: &str,
     mp_id: u64,
 ) -> Result<MergeProposal> {
-    let clean = repo_path.trim_start_matches('/');
-    let url = client.url(&format!("/{clean}/+merge/{mp_id}"));
-    client.get_url(&url).await
+    client
+        .get_url(&merge_proposal_url(client, repo_path, mp_id))
+        .await
+}
+
+/// Like [`get_merge_proposal()`], but also keep the exact Launchpad JSON.
+pub async fn get_merge_proposal_raw(
+    client: &LaunchpadClient,
+    repo_path: &str,
+    mp_id: u64,
+) -> Result<Raw<MergeProposal>> {
+    client
+        .get_url_raw(&merge_proposal_url(client, repo_path, mp_id))
+        .await
 }
 
 /// List all preview diffs for a merge proposal, sorted by creation date.
@@ -397,6 +512,26 @@ pub async fn get_preview_diffs(
     Ok(coll)
 }
 
+/// Like [`get_preview_diffs()`], but return Launchpad's collection shape with
+/// every page's entries unmodified.
+///
+/// If the merge proposal has no `preview_diffs_collection_link`, this returns
+/// an empty collection (`total_size` 0) without a further request.
+pub async fn get_preview_diffs_raw(
+    client: &LaunchpadClient,
+    repo_path: &str,
+    mp_id: u64,
+) -> Result<Raw<Vec<PreviewDiff>>> {
+    let mp = get_merge_proposal(client, repo_path, mp_id).await?;
+    match mp.preview_diffs_collection_link {
+        Some(link) => Collection::fetch_all_raw(client, &link).await,
+        None => Ok(Raw {
+            value: Vec::new(),
+            raw: serde_json::json!({"total_size": 0, "start": 0, "entries": []}),
+        }),
+    }
+}
+
 /// Fetch inline (diff-level) comments for a merge proposal.
 ///
 /// If `diff_id` is `Some`, uses that specific preview diff. Otherwise uses the
@@ -409,6 +544,49 @@ pub async fn get_inline_comments(
     mp_id: u64,
     diff_id: Option<u64>,
 ) -> Result<(Vec<InlineComment>, Vec<(u64, DiffLineContext)>)> {
+    let Some((diff_link, url)) = inline_comments_target(client, repo_path, mp_id, diff_id).await?
+    else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let comments: Vec<InlineComment> = client.get_url(&url).await?;
+    let diff_map = diff_line_map(client, &diff_link).await;
+    Ok((comments, diff_map))
+}
+
+/// Like [`get_inline_comments()`], but also keep the exact JSON array
+/// Launchpad returned from `getInlineComments`.
+///
+/// `getInlineComments` returns a JSON array rather than a collection, so the
+/// raw value is that array, unmodified. When the merge proposal has no
+/// preview diff, the raw value is an empty array. The diff line map is
+/// computed by lpcli and is not part of Launchpad's response.
+pub async fn get_inline_comments_raw(
+    client: &LaunchpadClient,
+    repo_path: &str,
+    mp_id: u64,
+    diff_id: Option<u64>,
+) -> Result<(Raw<Vec<InlineComment>>, Vec<(u64, DiffLineContext)>)> {
+    let Some((diff_link, url)) = inline_comments_target(client, repo_path, mp_id, diff_id).await?
+    else {
+        let empty = Raw {
+            value: Vec::new(),
+            raw: serde_json::Value::Array(Vec::new()),
+        };
+        return Ok((empty, Vec::new()));
+    };
+    let comments: Raw<Vec<InlineComment>> = client.get_url_raw(&url).await?;
+    let diff_map = diff_line_map(client, &diff_link).await;
+    Ok((comments, diff_map))
+}
+
+/// Resolve the preview diff link and the `getInlineComments` URL, or `None`
+/// when no diff was requested and the merge proposal has no current diff.
+async fn inline_comments_target(
+    client: &LaunchpadClient,
+    repo_path: &str,
+    mp_id: u64,
+    diff_id: Option<u64>,
+) -> Result<Option<(String, String)>> {
     let mp = get_merge_proposal(client, repo_path, mp_id).await?;
 
     // Determine which diff to use.
@@ -423,7 +601,7 @@ pub async fn get_inline_comments(
         // Default: use the latest diff (preview_diff_link points to the current one).
         match mp.preview_diff_link {
             Some(link) => link,
-            None => return Ok((Vec::new(), Vec::new())),
+            None => return Ok(None),
         }
     };
     // The preview_diff_link looks like
@@ -434,10 +612,13 @@ pub async fn get_inline_comments(
     let url = client.url(&format!(
         "/{clean}/+merge/{mp_id}?ws.op=getInlineComments&previewdiff_id={diff_id}"
     ));
-    let comments: Vec<InlineComment> = client.get_url(&url).await?;
+    Ok(Some((diff_link, url)))
+}
 
-    // Fetch the preview diff text to build the line map.
-    let diff_map = match fetch_preview_diff(client, &diff_link).await {
+/// Fetch the preview diff text to build the line map, or return an empty map
+/// if the diff or its text is unavailable.
+async fn diff_line_map(client: &LaunchpadClient, diff_link: &str) -> Vec<(u64, DiffLineContext)> {
+    match fetch_preview_diff(client, diff_link).await {
         Ok(pd) => match pd.diff_text_link {
             Some(ref text_url) => match client.get_text_url(text_url).await {
                 Ok(text) => parse_diff_line_map(&text),
@@ -446,14 +627,20 @@ pub async fn get_inline_comments(
             None => Vec::new(),
         },
         Err(_) => Vec::new(),
-    };
-
-    Ok((comments, diff_map))
+    }
 }
 
 /// Fetch a preview diff resource by its full API URL.
 pub async fn fetch_preview_diff(client: &LaunchpadClient, diff_url: &str) -> Result<PreviewDiff> {
     client.get_url(diff_url).await
+}
+
+/// Like [`fetch_preview_diff()`], but also keep the exact Launchpad JSON.
+pub async fn fetch_preview_diff_raw(
+    client: &LaunchpadClient,
+    diff_url: &str,
+) -> Result<Raw<PreviewDiff>> {
+    client.get_url_raw(diff_url).await
 }
 
 /// Extract the numeric merge proposal ID from a self_link URL.
@@ -586,10 +773,10 @@ diff --git a/lib/model.py b/lib/model.py
 @@ -10,6 +10,7 @@ class Foo:
      def existing(self):
          pass
- 
+
 +    def new_method(self):
 +        return True
- 
+
      def other(self):
 ";
         let map = super::parse_diff_line_map(diff);

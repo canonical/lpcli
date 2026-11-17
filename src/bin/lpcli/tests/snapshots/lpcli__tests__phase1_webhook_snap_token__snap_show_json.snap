@@ -1,0 +1,21 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_json(&parsed, base)"
+---
+{
+  "auto_build": false,
+  "date_created": "[timestamp]",
+  "description": "A snap built from the main branch.",
+  "git_path": "refs/heads/main",
+  "git_repository_link": "https://api.launchpad.net/devel/~jdoe/my-snap/+git/my-snap",
+  "git_repository_url": null,
+  "http_etag": "\"etag-snap\"",
+  "name": "my-snap",
+  "owner_link": "https://api.launchpad.net/devel/~jdoe",
+  "private": false,
+  "resource_type_link": "https://api.launchpad.net/devel/#snap",
+  "self_link": "https://api.launchpad.net/devel/~jdoe/+snap/my-snap",
+  "store_name": "my-snap",
+  "store_upload": true,
+  "web_link": "https://launchpad.net/~jdoe/+snap/my-snap"
+}

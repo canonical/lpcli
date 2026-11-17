@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase1_bug.rs
+expression: redacted
+---
+title	type	download_url	self_link
+trace-1.txt	Patch	https://launchpadlibrarian.net/1/trace-1.txt	[server]/bugs/42/+attachment/1
+trace-2.txt	Unspecified		[server]/bugs/42/+attachment/2
