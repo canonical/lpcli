@@ -1,0 +1,22 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+{
+  "lpcli": {
+    "grant": {
+      "consumer": "lpcli-hardware",
+      "context": "ubuntu/curl",
+      "date_expires": "2027-01-02T00:00:00Z",
+      "permission": "Read Anything"
+    },
+    "issued": true,
+    "login": null,
+    "remove_classic_bootstrap_token": false,
+    "security_key": {
+      "id": 7,
+      "name": "Primary",
+      "self_link": "https://api.launchpad.net/devel/~example-owner/+authenticator/7"
+    }
+  }
+}

@@ -17,7 +17,8 @@
 //! # Workflow
 //!
 //! 1. Log in classically and register a security key
-//!    ([`register_hardware_key`]).
+//!    ([`register_hardware_key`], or [`register_hardware_key_raw`] for
+//!    Launchpad's JSON of the registered key).
 //! 2. Issue a grant bound to that key ([`issue_hardware_bound_oauth_token`]).
 //! 3. Log in with the grant ([`login_with_hardware_token`]), which stores it.
 //! 4. Use [`load_session`] and [`LaunchpadClient::with_hardware_token`] for
@@ -83,14 +84,14 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{URL_SAFE_NO_PAD, URL_SAFE_NO_PAD_INDIFFERENT};
-use chrono::{DateTime, TimeDelta, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::{self, Credentials};
-use crate::client::{Collection, LaunchpadClient};
+use crate::client::{Collection, LaunchpadClient, Raw};
 use crate::error::{LpError, Result};
 use crate::hardware_key::{
     Assertion, AssertionRequest, Authenticator, RegistrationRequest, ResidentKey, UserVerification,
@@ -876,7 +877,7 @@ struct MintingChallenge {
 struct MintedAccessToken {
     key: String,
     secret: Zeroizing<String>,
-    expires_at: DateTime<Utc>,
+    expires_at: Timestamp,
 }
 
 /// Exchanges grants for access tokens using Launchpad's browser endpoints.
@@ -988,6 +989,17 @@ fn parse_challenge(body: &str) -> Result<MintingChallenge> {
     Ok(MintingChallenge { id, options })
 }
 
+fn parse_rfc3339_timestamp(value: &str) -> Option<Timestamp> {
+    crate::time::parse_rfc3339_timestamp(value)
+}
+
+/// Format an instant as RFC 3339 UTC with an explicit `+00:00` offset.
+fn format_rfc3339_timestamp(timestamp: Timestamp) -> String {
+    timestamp
+        .display_with_offset(jiff::tz::Offset::UTC)
+        .to_string()
+}
+
 fn parse_minted_token(body: &str) -> Result<MintedAccessToken> {
     let malformed = || LpError::HardwareToken("Malformed minted access token.".to_string());
 
@@ -1006,9 +1018,8 @@ fn parse_minted_token(body: &str) -> Result<MintedAccessToken> {
     let key = required("oauth_token").ok_or_else(malformed)?;
     let secret = required("oauth_token_secret").ok_or_else(malformed)?;
     let expires_at = required("expires_at")
-        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
-        .ok_or_else(malformed)?
-        .with_timezone(&Utc);
+        .and_then(|value| parse_rfc3339_timestamp(&value))
+        .ok_or_else(malformed)?;
 
     Ok(MintedAccessToken {
         key: key.to_string(),
@@ -1403,13 +1414,13 @@ fn clear_access_cache(cache: &dyn AccessTokenCache) -> Result<()> {
 }
 
 trait CacheClock: Send + Sync {
-    fn now(&self) -> DateTime<Utc>;
+    fn now(&self) -> Timestamp;
 }
 
 struct SystemCacheClock;
 impl CacheClock for SystemCacheClock {
-    fn now(&self) -> DateTime<Utc> {
-        Utc::now()
+    fn now(&self) -> Timestamp {
+        Timestamp::now()
     }
 }
 
@@ -1444,9 +1455,9 @@ struct AccessCacheRecord {
     binding: String,
     token: String,
     secret: String,
-    minted_at: DateTime<Utc>,
-    server_expires_at: DateTime<Utc>,
-    deadline: DateTime<Utc>,
+    minted_at: Timestamp,
+    server_expires_at: Timestamp,
+    deadline: Timestamp,
     ttl: Duration,
     generation: String,
 }
@@ -1476,19 +1487,17 @@ fn check_cache_ttl(ttl: Duration) -> Result<()> {
     Ok(())
 }
 
-fn token_deadline(
-    minted_at: DateTime<Utc>,
-    expires_at: DateTime<Utc>,
-    ttl: Duration,
-) -> Option<DateTime<Utc>> {
-    let lifetime = expires_at.signed_duration_since(minted_at);
-    if lifetime <= TimeDelta::zero() || ttl.is_zero() || check_cache_ttl(ttl).is_err() {
+fn token_deadline(minted_at: Timestamp, expires_at: Timestamp, ttl: Duration) -> Option<Timestamp> {
+    let lifetime = expires_at.duration_since(minted_at);
+    if lifetime <= SignedDuration::ZERO || ttl.is_zero() || check_cache_ttl(ttl).is_err() {
         return None;
     }
-    let margin = std::cmp::min(TimeDelta::seconds(60), lifetime / 10);
+    let margin = std::cmp::min(SignedDuration::from_secs(60), lifetime / 10);
     Some(std::cmp::min(
-        minted_at.checked_add_signed(TimeDelta::from_std(ttl).ok()?)?,
-        expires_at.checked_sub_signed(margin)?,
+        minted_at
+            .checked_add(SignedDuration::try_from(ttl).ok()?)
+            .ok()?,
+        expires_at.checked_sub(margin).ok()?,
     ))
 }
 
@@ -1497,7 +1506,7 @@ impl AccessCacheRecord {
         &self,
         owner: &HardwareTokenCredentials,
         ttl: Duration,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Option<CachedToken> {
         let deadline = token_deadline(self.minted_at, self.server_expires_at, self.ttl)?;
         let requested_deadline = token_deadline(self.minted_at, self.server_expires_at, ttl)?;
@@ -1529,9 +1538,9 @@ impl AccessCacheRecord {
 /// A minted access token and when to replace it.
 struct CachedToken {
     credentials: Credentials,
-    renew_at: DateTime<Utc>,
-    minted_at: DateTime<Utc>,
-    expires_at: DateTime<Utc>,
+    renew_at: Timestamp,
+    minted_at: Timestamp,
+    expires_at: Timestamp,
 }
 
 #[derive(Default)]
@@ -1713,13 +1722,13 @@ impl HardwareTokenSession {
         let minted_at = self.clock.now();
         let minted = self.mint().await?;
         let remaining = minted.expires_at - self.clock.now();
-        if remaining <= TimeDelta::zero() {
+        if remaining <= SignedDuration::ZERO {
             return Err(LpError::HardwareToken(
                 "The server returned an already expired token.".to_string(),
             ));
         }
         // Renew shortly before expiry, but keep most of a short lifetime.
-        let margin = std::cmp::min(TimeDelta::seconds(60), remaining / 10);
+        let margin = std::cmp::min(SignedDuration::from_secs(60), remaining / 10);
 
         let credentials = Credentials::new(
             self.credentials.consumer(),
@@ -2277,11 +2286,11 @@ pub struct RegisteredAuthenticator {
     /// Transport hints reported at registration (e.g. `usb`).
     pub transports: Option<Vec<String>>,
     /// When it was registered.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// When it last signed a challenge.
-    pub date_last_used: Option<DateTime<Utc>>,
+    pub date_last_used: Option<Timestamp>,
     /// When it was revoked, if it has been.
-    pub date_revoked: Option<DateTime<Utc>>,
+    pub date_revoked: Option<Timestamp>,
     /// Whether it has been revoked.
     pub is_revoked: Option<bool>,
     /// API self-link, used to issue grants for and revoke it.
@@ -2341,7 +2350,7 @@ pub struct IssueGrantRequest {
     pub context: Option<String>,
     /// When the grant expires.  Launchpad defaults to, and limits grants
     /// to, 365 days.
-    pub date_expires: Option<DateTime<Utc>>,
+    pub date_expires: Option<Timestamp>,
 }
 
 /// The authenticated person.
@@ -2384,6 +2393,57 @@ pub async fn register_hardware_key(
     name: &str,
     authenticator: Arc<dyn Authenticator>,
 ) -> Result<RegisteredAuthenticator> {
+    let complete = complete_registration(client, name, authenticator).await?;
+    let location = client.handle_created_location(complete).await?;
+    client.get_url(&location).await
+}
+
+/// Like [`register_hardware_key`], but return the registered authenticator
+/// with its exact Launchpad JSON, read back from the reported location.
+///
+/// # Errors
+///
+/// Once Launchpad has accepted the registration, a missing or untrusted
+/// `Location` or a failed read-back is reported as [`LpError::Partial`]: the
+/// key is probably registered, so check the account's registered keys
+/// before registering it again.
+pub async fn register_hardware_key_raw(
+    client: &LaunchpadClient,
+    name: &str,
+    authenticator: Arc<dyn Authenticator>,
+) -> Result<Raw<RegisteredAuthenticator>> {
+    let guidance = format!(
+        "The security key '{name}' may already be registered; check \
+         `lpcli hardware-token keys` before registering it again."
+    );
+    let complete = complete_registration(client, name, authenticator).await?;
+    // Only a successful completion reaches the `Location` checks, which
+    // report `LpError::Other`; status errors mean registration failed.
+    let location = client
+        .handle_created_location(complete)
+        .await
+        .map_err(|error| match error {
+            LpError::Other(message) | LpError::Partial(message) => {
+                LpError::Partial(format!("{message} {guidance}"))
+            }
+            other => other,
+        })?;
+    client
+        .get_created_raw(&location, "Registering the security key")
+        .await
+        .map_err(|error| match error {
+            LpError::Partial(message) => LpError::Partial(format!("{message}. {guidance}")),
+            other => other,
+        })
+}
+
+/// Run the registration ceremony and return Launchpad's response to the
+/// completion request, before its status or `Location` is checked.
+async fn complete_registration(
+    client: &LaunchpadClient,
+    name: &str,
+    authenticator: Arc<dyn Authenticator>,
+) -> Result<reqwest::Response> {
     require_text(name, "security-key name")?;
     let me = current_person(client).await?;
 
@@ -2425,7 +2485,7 @@ pub async fn register_hardware_key(
     // JSON, so the JSON registration is encoded a second time.
     let response_param = serde_json::to_string(&serde_json::to_string(&registration_json)?)?;
 
-    let complete = client
+    client
         .post_pairs_url_raw(
             &me.self_link,
             &[
@@ -2435,9 +2495,7 @@ pub async fn register_hardware_key(
             ],
             cookie.as_deref(),
         )
-        .await?;
-    let location = client.handle_created_location(complete).await?;
-    client.get_url(&location).await
+        .await
 }
 
 /// Revoke a registered security key by its `self_link`.
@@ -2465,7 +2523,7 @@ pub async fn issue_hardware_bound_oauth_token(
     require_text(&request.consumer_key, "consumer key")?;
     let me = current_person(client).await?;
 
-    let date_expires = request.date_expires.map(|date| date.to_rfc3339());
+    let date_expires = request.date_expires.map(format_rfc3339_timestamp);
     let mut params = vec![
         ("ws.op", "issueHardwareBoundOAuthToken"),
         ("consumer_key", request.consumer_key.as_str()),
@@ -2596,11 +2654,13 @@ mod tests {
         .to_string()
     }
 
-    fn token_body(token: &str, lifetime: TimeDelta) -> String {
+    fn token_body(token: &str, lifetime: SignedDuration) -> String {
         format!(
             "oauth_token={token}&oauth_token_secret={token}-secret&expires_at={}&lp.context=None",
-            url::form_urlencoded::byte_serialize((Utc::now() + lifetime).to_rfc3339().as_bytes())
-                .collect::<String>()
+            url::form_urlencoded::byte_serialize(
+                format_rfc3339_timestamp(Timestamp::now() + lifetime).as_bytes(),
+            )
+            .collect::<String>()
         )
     }
 
@@ -2705,27 +2765,24 @@ mod tests {
         }
     }
 
-    struct FakeCacheClock(Mutex<DateTime<Utc>>);
+    struct FakeCacheClock(Mutex<Timestamp>);
     impl FakeCacheClock {
         fn new() -> Self {
-            Self(Mutex::new(Utc::now()))
+            Self(Mutex::new(Timestamp::now()))
         }
-        fn advance(&self, delta: TimeDelta) {
+        fn advance(&self, delta: SignedDuration) {
             *self.0.lock().unwrap() += delta;
         }
     }
     impl CacheClock for FakeCacheClock {
-        fn now(&self) -> DateTime<Utc> {
+        fn now(&self) -> Timestamp {
             *self.0.lock().unwrap()
         }
     }
 
-    fn cache_test_record(
-        owner: &HardwareTokenCredentials,
-        now: DateTime<Utc>,
-    ) -> AccessCacheRecord {
+    fn cache_test_record(owner: &HardwareTokenCredentials, now: Timestamp) -> AccessCacheRecord {
         let ttl = DEFAULT_ACCESS_TOKEN_CACHE_TTL;
-        let expiry = now + TimeDelta::hours(1);
+        let expiry = now + SignedDuration::from_hours(1);
         AccessCacheRecord {
             version: 2,
             binding: cache_binding(owner),
@@ -2777,7 +2834,7 @@ mod tests {
                     .append_pair("oauth_token_secret", &format!("secret-{n}"))
                     .append_pair(
                         "expires_at",
-                        &(clock.now() + TimeDelta::hours(1)).to_rfc3339(),
+                        &format_rfc3339_timestamp(clock.now() + SignedDuration::from_hours(1)),
                     )
                     .finish()
                     .into_bytes()
@@ -2789,19 +2846,19 @@ mod tests {
     #[test]
     fn cache_deadlines_are_fixed_and_conservatively_validated() {
         let owner = HardwareTokenCredentials::new(grant(), HARDWARE_CONSUMER_KEY).unwrap();
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut record = cache_test_record(&owner, now);
         let ttl = DEFAULT_ACCESS_TOKEN_CACHE_TTL;
-        assert_eq!(record.deadline, now + TimeDelta::seconds(300));
+        assert_eq!(record.deadline, now + SignedDuration::from_secs(300));
         assert!(
             record
-                .credentials(&owner, ttl, now + TimeDelta::seconds(299))
+                .credentials(&owner, ttl, now + SignedDuration::from_secs(299))
                 .is_some()
         );
         assert!(record.credentials(&owner, ttl, record.deadline).is_none());
         assert!(
             record
-                .credentials(&owner, ttl, now - TimeDelta::seconds(1))
+                .credentials(&owner, ttl, now - SignedDuration::from_secs(1))
                 .is_none()
         );
         assert!(record.credentials(&owner, Duration::ZERO, now).is_none());
@@ -2810,7 +2867,7 @@ mod tests {
                 .credentials(
                     &owner,
                     Duration::from_secs(100),
-                    now + TimeDelta::seconds(100)
+                    now + SignedDuration::from_secs(100)
                 )
                 .is_none()
         );
@@ -2820,17 +2877,21 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            token_deadline(now, now + TimeDelta::seconds(100), ttl),
-            Some(now + TimeDelta::seconds(90))
+            token_deadline(now, now + SignedDuration::from_secs(100), ttl),
+            Some(now + SignedDuration::from_secs(90))
         );
         assert_eq!(
-            token_deadline(now, now + TimeDelta::hours(1), MAX_ACCESS_TOKEN_CACHE_TTL),
-            Some(now + TimeDelta::seconds(3540))
+            token_deadline(
+                now,
+                now + SignedDuration::from_hours(1),
+                MAX_ACCESS_TOKEN_CACHE_TTL
+            ),
+            Some(now + SignedDuration::from_secs(3540))
         );
         assert_eq!(token_deadline(now, now, ttl), None);
-        record.deadline += TimeDelta::seconds(1);
+        record.deadline += SignedDuration::from_secs(1);
         assert!(record.credentials(&owner, ttl, now).is_none());
-        record.deadline -= TimeDelta::seconds(1);
+        record.deadline -= SignedDuration::from_secs(1);
         record.version = 3;
         assert!(record.credentials(&owner, ttl, now).is_none());
         record.version = 2;
@@ -2843,7 +2904,7 @@ mod tests {
     #[test]
     fn cache_binds_every_grant_context_field() {
         let owner = HardwareTokenCredentials::new(grant(), HARDWARE_CONSUMER_KEY).unwrap();
-        let now = Utc::now();
+        let now = Timestamp::now();
         let record = cache_test_record(&owner, now);
         let mut variants = Vec::new();
         for grant in [
@@ -2896,7 +2957,7 @@ mod tests {
             "access-1"
         );
         let raw = cache.read().unwrap().unwrap();
-        clock.advance(TimeDelta::seconds(299));
+        clock.advance(SignedDuration::from_secs(299));
         let second = cache_test_session(&server, &cache, &clock, &authenticator, ttl);
         assert_eq!(
             second
@@ -2909,7 +2970,7 @@ mod tests {
         );
         assert_eq!(*cache.read().unwrap().unwrap(), *raw);
         assert_eq!(cache.writes.load(Ordering::SeqCst), 1);
-        clock.advance(TimeDelta::seconds(1));
+        clock.advance(SignedDuration::from_secs(1));
         assert_eq!(
             second
                 .access_credentials()
@@ -2955,7 +3016,7 @@ mod tests {
             DEFAULT_ACCESS_TOKEN_CACHE_TTL,
         );
         first.access_credentials().await.unwrap();
-        clock.advance(TimeDelta::seconds(100));
+        clock.advance(SignedDuration::from_secs(100));
         let shorter = cache_test_session(
             &server,
             &cache,
@@ -3101,7 +3162,7 @@ mod tests {
                 .token,
             "access-5"
         );
-        clock.advance(TimeDelta::seconds(300));
+        clock.advance(SignedDuration::from_secs(300));
         assert_eq!(
             session
                 .access_credentials()
@@ -3205,7 +3266,7 @@ mod tests {
         // Local tokens survive grant deletion/replacement too. They cannot
         // repopulate the cache; after their deadline the live store is checked.
         assert!(session.access_credentials().await.is_ok());
-        clock.advance(TimeDelta::seconds(300));
+        clock.advance(SignedDuration::from_secs(300));
         assert!(session.access_credentials().await.is_err());
         std::fs::remove_file(&path).unwrap();
         assert!(session.access_credentials().await.is_err());
@@ -3227,9 +3288,14 @@ mod tests {
             &authenticator,
             DEFAULT_ACCESS_TOKEN_CACHE_TTL,
         );
-        let mut expired =
-            cache_test_record(&session.credentials, clock.now() - TimeDelta::seconds(300));
-        let future = cache_test_record(&session.credentials, clock.now() + TimeDelta::seconds(1));
+        let mut expired = cache_test_record(
+            &session.credentials,
+            clock.now() - SignedDuration::from_secs(300),
+        );
+        let future = cache_test_record(
+            &session.credentials,
+            clock.now() + SignedDuration::from_secs(1),
+        );
         let mut wrong_binding = cache_test_record(&session.credentials, clock.now());
         wrong_binding.binding = "wrong-grant".into();
         // Empty credentials are invalid even if all timestamps/binding match.
@@ -3434,7 +3500,7 @@ mod tests {
             "access-2"
         );
         clear_access_cache(cache.as_ref()).unwrap();
-        clock.advance(TimeDelta::seconds(42));
+        clock.advance(SignedDuration::from_secs(42));
         assert_eq!(
             login.access_credentials().await.unwrap().access_token.token,
             "access-3"
@@ -3595,7 +3661,7 @@ mod tests {
             root.assert_async().await;
             me.assert_async().await;
             assert_eq!(cache.writes.load(Ordering::SeqCst), 0);
-            clock.advance(TimeDelta::seconds(100));
+            clock.advance(SignedDuration::from_secs(100));
             let (winner, loser, expected_access) = if first_wins {
                 (&first, &second, "access-1")
             } else {
@@ -3613,7 +3679,7 @@ mod tests {
             assert_eq!(record.binding, cache_binding(&winner.credentials));
             assert_eq!(record.token, expected_access);
             assert_eq!(record.minted_at, minted_at);
-            assert_eq!(record.deadline, minted_at + TimeDelta::seconds(300));
+            assert_eq!(record.deadline, minted_at + SignedDuration::from_secs(300));
             assert!(
                 loser
                     .commit_verified_login(true, &store, Some(&original))
@@ -4078,7 +4144,7 @@ mod tests {
         let ttl = DEFAULT_ACCESS_TOKEN_CACHE_TTL;
         let session = cache_test_session(&server, &cache, &clock, &authenticator, ttl);
         let rejected = session.access_credentials().await.unwrap();
-        clock.advance(TimeDelta::seconds(300));
+        clock.advance(SignedDuration::from_secs(300));
         let newer = session.access_credentials().await.unwrap();
         let raw = cache.read().unwrap().unwrap();
         assert!(
@@ -4724,11 +4790,95 @@ mod tests {
     }
 
     #[test]
+    fn rfc3339_timestamps_accept_offsets_and_format_as_explicit_utc() {
+        for (input, expected) in [
+            ("2026-11-17T12:34:56Z", "2026-11-17T12:34:56+00:00"),
+            ("2026-11-17T14:34:56+02:00", "2026-11-17T12:34:56+00:00"),
+            (
+                "2026-11-17T12:34:56.123456789-01:30",
+                "2026-11-17T14:04:56.123456789+00:00",
+            ),
+        ] {
+            let parsed = parse_rfc3339_timestamp(input).unwrap();
+            assert_eq!(format_rfc3339_timestamp(parsed), expected, "{input}");
+        }
+        for invalid in [
+            "2026-11-17",
+            "2026-11-17T12:34:56",
+            "2026-11-17T12:34-01",
+            "2026-11-17T12:34:56-01:00[America/New_York]",
+            "tomorrow",
+        ] {
+            assert!(parse_rfc3339_timestamp(invalid).is_none(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn token_deadline_handles_jiff_overflow_and_nonpositive_lifetimes() {
+        let now = Timestamp::from_second(1_800_000_000).unwrap();
+        assert_eq!(token_deadline(now, now, Duration::from_secs(1)), None);
+        assert_eq!(
+            token_deadline(
+                now,
+                now - SignedDuration::from_secs(1),
+                Duration::from_secs(1)
+            ),
+            None
+        );
+        let near_max = Timestamp::MAX - SignedDuration::from_secs(1);
+        assert!(token_deadline(near_max, Timestamp::MAX, Duration::ZERO).is_none());
+        assert_eq!(
+            token_deadline(near_max, Timestamp::MAX, Duration::from_secs(2)),
+            None,
+            "a positive lifetime must reach checked addition without panicking"
+        );
+        let near_min = Timestamp::MIN + SignedDuration::from_millis(5);
+        assert_eq!(
+            token_deadline(Timestamp::MIN, near_min, Duration::from_secs(1)),
+            Some(Timestamp::MIN + SignedDuration::from_micros(4500)),
+            "margin subtraction stays in range"
+        );
+    }
+
+    #[test]
+    fn chrono_serialized_cache_records_remain_readable() {
+        let owner = HardwareTokenCredentials::new(grant(), HARDWARE_CONSUMER_KEY).unwrap();
+        let minted = "2026-11-17T12:00:00.123456789Z";
+        let expires = "2026-11-17T13:00:00.123456789Z";
+        let deadline = "2026-11-17T12:05:00.123456789Z";
+        let raw = serde_json::json!({
+            "version": 2,
+            "binding": cache_binding(&owner),
+            "token": "cached-access",
+            "secret": "cached-secret",
+            "minted_at": minted,
+            "server_expires_at": expires,
+            "deadline": deadline,
+            "ttl": {"secs": 300, "nanos": 0},
+            "generation": "0".repeat(64),
+        });
+        let record: AccessCacheRecord = serde_json::from_value(raw).unwrap();
+        assert_eq!(record.minted_at.to_string(), minted);
+        assert_eq!(record.server_expires_at.to_string(), expires);
+        assert_eq!(record.deadline.to_string(), deadline);
+        let before_deadline = record.minted_at + SignedDuration::from_secs(299);
+        let cached = record
+            .credentials(&owner, DEFAULT_ACCESS_TOKEN_CACHE_TTL, before_deadline)
+            .unwrap();
+        assert_eq!(cached.renew_at.to_string(), deadline);
+        assert!(
+            record
+                .credentials(&owner, DEFAULT_ACCESS_TOKEN_CACHE_TTL, record.deadline)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn minted_tokens_are_parsed_strictly() {
-        let token = parse_minted_token(&token_body("abc", TimeDelta::hours(1))).unwrap();
+        let token = parse_minted_token(&token_body("abc", SignedDuration::from_hours(1))).unwrap();
         assert_eq!(token.key, "abc");
         assert_eq!(token.secret.as_str(), "abc-secret");
-        assert!(token.expires_at > Utc::now());
+        assert!(token.expires_at > Timestamp::now());
 
         assert!(parse_minted_token("oauth_token=a&oauth_token=b&oauth_token_secret=s").is_err());
         assert!(parse_minted_token("oauth_token=a&oauth_token_secret=s").is_err());
@@ -4813,6 +4963,19 @@ mod tests {
         consumer: &str,
         token: &str,
     ) -> Vec<mockito::Mock> {
+        let entry = json!({"id": 42, "name": "new-key"}).to_string();
+        registration_mocks_reading_back(server, consumer, token, 200, &entry).await
+    }
+
+    /// [`registration_mocks`], with the read-back of the registered key
+    /// answering `status` and `read_back`.
+    async fn registration_mocks_reading_back(
+        server: &mut mockito::ServerGuard,
+        consumer: &str,
+        token: &str,
+        status: usize,
+        read_back: &str,
+    ) -> Vec<mockito::Mock> {
         let person = format!("{}/devel/~example-user", server.url());
         let location = format!("{person}/+authenticator/42");
         let auth = Matcher::Regex(format!(
@@ -4875,10 +5038,145 @@ mod tests {
             server
                 .mock("GET", "/devel/~example-user/+authenticator/42")
                 .match_header("authorization", auth)
-                .with_body(json!({"id": 42, "name": "new-key"}).to_string())
+                .with_status(status)
+                .with_body(read_back)
                 .create_async()
                 .await,
         ]
+    }
+
+    fn classic_registration_client(server: &mockito::ServerGuard) -> LaunchpadClient {
+        LaunchpadClient::new(Some(Credentials::new(
+            "classic-consumer",
+            "classic-access",
+            "classic-secret",
+        )))
+        .with_base_url(format!("{}/devel", server.url()))
+    }
+
+    #[tokio::test]
+    async fn raw_registration_returns_the_registered_key_unchanged() {
+        let mut server = mockito::Server::new_async().await;
+        let entry = json!({
+            "id": 42,
+            "name": "new-key",
+            "attestation_format": "packed",
+            "transports": ["usb"],
+            "date_created": "2026-01-02T03:04:05.123456+00:00",
+            "date_last_used": null,
+            "date_revoked": null,
+            "is_revoked": false,
+            "self_link": format!("{}/devel/~example-user/+authenticator/42", server.url()),
+            "resource_type_link": "https://api.launchpad.net/devel/#webauthn_authenticator",
+            "http_etag": "\"etag-42\"",
+        });
+        let mocks = registration_mocks_reading_back(
+            &mut server,
+            "classic-consumer",
+            "classic-access",
+            200,
+            &entry.to_string(),
+        )
+        .await;
+        let client = classic_registration_client(&server);
+        let new_key = new_registration_key();
+        let result = register_hardware_key_raw(&client, "new-key", new_key.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(result.raw, entry, "Launchpad's JSON, unchanged");
+        assert_eq!(result.value.id, Some(42));
+        assert!(result.value.is_active());
+        for mock in mocks {
+            mock.assert_async().await;
+        }
+        assert_new_registration(&new_key);
+    }
+
+    #[tokio::test]
+    async fn raw_registration_read_back_failure_is_partial() {
+        let mut server = mockito::Server::new_async().await;
+        let mocks = registration_mocks_reading_back(
+            &mut server,
+            "classic-consumer",
+            "classic-access",
+            503,
+            "Service unavailable",
+        )
+        .await;
+        let client = classic_registration_client(&server);
+        let err = register_hardware_key_raw(&client, "new-key", new_registration_key())
+            .await
+            .unwrap_err();
+
+        let LpError::Partial(message) = &err else {
+            panic!("expected a partial failure, got {err:?}");
+        };
+        assert!(
+            message.starts_with("Registering the security key succeeded"),
+            "{message}"
+        );
+        assert!(message.contains("lpcli hardware-token keys"), "{message}");
+        assert_eq!(err.exit_code(), 7);
+        for mock in mocks {
+            mock.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_registration_untrusted_location_is_partial_and_not_fetched() {
+        let mut server = mockito::Server::new_async().await;
+        let mut mocks = registration_mocks(&mut server, "classic-consumer", "classic-access").await;
+        // Replace the completion's Location with one on a foreign origin.
+        let read_back = mocks.pop().unwrap();
+        mocks.pop().unwrap().remove_async().await;
+        read_back.remove_async().await;
+        let foreign = server
+            .mock("POST", "/devel/~example-user")
+            .match_body(Matcher::Regex("completeWebAuthnRegistration".into()))
+            .with_status(201)
+            .with_header("location", "https://attacker.example/+authenticator/42")
+            .create_async()
+            .await;
+        let client = classic_registration_client(&server);
+        let err = register_hardware_key_raw(&client, "new-key", new_registration_key())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, LpError::Partial(_)), "{err:?}");
+        assert!(err.to_string().contains("lpcli hardware-token keys"));
+        foreign.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn raw_registration_rejected_by_launchpad_is_not_partial() {
+        let mut server = mockito::Server::new_async().await;
+        let mut mocks = registration_mocks(&mut server, "classic-consumer", "classic-access").await;
+        let read_back = mocks.pop().unwrap();
+        mocks.pop().unwrap().remove_async().await;
+        let rejected = server
+            .mock("POST", "/devel/~example-user")
+            .match_body(Matcher::Regex("completeWebAuthnRegistration".into()))
+            .with_status(400)
+            .with_body("Invalid attestation")
+            .create_async()
+            .await;
+        let read_back = {
+            read_back.remove_async().await;
+            server
+                .mock("GET", "/devel/~example-user/+authenticator/42")
+                .expect(0)
+                .create_async()
+                .await
+        };
+        let client = classic_registration_client(&server);
+        let err = register_hardware_key_raw(&client, "new-key", new_registration_key())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, LpError::Api { status: 400, .. }), "{err:?}");
+        rejected.assert_async().await;
+        read_back.assert_async().await;
     }
 
     fn new_registration_key() -> Arc<FakeAuthenticator> {
@@ -4934,7 +5232,7 @@ mod tests {
                 Matcher::UrlEncoded("challenge_id".into(), "7".into()),
                 Matcher::UrlEncoded("assertion".into(), assertion),
             ]))
-            .with_body(token_body("minted-access", TimeDelta::hours(1)))
+            .with_body(token_body("minted-access", SignedDuration::from_hours(1)))
             .expect(1)
             .create_async()
             .await;
@@ -5036,7 +5334,7 @@ mod tests {
                 Matcher::UrlEncoded("challenge_id".into(), "7".into()),
                 Matcher::Regex("clientDataJSON".into()),
             ]))
-            .with_body(token_body("access-1", TimeDelta::hours(1)))
+            .with_body(token_body("access-1", SignedDuration::from_hours(1)))
             .expect(1)
             .create_async()
             .await;
@@ -5083,9 +5381,9 @@ mod tests {
                 let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
                 // The first token is already inside its renewal margin.
                 let lifetime = if n == 1 {
-                    TimeDelta::milliseconds(500)
+                    SignedDuration::from_millis(500)
                 } else {
-                    TimeDelta::hours(1)
+                    SignedDuration::from_hours(1)
                 };
                 token_body(&format!("access-{n}"), lifetime).into_bytes()
             })
@@ -5181,7 +5479,7 @@ mod tests {
             .mock("POST", "/+hw-access-token")
             .with_body_from_request(move |_| {
                 let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
-                token_body(&format!("access-{n}"), TimeDelta::hours(1)).into_bytes()
+                token_body(&format!("access-{n}"), SignedDuration::from_hours(1)).into_bytes()
             })
             .create_async()
             .await;

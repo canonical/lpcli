@@ -15,11 +15,17 @@
 //! | Series | `/ubuntu/jammy` |
 //! | Source publications | `/ubuntu/+archive/primary?ws.op=getPublishedSources` |
 //! | PPAs | `/~{person}/+archive/ubuntu/{ppa}` |
+//!
+//! Each read function that returns Launchpad data has a `_raw` counterpart
+//! that also returns the exact JSON Launchpad sent: an entry, or a collection
+//! with `start`, `entries`, and `total_size` or `total_size_link`.
+//! [`get_source_file_urls`] has no `_raw` counterpart because Launchpad
+//! returns a plain list of URLs rather than an entry or collection.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::client::{Collection, LaunchpadClient};
+use crate::client::{Collection, LaunchpadClient, Raw};
 use crate::error::Result;
 
 // ---------------------------------------------------------------------------
@@ -61,9 +67,9 @@ pub struct SourcePackagePublishingHistory {
     /// Publishing status (e.g. "Published", "Superseded").
     pub status: Option<String>,
     /// When this record was created.
-    pub date_published: Option<DateTime<Utc>>,
+    pub date_published: Option<Timestamp>,
     /// When this record was superseded, if applicable.
-    pub date_superseded: Option<DateTime<Utc>>,
+    pub date_superseded: Option<Timestamp>,
     /// Pocket (e.g. `"Release"`, `"Updates"`, `"Security"`).
     pub pocket: Option<String>,
     /// Archive this was published in.
@@ -88,7 +94,7 @@ pub struct BinaryPackagePublishingHistory {
     /// Status.
     pub status: Option<String>,
     /// When published.
-    pub date_published: Option<DateTime<Utc>>,
+    pub date_published: Option<Timestamp>,
 }
 
 /// A Launchpad Personal Package Archive (PPA).
@@ -124,6 +130,9 @@ pub struct SourceSearchParams<'a> {
     /// Whether to require an exact match for the source name and version.
     pub exact_match: bool,
     /// Maximum number of results to return.
+    ///
+    /// When set, it is sent as Launchpad's `ws.size` page size and only the
+    /// first page is fetched. When unset, every page is fetched.
     pub limit: Option<u32>,
 }
 
@@ -139,8 +148,18 @@ pub async fn get_distro_series(
     distro: &str,
     series: &str,
 ) -> Result<DistroSeries> {
+    Ok(get_distro_series_raw(client, distro, series).await?.value)
+}
+
+/// Like [`get_distro_series()`], but also keep the exact JSON Launchpad
+/// returned.
+pub async fn get_distro_series_raw(
+    client: &LaunchpadClient,
+    distro: &str,
+    series: &str,
+) -> Result<Raw<DistroSeries>> {
     client
-        .get(&format!("/{}/{}", enc(distro), enc(series)))
+        .get_raw(&format!("/{}/{}", enc(distro), enc(series)))
         .await
 }
 
@@ -149,8 +168,16 @@ pub async fn list_distro_series(
     client: &LaunchpadClient,
     distro: &str,
 ) -> Result<Vec<DistroSeries>> {
+    Ok(list_distro_series_raw(client, distro).await?.value)
+}
+
+/// Like [`list_distro_series()`], but also keep Launchpad's collection JSON.
+pub async fn list_distro_series_raw(
+    client: &LaunchpadClient,
+    distro: &str,
+) -> Result<Raw<Vec<DistroSeries>>> {
     let url = client.url(&format!("/{}/series", enc(distro)));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all_raw(client, &url).await
 }
 
 /// Search for source package publications in a distro series.
@@ -161,12 +188,33 @@ pub async fn list_distro_series(
 /// `distro_series`. This function targets the distribution's primary archive
 /// (`/{distro}/+archive/primary`) and passes the series as a full API URL
 /// via the `distro_series` link parameter.
+///
+/// [`SourceSearchParams::limit`] caps the number of results returned.
 pub async fn search_published_sources(
     client: &LaunchpadClient,
     distro: &str,
     series: &str,
     params: &SourceSearchParams<'_>,
 ) -> Result<Vec<SourcePackagePublishingHistory>> {
+    Ok(search_published_sources_raw(client, distro, series, params)
+        .await?
+        .value
+        .entries)
+}
+
+/// Like [`search_published_sources()`], but also keep Launchpad's collection
+/// JSON.
+///
+/// With [`SourceSearchParams::limit`], exactly one page of at most `limit`
+/// entries is fetched and Launchpad's page is returned unchanged, including
+/// `next_collection_link` when more results exist. Without a limit, every
+/// page is fetched and `next_collection_link` is omitted.
+pub async fn search_published_sources_raw(
+    client: &LaunchpadClient,
+    distro: &str,
+    series: &str,
+    params: &SourceSearchParams<'_>,
+) -> Result<Raw<Collection<SourcePackagePublishingHistory>>> {
     // getPublishedSources lives on archive, not distro_series.
     let archive_url = client.url(&format!("/{}/+archive/primary", enc(distro)));
     // The distro_series parameter must be the full API URL of the series
@@ -191,7 +239,7 @@ pub async fn search_published_sources(
     if params.exact_match {
         query.push_str("&exact_match=true");
     }
-    Collection::fetch_all(client, &query).await
+    fetch_sources_raw(client, query, params.limit).await
 }
 
 /// Fetch details of a PPA by owner and archive name.
@@ -207,8 +255,17 @@ pub async fn search_published_sources(
 /// # });
 /// ```
 pub async fn get_ppa(client: &LaunchpadClient, owner: &str, ppa_name: &str) -> Result<Archive> {
+    Ok(get_ppa_raw(client, owner, ppa_name).await?.value)
+}
+
+/// Like [`get_ppa()`], but also keep the exact JSON Launchpad returned.
+pub async fn get_ppa_raw(
+    client: &LaunchpadClient,
+    owner: &str,
+    ppa_name: &str,
+) -> Result<Raw<Archive>> {
     client
-        .get(&format!(
+        .get_raw(&format!(
             "/~{}/+archive/ubuntu/{}",
             enc(owner),
             enc(ppa_name)
@@ -217,12 +274,30 @@ pub async fn get_ppa(client: &LaunchpadClient, owner: &str, ppa_name: &str) -> R
 }
 
 /// List source package publications in a PPA.
+///
+/// [`SourceSearchParams::pocket`] is not sent. [`SourceSearchParams::limit`]
+/// caps the number of results returned.
 pub async fn list_ppa_sources(
     client: &LaunchpadClient,
     owner: &str,
     ppa_name: &str,
     params: &SourceSearchParams<'_>,
 ) -> Result<Vec<SourcePackagePublishingHistory>> {
+    Ok(list_ppa_sources_raw(client, owner, ppa_name, params)
+        .await?
+        .value
+        .entries)
+}
+
+/// Like [`list_ppa_sources()`], but also keep Launchpad's collection JSON.
+///
+/// Pagination follows [`search_published_sources_raw()`].
+pub async fn list_ppa_sources_raw(
+    client: &LaunchpadClient,
+    owner: &str,
+    ppa_name: &str,
+    params: &SourceSearchParams<'_>,
+) -> Result<Raw<Collection<SourcePackagePublishingHistory>>> {
     let archive_url = client.url(&format!(
         "/~{}/+archive/ubuntu/{}",
         enc(owner),
@@ -241,10 +316,34 @@ pub async fn list_ppa_sources(
     if params.exact_match {
         query.push_str("&exact_match=true");
     }
-    if let Some(limit) = params.limit {
-        query.push_str(&format!("&ws.size={limit}"));
+    fetch_sources_raw(client, query, params.limit).await
+}
+
+/// Fetch a `getPublishedSources` collection, honouring an optional limit.
+///
+/// `ws.size` is only Launchpad's page size, so a limited search fetches a
+/// single page; an unlimited one fetches every page.
+async fn fetch_sources_raw(
+    client: &LaunchpadClient,
+    mut url: String,
+    limit: Option<u32>,
+) -> Result<Raw<Collection<SourcePackagePublishingHistory>>> {
+    if let Some(limit) = limit {
+        url.push_str(&format!("&ws.size={limit}"));
+        return Collection::fetch_page_raw(client, &url).await;
     }
-    Collection::fetch_all(client, &query).await
+    let all = Collection::fetch_all_raw(client, &url).await?;
+    Ok(Raw {
+        value: Collection {
+            entries: all.value,
+            next_collection_link: None,
+            total_size: all
+                .raw
+                .get("total_size")
+                .and_then(serde_json::Value::as_u64),
+        },
+        raw: all.raw,
+    })
 }
 
 /// Get the source file URLs for a source package publishing history entry.
@@ -301,7 +400,12 @@ pub struct Distribution {
 ///
 /// `distro` is the distribution identifier, e.g. `"ubuntu"` or `"debian"`.
 pub async fn get_distro(client: &LaunchpadClient, distro: &str) -> Result<Distribution> {
-    client.get(&format!("/{}", enc(distro))).await
+    Ok(get_distro_raw(client, distro).await?.value)
+}
+
+/// Like [`get_distro()`], but also keep the exact JSON Launchpad returned.
+pub async fn get_distro_raw(client: &LaunchpadClient, distro: &str) -> Result<Raw<Distribution>> {
+    client.get_raw(&format!("/{}", enc(distro))).await
 }
 
 // ---------------------------------------------------------------------------

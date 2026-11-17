@@ -1,0 +1,8 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "render(&report,\nOutputMode::Plain).replace(&*fixture.dir.path().to_string_lossy(),\n\"[output dir]\")"
+---
+OK: hello_2.10-3.dsc (3 B)
+OK: hello_2.10.orig.tar.gz (12 B)
+
+OK: Downloaded 2 file(s) to '[output dir]/out'.

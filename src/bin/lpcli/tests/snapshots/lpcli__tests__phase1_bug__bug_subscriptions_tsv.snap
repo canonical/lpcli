@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase1_bug.rs
+expression: redacted
+---
+person_link	subscribed_by_link	date_created	self_link
+[server]/~reporter	[server]/~reporter	[timestamp]	[server]/bugs/42/+subscription/reporter
+[server]/~ubuntu-bugs	[server]/~reporter	[timestamp]	[server]/bugs/42/+subscription/ubuntu-bugs

@@ -1,0 +1,18 @@
+---
+source: src/bin/lpcli/output.rs
+expression: rendered
+---
+Section
+────────────────────────────────────────
+✓ Signed in as ~someone
+  Run `lpcli login` again.
+  Endpoint: https://api.launchpad.net/devel/
+
+┌────────┬────────────┐
+│ Name   ┆ Summary    │
+╞════════╪════════════╡
+│ first  ┆ tab here   │
+│        ┆ new \ line │
+│ second ┆ —          │
+└────────┴────────────┘
+2 items found. A hint.

@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_text(&rendered, base)"
+---
+delivery_url	active	event_types	date_created	self_link
+https://ci.example.com/hooks/1	true	git:push:0.1, merge-proposal:0.1	2026-01-02	https://api.launchpad.net/devel/launchpad/+webhook/1
+https://ci.example.com/hooks/2	false		2026-01-02	https://api.launchpad.net/devel/launchpad/+webhook/2

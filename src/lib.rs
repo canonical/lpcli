@@ -50,5 +50,6 @@ pub mod queue;
 pub mod snaps;
 pub mod specifications;
 pub mod status;
+pub mod time;
 pub mod translations;
 pub mod webhooks;

@@ -1,0 +1,46 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_json(&parsed, base)"
+---
+{
+  "entries": [
+    {
+      "date_created": "[timestamp]",
+      "date_scheduled": null,
+      "date_sent": "[timestamp]",
+      "error_message": null,
+      "event_type": "ping",
+      "http_etag": "\"etag-delivery\"",
+      "payload": {
+        "ping": true
+      },
+      "pending": false,
+      "resource_type_link": "https://api.launchpad.net/devel/#webhook_delivery",
+      "response_status_code": 200,
+      "self_link": "https://api.launchpad.net/devel/launchpad/+webhook/1/+delivery/7",
+      "successful": true,
+      "web_link": "https://launchpad.net/launchpad/+webhook/1/+delivery/7",
+      "webhook_link": "https://api.launchpad.net/devel/launchpad/+webhook/1"
+    },
+    {
+      "date_created": "[timestamp]",
+      "date_scheduled": null,
+      "date_sent": "[timestamp]",
+      "error_message": null,
+      "event_type": "ping",
+      "http_etag": "\"etag-delivery\"",
+      "payload": {
+        "ping": true
+      },
+      "pending": true,
+      "resource_type_link": "https://api.launchpad.net/devel/#webhook_delivery",
+      "response_status_code": null,
+      "self_link": "https://api.launchpad.net/devel/launchpad/+webhook/1/+delivery/8",
+      "successful": null,
+      "web_link": "https://launchpad.net/launchpad/+webhook/1/+delivery/8",
+      "webhook_link": "https://api.launchpad.net/devel/launchpad/+webhook/1"
+    }
+  ],
+  "start": 0,
+  "total_size": 2
+}

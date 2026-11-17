@@ -162,6 +162,7 @@ mod documentation_examples {
         for (document, markdown) in [
             ("README.md", include_str!("../../../README.md")),
             ("AGENTS.md", include_str!("../../../AGENTS.md")),
+            ("SKILL.md", include_str!("../../../SKILL.md")),
         ] {
             let (count, errors) = validation_failures(document, markdown);
             total += count;
@@ -175,6 +176,26 @@ mod documentation_examples {
             failures.len(),
             failures.join("\n\n")
         );
+    }
+
+    /// `--json` was removed in 0.5.0; documentation may explain the change in
+    /// prose and tables, but no runnable example may use it.
+    #[test]
+    fn documented_examples_never_use_the_removed_json_flag() {
+        for (document, markdown) in [
+            ("README.md", include_str!("../../../README.md")),
+            ("AGENTS.md", include_str!("../../../AGENTS.md")),
+            ("SKILL.md", include_str!("../../../SKILL.md")),
+        ] {
+            for (line, command) in candidates(markdown) {
+                if let Ok(Some(args)) = command_args(&command) {
+                    assert!(
+                        !args.iter().any(|arg| arg == "--json"),
+                        "{document}:{line}: runnable example uses --json: {command}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -416,6 +437,8 @@ async fn clear_cache_dispatch_skips_malformed_config_and_propagates_clear_failur
         validate_cli(&cli).unwrap();
         let config_reads = std::cell::Cell::new(0);
         let clears = std::cell::Cell::new(0);
+        let env = output::Environment::default();
+        let mut output = initial_error_output(&cli, &env, (false, false));
         let result = run_command(
             cli,
             || {
@@ -430,6 +453,9 @@ async fn clear_cache_dispatch_skips_malformed_config_and_propagates_clear_failur
                     Ok(())
                 }
             },
+            &mut output,
+            &env,
+            (false, false),
         )
         .await;
         assert_eq!(config_reads.get(), 0);
@@ -446,13 +472,285 @@ async fn clear_cache_dispatch_skips_malformed_config_and_propagates_clear_failur
 async fn other_commands_still_require_valid_config_before_dispatch() {
     let cli = Cli::try_parse_from(["lpcli", "hardware-token", "show"]).unwrap();
     validate_cli(&cli).unwrap();
+    let env = output::Environment::default();
+    let mut output = initial_error_output(&cli, &env, (false, false));
     let result = run_command(
         cli,
         || Err(lpcli::error::LpError::Config("malformed config".into())),
         || panic!("only clear-cache bypasses configuration"),
+        &mut output,
+        &env,
+        (false, false),
     )
     .await;
     assert!(matches!(result, Err(lpcli::error::LpError::Config(_))));
+}
+
+mod runtime_errors {
+    use super::*;
+
+    fn cli(args: &[&str]) -> Cli {
+        let cli = Cli::try_parse_from(args).unwrap();
+        validate_cli(&cli).unwrap();
+        cli
+    }
+
+    #[test]
+    fn secret_redaction_handles_json_form_encoded_and_multiple_authorization_headers() {
+        let message = concat!(
+            "body: {\"oauth_token_secret\": \"json-secret\", ",
+            "\"oauth_token\":\"json-token\"}; ",
+            "oauth_signature=signature-secret&refresh_token: 'refresh-secret'\n",
+            "Authorization: OAuth oauth_token=header-token\n",
+            "authorization: Bearer second-header-token"
+        );
+        let redacted = output::redact_secrets(message);
+        for secret in [
+            "json-secret",
+            "json-token",
+            "signature-secret",
+            "refresh-secret",
+            "header-token",
+            "second-header-token",
+        ] {
+            assert!(!redacted.contains(secret), "{secret} leaked in: {redacted}");
+        }
+        assert_eq!(redacted.matches("Authorization: [redacted]").count(), 2);
+        assert!(redacted.contains("\"oauth_token_secret\": \"[redacted]\""));
+    }
+
+    #[test]
+    fn plain_errors_follow_flag_env_config_and_accessibility_even_with_forced_color() {
+        for source in ["flag", "env", "config", "accessible", "dumb"] {
+            let args = if source == "flag" {
+                vec!["lpcli", "--format", "plain", "--color", "always", "status"]
+            } else {
+                vec!["lpcli", "--color", "always", "status"]
+            };
+            let cli = cli(&args);
+            let env = output::Environment {
+                format: (source == "env").then(|| "plain".into()),
+                clicolor_force: Some("1".into()),
+                term: (source == "dumb").then(|| "dumb".into()),
+                ..Default::default()
+            };
+            let mut settings = config::AppConfig::default();
+            settings.display.format = (source == "config").then_some(OutputMode::Plain);
+            settings.display.accessible = source == "accessible";
+            let output = resolve_command_output(&cli, &settings, &env, (true, true)).unwrap();
+            assert_eq!(
+                output.render_error_message("request failed"),
+                "Error: request failed\n",
+                "{source}"
+            );
+            output::tests::assert_plain_invariants(&output.render_error_message("request failed"));
+        }
+    }
+
+    #[test]
+    fn runtime_errors_use_stderr_color_and_remain_text_in_structured_modes() {
+        for mode in ["rich", "json", "tsv"] {
+            let cli = cli(&["lpcli", "--format", mode, "status"]);
+            let env = output::Environment::default();
+            for (stdout_terminal, stderr_terminal) in [(true, false), (false, true)] {
+                let output = resolve_command_output(
+                    &cli,
+                    &config::AppConfig::default(),
+                    &env,
+                    (stdout_terminal, stderr_terminal),
+                )
+                .unwrap();
+                let rendered = output.render_error_message("request failed");
+                assert_eq!(rendered.contains('\u{1b}'), stderr_terminal, "{mode}");
+                assert!(rendered.ends_with(" request failed\n"));
+                assert!(serde_json::from_str::<serde_json::Value>(&rendered).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn pre_config_errors_ignore_invalid_env_without_losing_plain_flag_or_dumb_terminal() {
+        for flag in [false, true] {
+            let args = if flag {
+                vec!["lpcli", "--format", "plain", "--color", "always", "status"]
+            } else {
+                vec!["lpcli", "--color", "always", "status"]
+            };
+            let cli = cli(&args);
+            let env = output::Environment {
+                format: Some("invalid".into()),
+                term: Some("dumb".into()),
+                ..Default::default()
+            };
+            let output = initial_error_output(&cli, &env, (true, true));
+            assert_eq!(
+                output.render_error_message("bad config"),
+                "Error: bad config\n"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn config_errors_preserve_flag_and_env_plain_and_load_once() {
+        for flag in [false, true] {
+            let args = if flag {
+                vec!["lpcli", "--format", "plain", "--color", "always", "status"]
+            } else {
+                vec!["lpcli", "--color", "always", "status"]
+            };
+            let cli = cli(&args);
+            let env = output::Environment {
+                format: Some("plain".into()),
+                ..Default::default()
+            };
+            let mut output = initial_error_output(&cli, &env, (true, true));
+            let reads = std::cell::Cell::new(0);
+            let err = run_command(
+                cli,
+                || {
+                    reads.set(reads.get() + 1);
+                    Err(lpcli::error::LpError::Config("bad config".into()))
+                },
+                || panic!("status must not clear cache"),
+                &mut output,
+                &env,
+                (true, true),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(reads.get(), 1);
+            let rendered = output.render_error(&err);
+            assert!(rendered.starts_with("Error: "));
+            assert!(rendered.contains("bad config"));
+            output::tests::assert_plain_invariants(&rendered);
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_errors_preserve_resolved_config_plain_and_accessibility() {
+        for accessible in [false, true] {
+            let mut cli = cli(&["lpcli", "--color", "always", "login", "--hardware-token"]);
+            // Exercise a deterministic handler failure before reading secrets,
+            // credentials, or hardware; clap normally rejects this combination.
+            let Command::Login(args) = &mut cli.command else {
+                panic!("expected login command");
+            };
+            args.grant_token = Some("test-grant".into());
+            args.account = None;
+            let env = output::Environment::default();
+            let mut output = initial_error_output(&cli, &env, (true, true));
+            assert_eq!(output.mode(), OutputMode::Rich);
+            let reads = std::cell::Cell::new(0);
+            let err = run_command(
+                cli,
+                || {
+                    reads.set(reads.get() + 1);
+                    let mut settings = config::AppConfig::default();
+                    settings.display.format = (!accessible).then_some(OutputMode::Plain);
+                    settings.display.accessible = accessible;
+                    Ok(settings)
+                },
+                || panic!("login must not clear cache"),
+                &mut output,
+                &env,
+                (true, true),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(reads.get(), 1);
+            assert!(matches!(err, lpcli::error::LpError::HardwareToken(_)));
+            let rendered = output.render_error(&err);
+            assert!(rendered.starts_with("Error: "));
+            assert!(rendered.contains("--account is required"));
+            output::tests::assert_plain_invariants(&rendered);
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_cache_errors_preserve_plain_and_bypass_invalid_env_and_config() {
+        let cli = cli(&[
+            "lpcli",
+            "--format",
+            "plain",
+            "--color",
+            "always",
+            "hardware-token",
+            "clear-cache",
+        ]);
+        let env = output::Environment {
+            format: Some("invalid".into()),
+            ..Default::default()
+        };
+        let mut output = initial_error_output(&cli, &env, (true, true));
+        let err = run_command(
+            cli,
+            || panic!("clear-cache must not load config"),
+            || {
+                Err(lpcli::error::LpError::HardwareToken(
+                    "cache unavailable".into(),
+                ))
+            },
+            &mut output,
+            &env,
+            (true, true),
+        )
+        .await
+        .unwrap_err();
+        let rendered = output.render_error(&err);
+        assert!(rendered.starts_with("Error: "));
+        assert!(rendered.contains("cache unavailable"));
+        output::tests::assert_plain_invariants(&rendered);
+    }
+}
+
+#[test]
+fn expiry_parser_accepts_dates_and_rfc3339_offsets_as_instants() {
+    for (input, expected) in [
+        ("2026-12-31", "2026-12-31T00:00:00Z"),
+        ("2026-12-31T12:00:00Z", "2026-12-31T12:00:00Z"),
+        ("2026-12-31T14:00:00+02:00", "2026-12-31T12:00:00Z"),
+    ] {
+        assert_eq!(
+            parse_expiry(input).unwrap().to_string(),
+            expected,
+            "{input}"
+        );
+    }
+    for invalid in [
+        "2026-02-30",
+        "2026-12-31T12:00:00",
+        "2026-12-31T12:00-04",
+        "2026-12-31T12:00:00-04:00[America/New_York]",
+        "31/12/2026",
+        "",
+    ] {
+        let error = parse_expiry(invalid).unwrap_err();
+        assert!(
+            error.contains("YYYY-MM-DD or RFC 3339"),
+            "{invalid}: {error}"
+        );
+    }
+}
+
+#[test]
+fn launchpad_timestamps_deserialize_and_keep_cli_display_formats() {
+    let task: bugs::BugTask = serde_json::from_value(serde_json::json!({
+        "date_created": "2026-01-02T03:04:05.678901+00:00",
+    }))
+    .unwrap();
+    let date = task.date_created.unwrap();
+    assert_eq!(date.strftime("%Y-%m-%d").to_string(), "2026-01-02");
+    assert_eq!(
+        date.strftime("%Y-%m-%d %H:%M UTC").to_string(),
+        "2026-01-02 03:04 UTC"
+    );
+
+    let milestone: projects::Milestone = serde_json::from_value(serde_json::json!({
+        "name": "1.0",
+        "date_targeted": "2026-12-31",
+    }))
+    .unwrap();
+    assert_eq!(milestone.date_targeted.unwrap().to_string(), "2026-12-31");
 }
 
 #[test]
@@ -1095,7 +1393,7 @@ async fn queue_info_targets_the_resolved_archive() {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, lpcli::error::LpError::NotFound(_)));
+        assert!(matches!(err, lpcli::error::LpError::LocalNotFound(_)));
         uploads.assert_async().await;
     }
 }
@@ -3540,80 +3838,564 @@ fn cli_link_remote_github_ref_grammar() {
     assert_eq!((parsed.owner(), parsed.repo(), parsed.number()), ("canonical", "apport", 7));
 }
 
-#[test]
-fn cli_remote_bug_trackers_json_output_flag() {
-    // Table output is the default; --json combines with the search/limit
-    // filters for machine-readable output.
-    let parse = |argv: &str| {
-        Cli::try_parse_from(argv.split_ascii_whitespace()).expect("CLI parsing failed")
-    };
-    let Command::Bug(BugCommand::RemoteBugTrackers { json, .. }) =
-        parse("lpcli bug remote-bug-trackers").command
-    else {
-        panic!("Expected RemoteBugTrackers")
-    };
-    assert!(!json, "default output must stay the compact table");
-    let Command::Bug(BugCommand::RemoteBugTrackers {
-        limit,
-        search,
-        json,
-    }) = parse("lpcli bug remote-bug-trackers --json --search canonical/apport --limit 5").command
-    else {
-        panic!("Expected RemoteBugTrackers")
-    };
-    assert!(json);
-    assert_eq!(limit, Some(5));
-    assert_eq!(search.as_deref(), Some("canonical/apport"));
-}
+mod output_layer {
+    //! Phase 0 of the output-layer plan: `--format`, `--color`, the removal
+    //! of `--json`, and the pilot commands in every output mode.
 
-/// A representative [`bugs::BugTracker`] for serialization tests (sparse
-/// JSON fixture: absent optional fields deserialise as `None`).
-#[rustfmt::skip]
-fn make_tracker(name: &str) -> bugs::BugTracker {
-    serde_json::from_value(serde_json::json!({
-        "self_link": format!("https://api.launchpad.net/devel/bugs/bugtrackers/{name}"),
-        "name": name,
-        "title": format!("{name} tracker"),
-        "summary": format!("Summary of {name}"),
-        "base_url": "https://example.org/issues",
-        "bug_tracker_type": "GitHub Issues",
-        "web_link": format!("https://bugs.launchpad.net/bugs/bugtrackers/{name}"),
-    }))
-    .expect("tracker fixture must deserialise")
-}
+    use super::*;
+    use crate::output::tests::{assert_plain_invariants, assert_tsv_invariants};
 
-#[rustfmt::skip]
-#[test]
-fn trackers_to_json_shape() {
-    // The output is a JSON array sorted by name with a fixed key set:
-    // optional fields always serialize (null when unset), identical input
-    // gives identical bytes, and the caller's data stays untouched.
-    let trackers = vec![make_tracker("debbugs"), make_tracker("auto-github-canonical-apport")];
-    let text = trackers_to_json(&trackers).expect("serialization should not fail");
-    let value: serde_json::Value = serde_json::from_str(&text).expect("output must be valid JSON");
-    let entries = value.as_array().expect("JSON output must be an array");
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0]["name"], "auto-github-canonical-apport");
-    assert_eq!(entries[1]["name"], "debbugs");
-    for entry in entries {
-        for key in ["self_link", "title", "bug_tracker_type", "base_url"] {
-            assert!(entry.get(key).is_some(), "key '{key}' must always be present");
+    const MODES: [OutputMode; 4] = [
+        OutputMode::Rich,
+        OutputMode::Plain,
+        OutputMode::Json,
+        OutputMode::Tsv,
+    ];
+
+    fn render(report: &Report, mode: OutputMode) -> String {
+        Output::fixed(mode, false, 100).render(report)
+    }
+
+    /// Check the per-mode invariants and snapshot every mode.
+    fn assert_all_modes(name: &str, report: &Report, records: usize) {
+        for mode in MODES {
+            let rendered = render(report, mode);
+            match mode {
+                OutputMode::Plain => assert_plain_invariants(&rendered),
+                OutputMode::Tsv => assert_tsv_invariants(&rendered, records),
+                OutputMode::Json => {
+                    let value: serde_json::Value =
+                        serde_json::from_str(&rendered).expect("json output must always parse");
+                    assert_eq!(value, report.json);
+                }
+                OutputMode::Rich => assert!(!rendered.contains('\u{1b}')),
+            }
+            insta::assert_snapshot!(format!("{name}_{}", mode.name()), rendered);
         }
     }
-    assert_eq!(
-        trackers.iter().map(|t| t.name.as_deref()).collect::<Vec<_>>(),
-        vec![Some("debbugs"), Some("auto-github-canonical-apport")],
-        "the caller's input must stay untouched"
-    );
-    assert_eq!(trackers_to_json(&[]).expect("serialization should not fail"), "[]", "an empty result must stay an empty JSON array");
-    let all_null: serde_json::Value = serde_json::from_str(
-        &trackers_to_json(std::slice::from_ref(&bugs::BugTracker::default())).expect("serialization should not fail"),
-    ).expect("output must be valid JSON");
-    for key in ["self_link", "name", "title", "summary", "base_url", "bug_tracker_type", "web_link"] {
-        assert!(all_null[0].get(key).is_some_and(|v| v.is_null()), "key '{key}' must stay null");
+
+    // -- Parsing -----------------------------------------------------------
+
+    #[test]
+    fn json_flag_is_rejected_as_an_unknown_argument() {
+        for argv in [
+            &["lpcli", "bug", "remote-bug-trackers", "--json"][..],
+            &[
+                "lpcli",
+                "bug",
+                "remote-bug-trackers",
+                "--search",
+                "github",
+                "--json",
+            ],
+            &["lpcli", "--json", "bug", "remote-bug-trackers"],
+            &["lpcli", "bug", "search", "--json"],
+            &["lpcli", "status", "--json"],
+        ] {
+            let error = Cli::try_parse_from(argv).expect_err("--json must be rejected");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{argv:?}"
+            );
+            assert_eq!(error.exit_code(), 2, "{argv:?}");
+        }
     }
-    let again = trackers_to_json(&trackers).expect("serialization should not fail");
-    assert_eq!(text, again, "same input must produce identical bytes");
+
+    #[test]
+    fn help_never_mentions_the_json_flag() {
+        for argv in [
+            &["lpcli", "--help"][..],
+            &["lpcli", "bug", "--help"],
+            &["lpcli", "bug", "remote-bug-trackers", "--help"],
+            &["lpcli", "bug", "remote-bug-trackers", "-h"],
+            &["lpcli", "bug", "search", "--help"],
+            &["lpcli", "status", "--help"],
+        ] {
+            let help = Cli::try_parse_from(argv).unwrap_err().to_string();
+            assert!(
+                !help.contains("--json"),
+                "{argv:?} help mentions --json:\n{help}"
+            );
+            assert!(help.contains("--format"), "{argv:?} help omits --format");
+        }
+        let help = Cli::try_parse_from(["lpcli", "bug", "remote-bug-trackers", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(help.contains("--format json"), "{help}");
+    }
+
+    #[test]
+    fn format_and_color_are_long_only_global_options() {
+        let cli = Cli::try_parse_from(["lpcli", "--format", "json", "bug", "search"]).unwrap();
+        assert_eq!(
+            (cli.format, cli.color),
+            (Some(OutputMode::Json), ColorChoice::Auto)
+        );
+        let cli = Cli::try_parse_from([
+            "lpcli",
+            "bug",
+            "remote-bug-trackers",
+            "--format",
+            "tsv",
+            "--color",
+            "never",
+        ])
+        .unwrap();
+        assert_eq!(
+            (cli.format, cli.color),
+            (Some(OutputMode::Tsv), ColorChoice::Never)
+        );
+        for mode in MODES {
+            let cli = Cli::try_parse_from(["lpcli", "status", "--format", mode.name()]).unwrap();
+            assert_eq!(cli.format, Some(mode));
+            validate_cli(&cli).unwrap();
+        }
+        for (argv, kind) in [
+            (
+                &["lpcli", "--format", "xml", "status"][..],
+                clap::error::ErrorKind::InvalidValue,
+            ),
+            (
+                &["lpcli", "--color", "sometimes", "status"],
+                clap::error::ErrorKind::InvalidValue,
+            ),
+            (
+                &["lpcli", "-f", "json", "status"],
+                clap::error::ErrorKind::UnknownArgument,
+            ),
+        ] {
+            assert_eq!(
+                Cli::try_parse_from(argv).unwrap_err().kind(),
+                kind,
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn structured_formats_are_usage_errors_for_unported_commands() {
+        for (format, argv) in [
+            ("json", &["lpcli", "--format", "json", "skills"][..]),
+            ("tsv", &["lpcli", "--format", "tsv", "skills"]),
+            (
+                "tsv",
+                &["lpcli", "--format", "tsv", "bug", "show", "--bug-id", "1"],
+            ),
+            ("tsv", &["lpcli", "--format", "tsv", "package", "distro"]),
+            (
+                "tsv",
+                &["lpcli", "--format", "tsv", "hardware-token", "clear-cache"],
+            ),
+        ] {
+            {
+                let cli = Cli::try_parse_from(argv).unwrap();
+                let error = validate_cli(&cli).unwrap_err();
+                assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+                assert_eq!(error.exit_code(), 2);
+                let message = error.to_string();
+                assert!(message.contains(&format!("--format {format}")), "{message}");
+                assert!(message.contains("rich or --format plain"), "{message}");
+            }
+        }
+        for format in ["rich", "plain"] {
+            let cli = Cli::try_parse_from(["lpcli", "--format", format, "bug", "show", "-b", "1"])
+                .unwrap();
+            validate_cli(&cli).unwrap();
+        }
+        for argv in [
+            &["lpcli", "--format", "json", "status"][..],
+            &["lpcli", "--format", "json", "bug", "show", "-b", "1"],
+            &["lpcli", "--format", "json", "package", "list-series"],
+            &["lpcli", "--format", "json", "hardware-token", "clear-cache"],
+            &["lpcli", "--format", "tsv", "bug", "search"],
+            &[
+                "lpcli",
+                "--public",
+                "--format",
+                "json",
+                "bug",
+                "remote-bug-trackers",
+            ],
+        ] {
+            validate_cli(&Cli::try_parse_from(argv).unwrap()).unwrap();
+        }
+    }
+
+    // -- bug remote-bug-trackers ---------------------------------------------
+
+    /// A Launchpad `bug_tracker` entry, including fields lpcli does not model.
+    fn tracker_json(name: &str, title: &str, tracker_type: &str) -> serde_json::Value {
+        serde_json::json!({
+            "self_link": format!("https://api.launchpad.net/devel/bugs/bugtrackers/{name}"),
+            "web_link": format!("https://bugs.launchpad.net/bugs/bugtrackers/{name}"),
+            "resource_type_link": "https://api.launchpad.net/devel/#bug_tracker",
+            "http_etag": "\"a1b2c3-d4e5f6\"",
+            "name": name,
+            "title": title,
+            "summary": null,
+            "bug_tracker_type": tracker_type,
+            "base_url": format!("https://{name}.example.org/"),
+            "base_url_aliases": [],
+            "contact_details": null,
+            "active": true,
+            "has_lp_plugin": null,
+            "owner_link": "https://api.launchpad.net/devel/~registry",
+            "registered_by_link": "https://api.launchpad.net/devel/~registry",
+            "watches_collection_link": format!(
+                "https://api.launchpad.net/devel/bugs/bugtrackers/{name}/watches"
+            ),
+        })
+    }
+
+    fn tracker_search(entries: Vec<serde_json::Value>, complete: bool) -> bugs::BugTrackerSearch {
+        bugs::BugTrackerSearch {
+            trackers: entries
+                .into_iter()
+                .map(|entry| Raw::from_value(entry).unwrap())
+                .collect(),
+            complete,
+        }
+    }
+
+    fn sample_trackers() -> Vec<serde_json::Value> {
+        vec![
+            tracker_json("debbugs", "Debian Bug tracker", "Debbugs"),
+            tracker_json(
+                "auto-github-canonical-apport",
+                "GitHub canonical/apport\tissues",
+                "GitHub Issues",
+            ),
+        ]
+    }
+
+    #[test]
+    fn remote_bug_trackers_render_in_every_mode() {
+        let report = remote_bug_trackers_report(&tracker_search(sample_trackers(), true), false);
+        assert_all_modes("remote_bug_trackers", &report, 2);
+    }
+
+    #[test]
+    fn remote_bug_trackers_json_is_launchpad_collection_in_launchpad_order() {
+        let entries = sample_trackers();
+        let report = remote_bug_trackers_report(&tracker_search(entries.clone(), true), false);
+        assert_eq!(
+            report.json,
+            serde_json::json!({"total_size": 2, "start": 0, "entries": entries}),
+            "entries must be the unmodified Launchpad representations, unsorted"
+        );
+    }
+
+    #[test]
+    fn remote_bug_trackers_limited_search_omits_unknown_totals() {
+        let report = remote_bug_trackers_report(&tracker_search(sample_trackers(), false), true);
+        let json = report.json.as_object().unwrap();
+        assert!(
+            !json.contains_key("total_size"),
+            "the true total is unknown"
+        );
+        assert!(
+            !json.contains_key("next_collection_link"),
+            "an unfiltered continuation link would be wrong"
+        );
+        assert_eq!(json["start"], 0);
+        assert_eq!(json["entries"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn remote_bug_trackers_empty_results() {
+        for (searched, message) in [
+            (false, "No remote bug trackers found.\n"),
+            (true, "No remote bug trackers matched the search.\n"),
+        ] {
+            let report = remote_bug_trackers_report(&tracker_search(vec![], true), searched);
+            assert_eq!(render(&report, OutputMode::Rich), message);
+            assert_eq!(render(&report, OutputMode::Plain), message);
+            assert_eq!(
+                render(&report, OutputMode::Json),
+                "{\n  \"entries\": [],\n  \"start\": 0,\n  \"total_size\": 0\n}\n"
+            );
+            assert_eq!(
+                render(&report, OutputMode::Tsv),
+                "name\ttitle\tbug_tracker_type\tbase_url\n"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_bug_trackers_json_matches_launchpad_through_mock_server() {
+        let mut server = isolated_mock_server().await;
+        let next = format!(
+            "{}/bugs/bugtrackers?ws.size=100&memo=100&ws.start=100",
+            server.url()
+        );
+        let first = tracker_json("github-one", "GitHub one", "GitHub Issues");
+        let skipped = tracker_json("debbugs", "Debian Bug tracker", "Debbugs");
+        let second = tracker_json("github-two", "GitHub two", "GitHub Issues");
+        let page_one = server
+            .mock("GET", "/bugs/bugtrackers")
+            .match_query(mockito::Matcher::UrlEncoded("ws.size".into(), "100".into()))
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_body(
+                serde_json::json!({
+                    "total_size": 300,
+                    "start": 0,
+                    "entries": [first, skipped],
+                    "next_collection_link": next,
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let page_two = server
+            .mock("GET", "/bugs/bugtrackers")
+            .match_query(mockito::Matcher::UrlEncoded("memo".into(), "100".into()))
+            .with_body(
+                serde_json::json!({
+                    "total_size": 300,
+                    "start": 100,
+                    "entries": [second, tracker_json("github-three", "GitHub three", "GitHub Issues")],
+                    "next_collection_link": format!("{}/bugs/bugtrackers?ws.start=200", server.url()),
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = mock_read_client(&server, false);
+        let found = bugs::search_bug_trackers_raw(&client, Some("github"), Some(2))
+            .await
+            .unwrap();
+        assert!(!found.complete);
+        let report = remote_bug_trackers_report(&found, true);
+        assert_eq!(
+            report.json,
+            serde_json::json!({"start": 0, "entries": [first, second]})
+        );
+        page_one.assert_async().await;
+        page_two.assert_async().await;
+    }
+
+    // -- bug search ----------------------------------------------------------
+
+    /// A Launchpad `bug_task` entry, including fields lpcli does not model.
+    fn bug_task_json(id: u64, title: &str, status: &str) -> serde_json::Value {
+        serde_json::json!({
+            "self_link": format!("https://api.launchpad.net/devel/ubuntu/+source/curl/+bug/{id}"),
+            "web_link": format!("https://bugs.launchpad.net/ubuntu/+source/curl/+bug/{id}"),
+            "resource_type_link": "https://api.launchpad.net/devel/#bug_task",
+            "http_etag": "\"0123-4567\"",
+            "bug_link": format!("https://api.launchpad.net/devel/bugs/{id}"),
+            "title": title,
+            "status": status,
+            "importance": "Undecided",
+            "assignee_link": null,
+            "bug_target_display_name": "curl (Ubuntu)",
+            "bug_target_name": "curl (Ubuntu)",
+            "target_link": "https://api.launchpad.net/devel/ubuntu/+source/curl",
+            "bug_watch_link": null,
+            "milestone_link": null,
+            "date_created": "2026-01-02T03:04:05.678901+00:00",
+            "date_fix_released": null,
+            "is_complete": false,
+        })
+    }
+
+    fn search_page(value: serde_json::Value) -> Raw<Collection<bugs::BugTask>> {
+        Raw::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn bug_search_renders_in_every_mode() {
+        let page = search_page(serde_json::json!({
+            "total_size": 3,
+            "start": 0,
+            "entries": [
+                bug_task_json(2_000_001, "curl crashes on\nmultiline \"titles\"", "New"),
+                bug_task_json(2_000_002, "Fix released", "Fix Released"),
+            ],
+            "next_collection_link":
+                "https://api.launchpad.net/devel/ubuntu/+source/curl?ws.op=searchTasks&ws.size=2&memo=2&ws.start=2",
+        }));
+        assert_all_modes("bug_search", &bug_search_report(&page), 2);
+    }
+
+    #[test]
+    fn bug_search_json_is_the_unmodified_launchpad_page() {
+        let raw = serde_json::json!({
+            "total_size_link": "https://api.launchpad.net/devel/ubuntu?ws.op=searchTasks&ws.show=total_size",
+            "start": 0,
+            "entries": [bug_task_json(1, "One", "New")],
+            "next_collection_link": "https://api.launchpad.net/devel/ubuntu?ws.op=searchTasks&ws.start=1",
+        });
+        let report = bug_search_report(&search_page(raw.clone()));
+        assert_eq!(report.json, raw);
+        assert!(report.json.get("total_size").is_none(), "no invented count");
+    }
+
+    #[test]
+    fn bug_search_empty_and_missing_values() {
+        let report = bug_search_report(&search_page(
+            serde_json::json!({"total_size": 0, "start": 0, "entries": []}),
+        ));
+        assert_eq!(render(&report, OutputMode::Plain), "No bugs found.\n");
+        assert_eq!(
+            render(&report, OutputMode::Tsv),
+            "id\ttitle\tstatus\tbug_target_display_name\n"
+        );
+
+        let report = bug_search_report(&search_page(serde_json::json!({
+            "start": 0,
+            "entries": [{"bug_link": null, "title": "Sparse", "status": null}],
+        })));
+        let plain = render(&report, OutputMode::Plain);
+        assert_eq!(
+            plain,
+            "1 bug found.\n\nID: none\nTitle: Sparse\nStatus: none\nTarget: none\n"
+        );
+        assert_eq!(
+            render(&report, OutputMode::Tsv).lines().nth(1),
+            Some("\tSparse\t\t")
+        );
+    }
+
+    #[tokio::test]
+    async fn bug_search_through_mock_server_with_redactions() {
+        let mut server = isolated_mock_server().await;
+        let base = server.url();
+        let rebase = |mut value: serde_json::Value| {
+            for key in ["self_link", "bug_link", "target_link"] {
+                let link = value[key]
+                    .as_str()
+                    .unwrap()
+                    .replace("https://api.launchpad.net/devel", &base);
+                value[key] = link.into();
+            }
+            value
+        };
+        let body = serde_json::json!({
+            "total_size": 7,
+            "start": 0,
+            "entries": [rebase(bug_task_json(42, "Mocked", "Triaged"))],
+            "next_collection_link": format!("{base}/ubuntu/+source/curl?ws.op=searchTasks&ws.size=1&memo=1&ws.start=1"),
+        });
+        let search = server
+            .mock("GET", "/ubuntu/+source/curl")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "searchTasks".into()),
+                mockito::Matcher::UrlEncoded("ws.size".into(), "1".into()),
+            ]))
+            .with_body(body.to_string())
+            .create_async()
+            .await;
+
+        let client = mock_read_client(&server, false);
+        let params = BugSearchParams {
+            package_name: Some("curl"),
+            limit: Some(1),
+            ..Default::default()
+        };
+        let page = bugs::search_bugs_raw(&client, "ubuntu", &params)
+            .await
+            .unwrap();
+        let report = bug_search_report(&page);
+        assert_eq!(
+            report.json, body,
+            "JSON output must match the Launchpad body exactly"
+        );
+        insta::assert_json_snapshot!("bug_search_mock_server", report.json, {
+            ".next_collection_link" => "[server url]",
+            ".entries[].self_link" => "[server url]",
+            ".entries[].bug_link" => "[server url]",
+            ".entries[].target_link" => "[server url]",
+            ".entries[].date_created" => "[timestamp]",
+        });
+        search.assert_async().await;
+    }
+
+    // -- status --------------------------------------------------------------
+
+    fn online() -> status::ServerStatus {
+        status::ServerStatus {
+            reachable: true,
+            http_status: Some(200),
+            resource_type_link: Some("https://api.launchpad.net/devel/#service-root".into()),
+            error: None,
+        }
+    }
+
+    fn offline() -> status::ServerStatus {
+        status::ServerStatus {
+            reachable: false,
+            http_status: Some(503),
+            resource_type_link: None,
+            error: Some("HTTP 503: Service Unavailable".into()),
+        }
+    }
+
+    fn auth(
+        logged_in: bool,
+        username: Option<&str>,
+        hardware_account: Option<&str>,
+    ) -> status::AuthStatus {
+        status::AuthStatus {
+            logged_in,
+            username: username.map(str::to_string),
+            hardware_account: hardware_account.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn status_renders_in_every_mode() {
+        for (name, server, auth) in [
+            ("status_oauth", online(), auth(true, Some("~someone"), None)),
+            (
+                "status_hardware",
+                online(),
+                auth(true, None, Some("someone")),
+            ),
+            ("status_unverified", offline(), auth(true, None, None)),
+            ("status_logged_out", offline(), auth(false, None, None)),
+        ] {
+            assert_all_modes(name, &status_report(&server, &auth), 1);
+        }
+    }
+
+    #[test]
+    fn status_json_is_lpcli_defined_and_never_contains_credentials() {
+        let report = status_report(&online(), &auth(true, Some("~someone"), None));
+        assert_eq!(
+            report.json,
+            serde_json::json!({"lpcli": {
+                "authentication": {"credentials": "oauth", "account": "someone", "verified": true},
+                "server": {
+                    "reachable": true,
+                    "http_status": 200,
+                    "resource_type_link": "https://api.launchpad.net/devel/#service-root",
+                    "error": null,
+                },
+            }})
+        );
+        for (server, auth) in [
+            (online(), auth(true, None, Some("someone"))),
+            (offline(), auth(false, None, None)),
+        ] {
+            let text = render(&status_report(&server, &auth), OutputMode::Json).to_lowercase();
+            for secret in [
+                "secret",
+                "oauth_token",
+                "oauth_signature",
+                "consumer_key",
+                "assertion",
+                "\"pin\"",
+            ] {
+                assert!(
+                    !text.contains(secret),
+                    "status JSON mentions {secret}: {text}"
+                );
+            }
+        }
+    }
 }
 
 #[rustfmt::skip]
@@ -4206,3 +4988,38 @@ fn root_help_lists_agent_skills_command() {
         );
     }
 }
+
+#[test]
+fn early_error_output_tolerates_fields_until_configuration_selects_json() {
+    let cli = Cli::try_parse_from(["lpcli", "--fields", "name", "status"]).unwrap();
+    validate_cli(&cli).unwrap();
+    let output = initial_error_output(&cli, &output::Environment::default(), (false, false));
+    assert_eq!(output.mode(), OutputMode::Rich);
+
+    let env = output::Environment::default();
+    let error = resolve_command_output(&cli, &config::AppConfig::default(), &env, (false, false))
+        .unwrap_err();
+    assert!(error.contains("--fields requires JSON output"));
+
+    let mut settings = config::AppConfig::default();
+    settings.display.format = Some(OutputMode::Json);
+    assert_eq!(
+        resolve_command_output(&cli, &settings, &env, (false, false))
+            .unwrap()
+            .mode(),
+        OutputMode::Json
+    );
+}
+
+#[path = "tests/phase1_bug.rs"]
+mod phase1_bug;
+#[path = "tests/phase1_git.rs"]
+mod phase1_git;
+#[path = "tests/phase1_identity.rs"]
+mod phase1_identity;
+#[path = "tests/phase1_queue.rs"]
+mod phase1_queue;
+#[path = "tests/phase1_read_domains.rs"]
+mod phase1_read_domains;
+#[path = "tests/phase1_webhook_snap_token.rs"]
+mod phase1_webhook_snap_token;

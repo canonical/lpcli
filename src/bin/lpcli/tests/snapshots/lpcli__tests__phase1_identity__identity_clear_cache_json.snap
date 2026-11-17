@@ -1,0 +1,10 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+{
+  "lpcli": {
+    "access_token_cache": "cleared",
+    "hardware_token_grant": "unchanged"
+  }
+}

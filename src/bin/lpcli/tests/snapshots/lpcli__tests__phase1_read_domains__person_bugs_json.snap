@@ -1,0 +1,21 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "entries": [
+    {
+      "bug_link": "https://api.launchpad.net/devel/bugs/7",
+      "date_created": "[timestamp]",
+      "http_etag": "\"etag-1234\"",
+      "importance": "Undecided",
+      "resource_type_link": "https://api.launchpad.net/devel/#bug_task",
+      "self_link": "https://api.launchpad.net/devel/ubuntu/+source/hello/+bug/7",
+      "status": "New",
+      "title": "Crash\twith tab",
+      "web_link": "https://launchpad.net/ubuntu/+source/hello/+bug/7"
+    }
+  ],
+  "start": 0,
+  "total_size": 1
+}

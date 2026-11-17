@@ -1,0 +1,32 @@
+---
+source: src/bin/lpcli/tests/phase1_git.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "entries": [
+    {
+      "commit_message": "Initial\ncommit",
+      "commit_sha1": "0123456789abcdef0123456789abcdef01234567",
+      "display_name": "main",
+      "http_etag": "\"etag-ref\"",
+      "path": "refs/heads/main",
+      "repository_link": "https://api.launchpad.net/devel/~owner/project/+git/repo",
+      "resource_type_link": "https://api.launchpad.net/devel/#git_ref",
+      "self_link": "https://api.launchpad.net/devel/~owner/project/+git/repo/+ref/refs/heads/main",
+      "web_link": null
+    },
+    {
+      "commit_message": "Initial\ncommit",
+      "commit_sha1": "fedcba9876543210fedcba9876543210fedcba98",
+      "display_name": "refs/tags/v1",
+      "http_etag": "\"etag-ref\"",
+      "path": "refs/tags/v1",
+      "repository_link": "https://api.launchpad.net/devel/~owner/project/+git/repo",
+      "resource_type_link": "https://api.launchpad.net/devel/#git_ref",
+      "self_link": "https://api.launchpad.net/devel/~owner/project/+git/repo/+ref/refs/tags/v1",
+      "web_link": null
+    }
+  ],
+  "start": 0,
+  "total_size": 2
+}

@@ -1,0 +1,13 @@
+---
+source: src/bin/lpcli/tests.rs
+expression: rendered
+---
+Authentication
+────────────────────────────────────────
+✓ Hardware-bound grant stored for ~someone
+  Not verified with Launchpad, which would need a touch of your security key.
+
+Launchpad API Server
+────────────────────────────────────────
+✓ Online
+  Endpoint: https://api.launchpad.net/devel/#service-root

@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "render(&report, OutputMode::Tsv)"
+---
+name	version	status	active
+noble	24.04	Supported	true
+questing	25.10	Current Stable Release	true

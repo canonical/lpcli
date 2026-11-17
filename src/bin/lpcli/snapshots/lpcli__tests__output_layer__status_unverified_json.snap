@@ -1,0 +1,19 @@
+---
+source: src/bin/lpcli/tests.rs
+expression: rendered
+---
+{
+  "lpcli": {
+    "authentication": {
+      "account": null,
+      "credentials": "oauth",
+      "verified": false
+    },
+    "server": {
+      "error": "HTTP 503: Service Unavailable",
+      "http_status": 503,
+      "reachable": false,
+      "resource_type_link": null
+    }
+  }
+}

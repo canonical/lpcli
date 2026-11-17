@@ -1,0 +1,21 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "entries": [
+    {
+      "date_created": "[timestamp]",
+      "http_etag": "\"etag-1234\"",
+      "name": "trunk",
+      "resource_type_link": "https://api.launchpad.net/devel/#project_series",
+      "self_link": "https://api.launchpad.net/devel/launchpad/trunk",
+      "status": "Active Development",
+      "summary": "The main line.",
+      "title": "Launchpad trunk series",
+      "web_link": "https://launchpad.net/launchpad/trunk"
+    }
+  ],
+  "start": 0,
+  "total_size": 1
+}

@@ -1,0 +1,84 @@
+---
+source: src/bin/lpcli/tests/phase1_queue.rs
+expression: "stable(&json, &base)"
+---
+{
+  "binary_properties": [
+    {
+      "architecture": "amd64",
+      "component": "main",
+      "customformat": "",
+      "is_new": false,
+      "name": "curl",
+      "priority": "optional",
+      "section": "web",
+      "version": "8.5.0-2ubuntu10"
+    },
+    {
+      "architecture": "amd64",
+      "component": "main",
+      "customformat": "",
+      "is_new": false,
+      "name": "libcurl4t64",
+      "priority": "optional",
+      "section": "web",
+      "version": "8.5.0-2ubuntu10"
+    },
+    {
+      "architecture": "amd64",
+      "component": "main",
+      "customformat": "",
+      "is_new": false,
+      "name": "curl-dbgsym",
+      "priority": "optional",
+      "section": "web",
+      "version": "8.5.0-2ubuntu10"
+    }
+  ],
+  "logs": {
+    "entries": [
+      {
+        "comment": "Needs a bug reference.",
+        "date_created": "[timestamp]",
+        "http_etag": "\"etag-log\"",
+        "new_status": "Rejected",
+        "old_status": "New",
+        "resource_type_link": "https://api.launchpad.net/devel/#package_upload_log",
+        "reviewer_link": "https://api.launchpad.net/devel/~archive-admin",
+        "self_link": "https://api.launchpad.net/devel/ubuntu/noble/+upload/3/logs/1"
+      }
+    ],
+    "start": 0,
+    "total_size": 1
+  },
+  "lpcli": {
+    "archive": "ubuntu",
+    "series": "noble"
+  },
+  "package_upload": {
+    "archive_link": "https://api.launchpad.net/devel/ubuntu/+archive/primary",
+    "changes_file_url": "https://launchpad.net/ubuntu/noble/+upload/3/+files/curl_8.5.0-2ubuntu10_source.changes",
+    "component_name": "main",
+    "contains_build": true,
+    "contains_copy": false,
+    "contains_source": false,
+    "copy_source_archive_link": null,
+    "custom_file_urls": [],
+    "date_created": "[timestamp]",
+    "display_arches": "amd64",
+    "display_name": "curl",
+    "display_version": "8.5.0-2ubuntu10",
+    "distroseries_link": "https://api.launchpad.net/devel/ubuntu/noble",
+    "http_etag": "\"etag-upload\"",
+    "id": 3,
+    "logs_collection_link": "https://api.launchpad.net/devel/ubuntu/noble/+upload/3/logs",
+    "package_name": "curl",
+    "package_version": "8.5.0-2ubuntu10",
+    "pocket": "Proposed",
+    "resource_type_link": "https://api.launchpad.net/devel/#package_upload",
+    "section_name": "web",
+    "self_link": "https://api.launchpad.net/devel/ubuntu/noble/+upload/3",
+    "status": "Rejected",
+    "web_link": "https://launchpad.net/ubuntu/noble/+upload/3"
+  }
+}

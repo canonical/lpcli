@@ -65,9 +65,13 @@ pub enum LpError {
     #[error("Not authenticated. Run `lpcli login` to authenticate with Launchpad.")]
     NotAuthenticated,
 
-    /// The requested resource was not found on Launchpad.
+    /// The requested resource was not found on Launchpad (HTTP 404).
     #[error("Not found: {0}")]
     NotFound(String),
+
+    /// A successful API response had no matching local result.
+    #[error("Not found: {0}")]
+    LocalNotFound(String),
 
     /// The authenticated user does not have permission to perform the
     /// requested operation.
@@ -102,9 +106,131 @@ pub enum LpError {
     #[error("Launchpad rejected the hardware-bound grant; check the grant and security key.")]
     HardwareTokenGrantRejected,
 
+    /// A command-line or request value is invalid.
+    #[error("{0}")]
+    Usage(String),
+
+    /// Some parts of a multi-part operation succeeded and others failed.
+    ///
+    /// The message lists the failures. Launchpad may already reflect the
+    /// successful parts.
+    #[error("{0}")]
+    Partial(String),
+
     /// Any other error with an arbitrary message.
     #[error("{0}")]
     Other(String),
+}
+
+/// Stable error categories in lpcli's JSON contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    General,
+    Usage,
+    NotAuthenticated,
+    NotFound,
+    PermissionDenied,
+    Network,
+    Partial,
+}
+
+impl ErrorKind {
+    /// The process exit code for this category.
+    pub const fn exit_code(self) -> i32 {
+        match self {
+            Self::General => 1,
+            Self::Usage => 2,
+            Self::NotAuthenticated => 3,
+            Self::NotFound => 4,
+            Self::PermissionDenied => 5,
+            Self::Network => 6,
+            Self::Partial => 7,
+        }
+    }
+
+    /// The stable `error.kind` value in lpcli's JSON contract.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Usage => "usage",
+            Self::NotAuthenticated => "not_authenticated",
+            Self::NotFound => "not_found",
+            Self::PermissionDenied => "permission_denied",
+            Self::Network => "network",
+            Self::Partial => "partial",
+        }
+    }
+}
+
+impl LpError {
+    /// Classify this error for exit codes and structured errors.
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Http(_)
+            | Self::Timeout(_)
+            | Self::Connect(_)
+            | Self::Tls(_)
+            | Self::RateLimit { .. } => ErrorKind::Network,
+            Self::Api { status: 401, .. }
+            | Self::NotAuthenticated
+            | Self::HardwareTokenGrantRejected => ErrorKind::NotAuthenticated,
+            Self::Api { status: 403, .. } | Self::Unauthorized(_) => ErrorKind::PermissionDenied,
+            Self::Api {
+                status: 404 | 410, ..
+            }
+            | Self::NotFound(_)
+            | Self::LocalNotFound(_) => ErrorKind::NotFound,
+            Self::Api {
+                status: 408 | 429 | 500..=599,
+                ..
+            } => ErrorKind::Network,
+            Self::Usage(_) => ErrorKind::Usage,
+            Self::Partial(_) => ErrorKind::Partial,
+            Self::Api { .. }
+            | Self::Json(_)
+            | Self::OAuth(_)
+            | Self::Keyring(_)
+            | Self::Io(_)
+            | Self::Url(_)
+            | Self::Config(_)
+            | Self::HardwareKey(_)
+            | Self::HardwareKeyCancelled
+            | Self::HardwareKeyTimeout
+            | Self::HardwareToken(_)
+            | Self::Other(_) => ErrorKind::General,
+        }
+    }
+
+    /// The process exit code for this error.
+    pub fn exit_code(&self) -> i32 {
+        self.kind().exit_code()
+    }
+
+    /// The HTTP status represented by this error, when known.
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            Self::Api { status, .. } => Some(*status),
+            Self::RateLimit { .. } => Some(429),
+            Self::NotFound(_) => Some(404),
+            Self::LocalNotFound(_) => None,
+            _ => None,
+        }
+    }
+
+    /// A short recovery hint, when one applies.
+    pub fn hint(&self) -> Option<&'static str> {
+        match self.kind() {
+            ErrorKind::NotAuthenticated => {
+                Some("Run `lpcli login`, or use --public for public data.")
+            }
+            ErrorKind::PermissionDenied => {
+                Some("Check that the account has the required Launchpad permissions.")
+            }
+            ErrorKind::Network => Some("Check the network connection and retry later."),
+            ErrorKind::Partial => Some("Check which changes were applied before retrying."),
+            _ => None,
+        }
+    }
 }
 
 /// Convenience alias used throughout the library.
@@ -188,6 +314,130 @@ mod tests {
                 .to_string()
                 .contains("rejected")
         );
+    }
+
+    #[test]
+    fn every_error_variant_has_a_stable_kind_and_exit_code() {
+        let io = || std::io::Error::other("disk");
+        let json = || serde_json::from_str::<serde_json::Value>("x").unwrap_err();
+        let cases = vec![
+            (LpError::Timeout("t".into()), "network", 6),
+            (LpError::Connect("c".into()), "network", 6),
+            (LpError::Tls("t".into()), "network", 6),
+            (
+                LpError::RateLimit {
+                    retry_after_secs: Some(1),
+                },
+                "network",
+                6,
+            ),
+            (
+                LpError::Api {
+                    status: 401,
+                    message: "x".into(),
+                },
+                "not_authenticated",
+                3,
+            ),
+            (
+                LpError::Api {
+                    status: 403,
+                    message: "x".into(),
+                },
+                "permission_denied",
+                5,
+            ),
+            (
+                LpError::Api {
+                    status: 404,
+                    message: "x".into(),
+                },
+                "not_found",
+                4,
+            ),
+            (
+                LpError::Api {
+                    status: 410,
+                    message: "x".into(),
+                },
+                "not_found",
+                4,
+            ),
+            (
+                LpError::Api {
+                    status: 408,
+                    message: "x".into(),
+                },
+                "network",
+                6,
+            ),
+            (
+                LpError::Api {
+                    status: 503,
+                    message: "x".into(),
+                },
+                "network",
+                6,
+            ),
+            (
+                LpError::Api {
+                    status: 400,
+                    message: "x".into(),
+                },
+                "general",
+                1,
+            ),
+            (LpError::Json(json()), "general", 1),
+            (LpError::OAuth("o".into()), "general", 1),
+            (LpError::Keyring("k".into()), "general", 1),
+            (LpError::Io(io()), "general", 1),
+            (LpError::Url(url::ParseError::EmptyHost), "general", 1),
+            (LpError::NotAuthenticated, "not_authenticated", 3),
+            (LpError::NotFound("n".into()), "not_found", 4),
+            (LpError::LocalNotFound("local miss".into()), "not_found", 4),
+            (LpError::Unauthorized("u".into()), "permission_denied", 5),
+            (LpError::Config("c".into()), "general", 1),
+            (LpError::HardwareKey("h".into()), "general", 1),
+            (LpError::HardwareKeyCancelled, "general", 1),
+            (LpError::HardwareKeyTimeout, "general", 1),
+            (LpError::HardwareToken("h".into()), "general", 1),
+            (LpError::HardwareTokenGrantRejected, "not_authenticated", 3),
+            (LpError::Usage("bad value".into()), "usage", 2),
+            (LpError::Partial("p".into()), "partial", 7),
+            (LpError::Other("o".into()), "general", 1),
+        ];
+        for (error, kind, code) in cases {
+            assert_eq!(
+                (error.kind().name(), error.exit_code()),
+                (kind, code),
+                "{error:?}"
+            );
+        }
+        assert_eq!(ErrorKind::Usage.exit_code(), 2);
+        assert_eq!(LpError::NotFound("remote".into()).http_status(), Some(404));
+        assert_eq!(LpError::LocalNotFound("local".into()).http_status(), None);
+    }
+
+    #[test]
+    fn only_http_not_found_has_http_status_in_structured_errors() {
+        assert_eq!(
+            LpError::NotFound("remote resource".into()).http_status(),
+            Some(404)
+        );
+        assert_eq!(
+            LpError::LocalNotFound("no matching result".into()).http_status(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn reqwest_http_errors_are_network_failures() {
+        let error = reqwest::Client::new()
+            .get("http://[")
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(LpError::Http(error).exit_code(), 6);
     }
 
     #[test]

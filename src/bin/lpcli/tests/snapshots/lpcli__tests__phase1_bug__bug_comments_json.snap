@@ -1,0 +1,79 @@
+---
+source: src/bin/lpcli/tests/phase1_bug.rs
+expression: value
+---
+{
+  "attachments": {
+    "entries": [
+      {
+        "bug_link": "[server]/bugs/42",
+        "data_link": null,
+        "http_etag": "\"attachment-etag\"",
+        "message_link": "[server]/bugs/42/comments/1",
+        "resource_type_link": "[server]/#bug_attachment",
+        "self_link": "[server]/bugs/42/+attachment/1",
+        "title": "trace-1.txt",
+        "type": "Patch",
+        "web_link": "https://bugs.launchpad.net/bugs/42/+attachment/1"
+      }
+    ],
+    "start": 0,
+    "total_size": 1
+  },
+  "lpcli": {
+    "attachment_download_urls": [
+      {
+        "attachment_link": "[server]/bugs/42/+attachment/1",
+        "download_url": null
+      }
+    ]
+  },
+  "messages": {
+    "entries": [
+      {
+        "bug_attachments_collection_link": "[server]/bugs/42/comments/0/bug_attachments",
+        "content": "Original\ndescription",
+        "date_created": "[timestamp]",
+        "date_deleted": null,
+        "date_last_edited": null,
+        "http_etag": "\"message-etag\"",
+        "owner_link": "[server]/~commenter",
+        "parent_link": null,
+        "resource_type_link": "[server]/#message",
+        "self_link": "[server]/bugs/42/comments/0",
+        "subject": "Re: curl crashes",
+        "web_link": "https://bugs.launchpad.net/bugs/42/comments/0"
+      },
+      {
+        "bug_attachments_collection_link": "[server]/bugs/42/comments/1/bug_attachments",
+        "content": "See attached\ttrace.",
+        "date_created": "[timestamp]",
+        "date_deleted": null,
+        "date_last_edited": null,
+        "http_etag": "\"message-etag\"",
+        "owner_link": "[server]/~commenter",
+        "parent_link": null,
+        "resource_type_link": "[server]/#message",
+        "self_link": "[server]/bugs/42/comments/1",
+        "subject": "Re: curl crashes",
+        "web_link": "https://bugs.launchpad.net/bugs/42/comments/1"
+      },
+      {
+        "bug_attachments_collection_link": "[server]/bugs/42/comments/2/bug_attachments",
+        "content": "",
+        "date_created": "[timestamp]",
+        "date_deleted": "[timestamp]",
+        "date_last_edited": null,
+        "http_etag": "\"message-etag\"",
+        "owner_link": "[server]/~commenter",
+        "parent_link": null,
+        "resource_type_link": "[server]/#message",
+        "self_link": "[server]/bugs/42/comments/2",
+        "subject": "Re: curl crashes",
+        "web_link": "https://bugs.launchpad.net/bugs/42/comments/2"
+      }
+    ],
+    "start": 0,
+    "total_size": 3
+  }
+}

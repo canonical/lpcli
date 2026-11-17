@@ -434,6 +434,15 @@ pub fn build_auth_header(creds: &Credentials) -> Result<String> {
 /// 3. Waits for the user to press Enter after authorising.
 /// 4. Exchanges the request token for an access token.
 /// 5. Persists the access token to disk.
+///
+/// The URL and instructions are written to stderr, so stdout stays usable
+/// for the caller's own output. Nothing is printed on success; callers report
+/// the result themselves.
+///
+/// # Errors
+///
+/// Returns [`LpError::Usage`] if stdin reaches end-of-file instead of the
+/// user pressing Enter, for example when it is not a terminal.
 pub async fn login() -> Result<Credentials> {
     let client = reqwest::Client::new();
 
@@ -464,13 +473,12 @@ pub async fn login() -> Result<Credentials> {
         LAUNCHPAD_AUTHORIZE_URL,
         percent_encode(&request_token)
     );
-    println!("Please open the following URL in your browser to authorise lpcli:");
-    println!("\n  {auth_url}\n");
-    println!("After authorising, press Enter to continue...");
-
     // Step 3 – wait for the user.
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
+    wait_for_authorization(
+        &mut std::io::stderr(),
+        &mut std::io::stdin().lock(),
+        &auth_url,
+    )?;
 
     // Step 4 – exchange for an access token.
     let signing_key = format!("&{}", percent_encode(&request_token_secret));
@@ -504,9 +512,37 @@ pub async fn login() -> Result<Credentials> {
 }
 
 /// Remove the stored credentials, logging the user out.
+///
+/// Nothing is printed; callers report the result themselves. The access
+/// token stays valid on Launchpad until it is revoked there.
 pub fn logout() -> Result<()> {
-    delete_credentials()?;
-    println!("You have been logged out from Launchpad.");
+    delete_credentials()
+}
+
+/// Show the authorisation URL on `out` (stderr in [`login`]) and wait for the
+/// user to press Enter on `input`.
+fn wait_for_authorization(
+    out: &mut impl std::io::Write,
+    input: &mut impl std::io::BufRead,
+    auth_url: &str,
+) -> Result<()> {
+    writeln!(
+        out,
+        "Please open the following URL in your browser to authorise lpcli:"
+    )?;
+    writeln!(out, "\n  {auth_url}\n")?;
+    writeln!(out, "After authorising, press Enter to continue...")?;
+    out.flush()?;
+
+    let mut line = String::new();
+    if input.read_line(&mut line)? == 0 {
+        // Exchanging a request token that was never authorised would fail
+        // anyway, so stop before contacting Launchpad again.
+        return Err(LpError::Usage(
+            "Login needs you to press Enter after authorising lpcli, but stdin was closed."
+                .to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -563,6 +599,20 @@ mod tests {
     fn timestamp_is_nonzero() {
         let ts: u64 = timestamp().parse().expect("timestamp should be a number");
         assert!(ts > 0);
+    }
+
+    #[test]
+    fn authorization_prompt_uses_the_given_stream_and_waits_for_enter() {
+        let url = "https://launchpad.net/+authorize-token?oauth_token=request";
+        let mut out = Vec::new();
+        wait_for_authorization(&mut out, &mut &b"\n"[..], url).unwrap();
+        let shown = String::from_utf8(out).unwrap();
+        assert!(shown.contains(url));
+        assert!(shown.contains("press Enter"));
+
+        let mut out = Vec::new();
+        let err = wait_for_authorization(&mut out, &mut &b""[..], url).unwrap_err();
+        assert!(matches!(err, LpError::Usage(_)), "{err:?}");
     }
 
     #[test]

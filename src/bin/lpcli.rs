@@ -3,7 +3,7 @@
 //! Parse command-line arguments with `clap` and dispatch to the `lpcli` library.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -11,23 +11,42 @@ use std::sync::Arc;
 mod config;
 #[path = "lpcli/display.rs"]
 mod display;
+#[path = "lpcli/output.rs"]
+mod output;
+#[path = "lpcli/commands"]
+mod commands {
+    pub(crate) mod bug;
+    pub(crate) mod git;
+    pub(crate) mod identity;
+    pub(crate) mod queue;
+    pub(crate) mod read_domains;
+    pub(crate) mod webhook_snap_token;
+}
+
+use commands::bug::*;
+use commands::git::*;
+use commands::identity::*;
+use commands::queue::*;
+use commands::read_domains::*;
+use commands::webhook_snap_token::*;
 
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 
 use display::Display;
+use output::{Block, ColorChoice, Column, Level, Noun, Output, OutputMode, Records, Report, Span};
 use ubuntu_info_rust::{Architecture, Pocket, SeriesInfo};
 
 use lpcli::{
     access_tokens, auth,
     bugs::{self, BugSearchParams},
-    client::LaunchpadClient,
+    client::{Collection, LaunchpadClient, Raw},
     cves::{self, CveSearchParams},
     download, git,
     hardware_key::{Authenticator, UsbAuthenticator},
     hardware_tokens::{
-        self, GrantStore, HardwareLogin, HardwareLoginOutcome, HardwareTokenGrant,
-        IssueGrantRequest, OAuthPermission, RegisteredAuthenticator, StoredIn,
+        self, GrantStore, HardwareLogin, HardwareTokenGrant, IssueGrantRequest, OAuthPermission,
+        RegisteredAuthenticator, StoredIn,
     },
     packages::{self, SourceSearchParams},
     people, projects,
@@ -347,7 +366,7 @@ fn canonical_bug_series(
 // ---------------------------------------------------------------------------
 
 /// lpcli — A command-line client for Launchpad.net
-#[derive(Debug, Parser)]
+#[derive(Clone, Debug, Parser)]
 #[command(
     name = "lpcli",
     version,
@@ -372,14 +391,68 @@ struct Cli {
     )]
     public: bool,
 
+    /// Output format: rich, plain, json, or tsv.
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        value_name = "FORMAT",
+        long_help = "Output format. Overrides the LPCLI_FORMAT environment variable and \
+                     display.format in config.toml. Without any of these, lpcli uses plain when \
+                     display.accessible is true or TERM=dumb, and rich otherwise. json and tsv write \
+                     data only to stdout. JSON is available for read commands, mutations, schema, \
+                     and status; TSV is available for list commands."
+    )]
+    format: Option<OutputMode>,
+
+    /// When to use color: auto, always, or never.
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        value_name = "WHEN",
+        default_value_t = ColorChoice::Auto,
+        long_help = "When to use color. auto follows CLICOLOR_FORCE, NO_COLOR, and TERM=dumb, and \
+                     otherwise uses color only when the output stream is a terminal. Color is decided \
+                     separately for stdout and stderr. plain, json, and tsv output is never colored."
+    )]
+    color: ColorChoice,
+
+    /// Select comma-separated Launchpad attributes in JSON entries.
+    #[arg(long, global = true, value_name = "FIELDS", value_delimiter = ',', value_parser = parse_field_name)]
+    fields: Option<Vec<String>>,
+
+    /// Print only the resulting self_link for mutations.
+    #[arg(long, global = true)]
+    quiet: bool,
+
+    /// Fail instead of prompting; implied when stdin is not a terminal.
+    #[arg(long, global = true)]
+    no_input: bool,
+
     #[command(subcommand)]
     command: Command,
 }
 
-#[derive(Debug, Subcommand)]
+fn parse_field_name(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err("field names must be Launchpad attribute names".into());
+    }
+    Ok(value.to_string())
+}
+
+#[derive(Clone, Debug, Subcommand)]
 enum Command {
     /// Check authentication status and verify the Launchpad server is reachable.
     Status,
+
+    /// Print the JSON output contract version.
+    Schema,
 
     /// Agent Skills (coding agents should read this first).
     #[command(visible_alias = "skill")]
@@ -549,7 +622,7 @@ struct TaskLinkSelector {
     task_url: Option<String>,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum BugCommand {
     /// Show details of a single bug.
     Show {
@@ -1067,8 +1140,12 @@ enum BugCommand {
     },
     /// List remote bug trackers registered in Launchpad.
     ///
-    /// By default a compact table is printed. Use --json for
-    /// machine-readable output.
+    /// By default a compact table is printed. Use --format json for
+    /// Launchpad's collection JSON ({"total_size", "start", "entries"}),
+    /// with each tracker exactly as Launchpad returned it, or --format tsv
+    /// for one tracker per line. --search filters locally, so total_size
+    /// is omitted when --limit stops the search before every tracker was
+    /// checked.
     RemoteBugTrackers {
         /// Maximum number of remote bug trackers to return.
         #[arg(short, long, value_parser = parse_positive_limit)]
@@ -1076,14 +1153,6 @@ enum BugCommand {
         /// Case-insensitive substring to match against tracker metadata.
         #[arg(short, long)]
         search: Option<String>,
-        /// Print a JSON array of tracker objects instead of a table.
-        ///
-        /// The output is pure JSON: an array of tracker objects with stable
-        /// keys (self_link, name, title, summary, base_url, bug_tracker_type,
-        /// web_link), sorted by name. An empty result prints as []. No table
-        /// or summary prose is printed in this mode.
-        #[arg(long)]
-        json: bool,
     },
     /// Manage remote bug trackers registered in Launchpad.
     Tracker {
@@ -1093,7 +1162,7 @@ enum BugCommand {
 }
 
 /// Sub-commands for managing remote bug trackers.
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum TrackerCommand {
     /// Create a remote bug tracker, or idempotently ensure it exists.
     ///
@@ -1421,7 +1490,7 @@ fn resolve_tracker_create(
 // Person sub-commands
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum PersonCommand {
     /// Show info about a Launchpad person or team.
     Show {
@@ -1465,7 +1534,7 @@ enum PersonCommand {
 // Package sub-commands
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum PackageCommand {
     /// Show info about an Ubuntu distro series.
     Series {
@@ -1554,7 +1623,7 @@ enum PackageCommand {
 // Project sub-commands
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum ProjectCommand {
     /// Show info about a Launchpad project.
     Show {
@@ -1616,7 +1685,7 @@ enum ProjectCommand {
 // CVE sub-commands
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum CveCommand {
     /// Show details of a CVE.
     Show {
@@ -1648,7 +1717,7 @@ enum CveCommand {
 // Git sub-commands
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum GitCommand {
     /// Show a Git repository by path (~owner/project/+git/name).
     Show {
@@ -1710,7 +1779,7 @@ enum GitCommand {
 // Spec sub-commands
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum SpecCommand {
     /// Show a specification (blueprint).
     Show {
@@ -1736,7 +1805,7 @@ enum SpecCommand {
 // Question sub-commands
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum QuestionCommand {
     /// Show a question by numeric ID.
     Show {
@@ -1771,7 +1840,7 @@ enum QuestionCommand {
 // Webhook sub-commands
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum WebhookCommand {
     /// List webhooks for a project, distribution, or Git repository.
     List {
@@ -1821,7 +1890,7 @@ enum WebhookCommand {
 // Translation sub-commands
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum TranslationCommand {
     /// List translation import queue entries for a distro series.
     Queue {
@@ -1847,7 +1916,7 @@ enum TranslationCommand {
 // Snap sub-commands
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum SnapCommand {
     /// Show a snap recipe.
     Show {
@@ -1894,7 +1963,7 @@ enum SnapCommand {
 // Queue sub-commands
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum QueueCommand {
     /// Search packages in build/upload queues for a distro series.
     #[command(after_help = "Examples:
@@ -2075,14 +2144,7 @@ enum QueueCommand {
 // Login, logout and hardware-token sub-commands
 // ---------------------------------------------------------------------------
 
-/// Environment variable holding the secret of a grant imported with
-/// `lpcli login --hardware-token --grant-token`.
-const GRANT_SECRET_ENV: &str = "LPCLI_HARDWARE_GRANT_SECRET";
-
-/// The logged-in user's "Authorized applications" page on Launchpad.
-const OAUTH_TOKENS_URL: &str = "https://launchpad.net/people/+me/+oauth-tokens";
-
-#[derive(Debug, clap::Args)]
+#[derive(Clone, Debug, clap::Args)]
 struct LoginArgs {
     /// Log in with a hardware-bound grant, which needs a USB FIDO2 security
     /// key, instead of the browser OAuth flow.  Without --grant-token, the
@@ -2109,7 +2171,7 @@ struct LoginArgs {
     credential_id: Option<String>,
 }
 
-#[derive(Debug, clap::Args)]
+#[derive(Clone, Debug, clap::Args)]
 struct LogoutArgs {
     /// Only remove the classic OAuth credentials (e.g. the bootstrap token
     /// used to register a key and issue a grant).
@@ -2147,18 +2209,18 @@ impl From<PermissionArg> for OAuthPermission {
 }
 
 /// Parse an expiry given as `YYYY-MM-DD` (midnight UTC) or RFC 3339.
-fn parse_expiry(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
-    if let Ok(date) = chrono::DateTime::parse_from_rfc3339(value) {
-        return Ok(date.with_timezone(&chrono::Utc));
+fn parse_expiry(value: &str) -> Result<jiff::Timestamp, String> {
+    if let Some(date) = lpcli::time::parse_rfc3339_timestamp(value) {
+        return Ok(date);
     }
-    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+    jiff::civil::Date::strptime("%Y-%m-%d", value)
         .ok()
-        .and_then(|date| date.and_hms_opt(0, 0, 0))
-        .map(|date| date.and_utc())
+        .and_then(|date| date.to_zoned_datetime(jiff::tz::TimeZone::UTC).ok())
+        .map(|date| date.timestamp())
         .ok_or_else(|| format!("invalid date '{value}'; use YYYY-MM-DD or RFC 3339"))
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum HardwareTokenCommand {
     /// List the security keys registered with your account.
     Keys,
@@ -2201,7 +2263,7 @@ enum HardwareTokenCommand {
         /// When the grant expires (YYYY-MM-DD or RFC 3339).  Launchpad
         /// defaults to, and limits grants to, 365 days.
         #[arg(long, value_parser = parse_expiry)]
-        expires: Option<chrono::DateTime<chrono::Utc>>,
+        expires: Option<jiff::Timestamp>,
 
         /// The OAuth consumer key that will use the grant.
         #[arg(long, default_value = hardware_tokens::HARDWARE_CONSUMER_KEY)]
@@ -2234,7 +2296,7 @@ enum HardwareTokenCommand {
 // AccessToken sub-commands
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum AccessTokenCommand {
     /// Issue a personal access token for a project.
     Issue {
@@ -2306,9 +2368,27 @@ fn handle_skills() -> lpcli::error::Result<()> {
 
 #[tokio::main]
 async fn main() {
-    if let Err(e) = run().await {
-        eprintln!("{} {e}", "error:".red().bold());
-        std::process::exit(1);
+    let mut cli = Cli::parse();
+    cli.no_input |= !std::io::stdin().is_terminal();
+    set_prompts_disabled(cli.no_input);
+    if let Err(e) = validate_cli(&cli) {
+        e.exit();
+    }
+    let env = output::Environment::from_process();
+    let terminals = output::terminals();
+    let mut output = initial_error_output(&cli, &env, terminals);
+    if let Err(e) = run_command(
+        cli,
+        config::load,
+        handle_clear_cache,
+        &mut output,
+        &env,
+        terminals,
+    )
+    .await
+    {
+        eprint!("{}", output.render_error(&e));
+        std::process::exit(e.exit_code());
     }
 }
 
@@ -2322,6 +2402,40 @@ fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
         return Err(clap::Error::raw(
             clap::error::ErrorKind::ArgumentConflict,
             "--public is only available for data reads, not mutations or identity/security management",
+        ));
+    }
+    if let Some(format) = cli.format
+        && !supports_output_mode(&cli.command, format)
+    {
+        return Err(clap::Error::raw(
+            clap::error::ErrorKind::ArgumentConflict,
+            format!(
+                "--format {} is not available for this command; use --format rich or --format plain\n",
+                format.name()
+            ),
+        ));
+    }
+    if cli.fields.is_some()
+        && matches!(
+            cli.format,
+            Some(OutputMode::Rich | OutputMode::Plain | OutputMode::Tsv)
+        )
+    {
+        return Err(clap::Error::raw(
+            clap::error::ErrorKind::ArgumentConflict,
+            "--fields requires JSON output\n",
+        ));
+    }
+    if cli.quiet && !is_mutation(&cli.command) {
+        return Err(clap::Error::raw(
+            clap::error::ErrorKind::ArgumentConflict,
+            "--quiet is only available for mutations\n",
+        ));
+    }
+    if cli.no_input && requires_prompt(&cli.command) {
+        return Err(clap::Error::raw(
+            clap::error::ErrorKind::ArgumentConflict,
+            "this command needs interactive input; rerun from a terminal without --no-input\n",
         ));
     }
     let result = match &cli.command {
@@ -2384,1309 +2498,120 @@ fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
     result.map_err(|msg| clap::Error::raw(clap::error::ErrorKind::InvalidValue, msg))
 }
 
-async fn run() -> lpcli::error::Result<()> {
-    let cli = Cli::parse();
-    if let Err(e) = validate_cli(&cli) {
-        e.exit();
-    }
-    run_command(cli, config::load, handle_clear_cache).await
+fn resolve_command_output(
+    cli: &Cli,
+    settings: &config::AppConfig,
+    env: &output::Environment,
+    (stdout_terminal, stderr_terminal): (bool, bool),
+) -> Result<Output, String> {
+    Output::resolve(output::Settings {
+        format: cli.format,
+        color: cli.color,
+        config_format: settings.display.format,
+        accessible: settings.display.accessible,
+        display: Display::new(settings.display.width),
+        json_output: supports_output_mode(&cli.command, OutputMode::Json),
+        tsv_output: supports_output_mode(&cli.command, OutputMode::Tsv),
+        fields: cli.fields.clone(),
+        env,
+        stdout_terminal,
+        stderr_terminal,
+    })
+}
+
+/// Error styling before configuration is available must not prevent dispatch
+/// (especially clear-cache), even when LPCLI_FORMAT itself is invalid.
+fn initial_error_output(cli: &Cli, env: &output::Environment, terminals: (bool, bool)) -> Output {
+    let settings = config::AppConfig::default();
+    resolve_command_output(cli, &settings, env, terminals).unwrap_or_else(|_| {
+        let fallback_env = output::Environment {
+            format: None,
+            ..env.clone()
+        };
+        // `display.format` is not known yet, so field selection is checked
+        // only after configuration loads. This fallback only styles errors.
+        let mut error_cli = Cli {
+            fields: None,
+            ..cli.clone()
+        };
+        if error_cli
+            .format
+            .is_some_and(|format| !supports_output_mode(&error_cli.command, format))
+        {
+            error_cli.format = None;
+        }
+        resolve_command_output(&error_cli, &settings, &fallback_env, terminals)
+            .expect("automatic output mode is valid")
+    })
 }
 
 async fn run_command(
     cli: Cli,
     load_config: impl FnOnce() -> lpcli::error::Result<config::AppConfig>,
     clear_cache: impl FnOnce() -> lpcli::error::Result<()>,
+    output: &mut Output,
+    env: &output::Environment,
+    terminals: (bool, bool),
 ) -> lpcli::error::Result<()> {
     if matches!(
         &cli.command,
         Command::HardwareToken(HardwareTokenCommand::ClearCache)
     ) {
-        return clear_cache();
+        clear_cache()?;
+        return output.print(&clear_cache_report());
     }
     let settings = load_config()?;
     let display = Display::new(settings.display.width);
+    *output = resolve_command_output(&cli, &settings, env, terminals)
+        .map_err(lpcli::error::LpError::Usage)?;
+    if let Some(warning) = output.warning() {
+        output.warn(warning)?;
+    }
+    // Commands not yet ported to the output layer print through `colored`,
+    // so apply the resolved stdout color decision to them as well. Ported
+    // renderers receive an explicit style instead. The override is
+    // process-wide, so test builds leave it alone to keep parallel tests
+    // independent.
+    let stdout_color = output.stdout_style().color;
+    #[cfg(not(test))]
+    colored::control::set_override(stdout_color);
+    #[cfg(test)]
+    let _ = stdout_color;
     let cache_timeout = hardware_token_cache_timeout(&settings);
     let policy = read_auth_policy(&cli.command, cli.authenticated, cli.public);
+    let (quiet, no_input) = (cli.quiet, cli.no_input);
 
     match cli.command {
-        Command::Status => handle_status().await?,
+        Command::Status => handle_status(output).await?,
+        Command::Schema => output.print(&schema_report())?,
 
-        Command::Login(args) if args.hardware_token => {
-            handle_hardware_login(args, cache_timeout).await?
+        Command::Login(args) => handle_login(args, output, no_input, cache_timeout).await?,
+        Command::Logout(args) => handle_logout(args, output)?,
+        Command::HardwareToken(cmd) => {
+            handle_hardware_token(cmd, output, quiet, no_input, cache_timeout).await?
         }
 
-        Command::Login(_) => {
-            println!("{}", "Logging in to Launchpad...".bold());
-            let creds = auth::login().await?;
-            println!(
-                "{} Stored credentials for token '{}'.",
-                "✓".green().bold(),
-                creds.access_token.token
-            );
-            if matches!(GrantStore::from_env().load(), Ok(Some(_))) {
-                println!(
-                    "{} A hardware-bound grant is also stored and takes precedence; run {} \
-                     to use these credentials instead.",
-                    "!".yellow().bold(),
-                    "`lpcli logout --hardware-token`".bold()
-                );
-            }
+        Command::Bug(cmd) => {
+            handle_bug(cmd, &display, output, quiet, policy, cache_timeout).await?
         }
-
-        Command::Logout(args) => {
-            if !args.hardware_token {
-                auth::logout()?;
-            }
-            if !args.classic {
-                GrantStore::from_env().delete()?;
-                println!("Removed any stored hardware-bound grant.");
-            }
+        Command::Person(cmd) => handle_person(cmd, output, policy, cache_timeout).await?,
+        Command::Package(cmd) => handle_package(cmd, output, policy, cache_timeout).await?,
+        Command::Project(cmd) => handle_project(cmd, output, policy, cache_timeout).await?,
+        Command::Cve(cmd) => handle_cve(cmd, output, policy, cache_timeout).await?,
+        Command::Git(cmd) => handle_git(cmd, output, policy, cache_timeout).await?,
+        Command::Spec(cmd) => handle_spec(cmd, output, policy, cache_timeout).await?,
+        Command::Question(cmd) => handle_question(cmd, output, policy, cache_timeout).await?,
+        Command::Webhook(cmd) => handle_webhook(cmd, output, cli.quiet, cache_timeout).await?,
+        Command::Translation(cmd) => handle_translation(cmd, output, policy, cache_timeout).await?,
+        Command::Snap(cmd) => handle_snap(cmd, output, cli.quiet, policy, cache_timeout).await?,
+        Command::Queue(cmd) => handle_queue(cmd, output, cli.quiet, policy, cache_timeout).await?,
+        Command::AccessToken(cmd) => {
+            handle_access_token(cmd, output, cli.quiet, cache_timeout).await?
         }
-
-        Command::HardwareToken(cmd) => handle_hardware_token(cmd, &display, cache_timeout).await?,
-
-        Command::Bug(cmd) => handle_bug(cmd, &display, policy, cache_timeout).await?,
-        Command::Person(cmd) => handle_person(cmd, &display, policy, cache_timeout).await?,
-        Command::Package(cmd) => handle_package(cmd, &display, policy, cache_timeout).await?,
-        Command::Project(cmd) => handle_project(cmd, &display, policy, cache_timeout).await?,
-        Command::Cve(cmd) => handle_cve(cmd, &display, policy, cache_timeout).await?,
-        Command::Git(cmd) => handle_git(cmd, &display, policy, cache_timeout).await?,
-        Command::Spec(cmd) => handle_spec(cmd, &display, policy, cache_timeout).await?,
-        Command::Question(cmd) => handle_question(cmd, &display, policy, cache_timeout).await?,
-        Command::Webhook(cmd) => handle_webhook(cmd, &display, cache_timeout).await?,
-        Command::Translation(cmd) => {
-            handle_translation(cmd, &display, policy, cache_timeout).await?
-        }
-        Command::Snap(cmd) => handle_snap(cmd, &display, policy, cache_timeout).await?,
-        Command::Queue(cmd) => handle_queue(cmd, &display, policy, cache_timeout).await?,
-        Command::AccessToken(cmd) => handle_access_token(cmd, &display, cache_timeout).await?,
         Command::Skills => handle_skills()?,
     }
 
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Bug handlers
-// ---------------------------------------------------------------------------
-
-/// Render a list of bug tasks as a grouped table to stdout.
-fn print_bug_tasks(tasks: &[bugs::BugTask], display: &Display) {
-    struct ParsedTask<'a> {
-        series: Option<String>,
-        task: &'a bugs::BugTask,
-    }
-    let mut by_target: std::collections::BTreeMap<String, Vec<ParsedTask>> =
-        std::collections::BTreeMap::new();
-    for t in tasks {
-        let (target_name, series) = bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
-        let key = if !target_name.is_empty() {
-            target_name
-        } else {
-            t.bug_target_display_name
-                .as_deref()
-                .unwrap_or("—")
-                .to_string()
-        };
-        by_target
-            .entry(key)
-            .or_default()
-            .push(ParsedTask { series, task: t });
-    }
-
-    // Within each target group: the series-less task first, then series tasks
-    // ordered alphabetically.
-    for tasks_for_target in by_target.values_mut() {
-        tasks_for_target.sort_by(|a, b| match (&a.series, &b.series) {
-            (None, None) => std::cmp::Ordering::Equal,
-            (None, Some(_)) => std::cmp::Ordering::Less,
-            (Some(_), None) => std::cmp::Ordering::Greater,
-            (Some(sa), Some(sb)) => sa.cmp(sb),
-        });
-    }
-
-    let has_any_watch = tasks.iter().any(|t| t.bug_watch_link.is_some());
-    let header = if has_any_watch {
-        vec![
-            "Target",
-            "Series",
-            "Status",
-            "Importance",
-            "Assignee",
-            "Watch",
-        ]
-    } else {
-        vec!["Target", "Series", "Status", "Importance", "Assignee"]
-    };
-    let mut table = build_table(display, header);
-    for (target_name, tasks_for_target) in &by_target {
-        for pt in tasks_for_target {
-            let display_target = match &pt.series {
-                None => {
-                    if let Some(disp) = pt.task.bug_target_display_name.as_deref() {
-                        if disp.contains('(') {
-                            disp.to_string()
-                        } else {
-                            target_name.clone()
-                        }
-                    } else {
-                        target_name.clone()
-                    }
-                }
-                Some(_) => format!("    {target_name}"),
-            };
-            let series_str = pt.series.as_deref().unwrap_or("").to_string();
-            let assignee_str = pt
-                .task
-                .assignee_link
-                .as_deref()
-                .and_then(|url| {
-                    url.rsplit('/')
-                        .next()
-                        .map(|seg| seg.trim_start_matches('~').to_string())
-                })
-                .unwrap_or_else(|| "—".to_string());
-            let mut row = vec![
-                display_target,
-                series_str,
-                pt.task.status.as_deref().unwrap_or("—").to_string(),
-                pt.task.importance.as_deref().unwrap_or("—").to_string(),
-                assignee_str,
-            ];
-            if has_any_watch {
-                let watch_str = pt
-                    .task
-                    .bug_watch_id()
-                    .map(|id| format!("#{id}"))
-                    .unwrap_or_else(|| "—".to_string());
-                row.push(watch_str);
-            }
-            table.add_row(row);
-        }
-    }
-    println!("{table}");
-}
-
-/// Resolve the download URL for a bug attachment.
-///
-/// The `data_link` field on a bug attachment points to the Launchpad API
-/// file resource which 303-redirects to the librarian URL containing the
-/// actual filename.  This function resolves that redirect to obtain the
-/// direct download URL.
-async fn resolve_attachment_download_url(
-    client: &LaunchpadClient,
-    attachment: &bugs::BugAttachment,
-) -> String {
-    let Some(data_link) = attachment.data_link.as_deref() else {
-        return "—".to_string();
-    };
-    // The library's classic OAuth client signs absolute URLs indiscriminately.
-    // Only enrich API-origin links with auth; download hosts remain unsigned.
-    let same_origin = url::Url::parse(&client.url("/"))
-        .ok()
-        .zip(url::Url::parse(data_link).ok())
-        .is_some_and(|(base, link)| base.origin() == link.origin());
-    let anonymous = LaunchpadClient::new(None);
-    let resolver = if same_origin { client } else { &anonymous };
-    match resolver.resolve_redirect(data_link).await {
-        Ok(Some(url)) => url,
-        _ => "—".to_string(),
-    }
-}
-
-/// Optional URL enrichment must not prevent displaying the underlying read.
-async fn resolve_all_attachment_urls(
-    client: &LaunchpadClient,
-    attachments: &[bugs::BugAttachment],
-) -> Vec<String> {
-    futures_util::future::join_all(
-        attachments
-            .iter()
-            .map(|a| resolve_attachment_download_url(client, a)),
-    )
-    .await
-}
-
-fn print_bug_attachments(
-    attachments: &[bugs::BugAttachment],
-    download_urls: &[String],
-    display: &Display,
-) {
-    let mut table = build_table(display, vec!["Title", "Type", "URL"]);
-    for (a, url) in attachments.iter().zip(download_urls.iter()) {
-        let title = a.title.as_deref().unwrap_or("—").to_string();
-        let kind = a.attachment_type.as_deref().unwrap_or("—").to_string();
-        table.add_row(vec![title, kind, url.clone()]);
-    }
-    println!("{}", "Attachments".bold());
-    println!("{table}");
-    println!("{} attachment(s).", attachments.len());
-}
-
-struct BugReportRead {
-    bug: bugs::Bug,
-    tasks: Vec<bugs::BugTask>,
-    attachments: Vec<bugs::BugAttachment>,
-    download_urls: Vec<String>,
-}
-
-async fn fetch_bug_report(
-    client: &LaunchpadClient,
-    bug_id: u64,
-) -> lpcli::error::Result<BugReportRead> {
-    let (bug, tasks, attachments) = tokio::try_join!(
-        bugs::get_bug(client, bug_id),
-        bugs::get_bug_tasks(client, bug_id),
-        bugs::get_bug_attachments(client, bug_id),
-    )?;
-    let download_urls = resolve_all_attachment_urls(client, &attachments).await;
-    Ok(BugReportRead {
-        bug,
-        tasks,
-        attachments,
-        download_urls,
-    })
-}
-
-struct BugCommentsRead {
-    comments: Vec<bugs::BugComment>,
-    attachments: Vec<bugs::BugAttachment>,
-    download_urls: Vec<String>,
-}
-
-async fn fetch_bug_comments(
-    client: &LaunchpadClient,
-    bug_id: u64,
-) -> lpcli::error::Result<BugCommentsRead> {
-    let (comments, attachments) = tokio::try_join!(
-        bugs::get_bug_comments(client, bug_id),
-        bugs::get_bug_attachments(client, bug_id),
-    )?;
-    let download_urls = resolve_all_attachment_urls(client, &attachments).await;
-    Ok(BugCommentsRead {
-        comments,
-        attachments,
-        download_urls,
-    })
-}
-
-async fn handle_bug(
-    cmd: BugCommand,
-    display: &Display,
-    policy: ReadAuthPolicy,
-    cache_timeout: std::time::Duration,
-) -> lpcli::error::Result<()> {
-    let client = read_client(policy, cache_timeout)?;
-    let client = if matches!(&cmd, BugCommand::RemoteBugTrackers { .. }) {
-        client.with_max_retries(2)
-    } else {
-        client
-    };
-
-    match cmd {
-        BugCommand::Show { bug_id } => {
-            let BugReportRead {
-                bug,
-                tasks,
-                attachments,
-                download_urls,
-            } = fetch_bug_report(&client, bug_id).await?;
-            println!("{}", format!("Bug #{}", bug.id).bold());
-            println!("{}", "─".repeat(60));
-            println!("{}", bug.title.bold());
-            if let Some(desc) = &bug.description {
-                println!("\n{desc}");
-            }
-            println!();
-            if !bug.tags.is_empty() {
-                println!("Tags:    {}", bug.tags.join(", ").cyan());
-            }
-            if let Some(count) = bug.users_affected_count {
-                println!("Affects: {count} user(s)");
-            }
-            if let Some(link) = &bug.web_link {
-                println!("URL:     {}", link.underline());
-            }
-            println!();
-            print_bug_tasks(&tasks, display);
-            if !attachments.is_empty() {
-                println!();
-                print_bug_attachments(&attachments, &download_urls, display);
-            }
-        }
-
-        BugCommand::Tasks { bug_id } => {
-            let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            print_bug_tasks(&tasks, display);
-        }
-
-        BugCommand::Search {
-            target,
-            status,
-            importance,
-            tag,
-            package,
-            keyword,
-            limit,
-        } => {
-            let params = BugSearchParams {
-                status: status.as_deref(),
-                importance: importance.as_deref(),
-                tag: tag.as_deref(),
-                package_name: package.as_deref(),
-                search_text: keyword.as_deref(),
-                limit: Some(limit),
-                ..Default::default()
-            };
-            let tasks = bugs::search_bugs(&client, &target, &params).await?;
-            let mut table = build_table(display, vec!["ID", "Title", "Status", "Target"]);
-            for task in &tasks {
-                // The bug number is the last path segment of bug_link, e.g.
-                // "https://api.launchpad.net/devel/bugs/12345" → "12345".
-                let bug_id = task
-                    .bug_link
-                    .as_deref()
-                    .and_then(|url| url.rsplit('/').next())
-                    .unwrap_or("—")
-                    .to_string();
-                table.add_row(vec![
-                    bug_id,
-                    task.title.as_deref().unwrap_or("—").to_string(),
-                    task.status.as_deref().unwrap_or("—").to_string(),
-                    task.bug_target_display_name
-                        .as_deref()
-                        .unwrap_or("—")
-                        .to_string(),
-                ]);
-            }
-            println!("{table}");
-            println!("{} bug(s) found.", tasks.len());
-        }
-
-        BugCommand::AddComment {
-            bug_id,
-            message,
-            attachment_file,
-            attachment_url,
-            attachment_description,
-            attachment_type,
-        } => {
-            let has_attachment = attachment_file.is_some() || attachment_url.is_some();
-            if has_attachment {
-                let is_patch = attachment_type
-                    .as_deref()
-                    .is_some_and(|t| t.eq_ignore_ascii_case("patch"));
-                let file_path = attachment_file.as_deref().map(std::path::Path::new);
-                let params = bugs::AddAttachmentParams {
-                    comment: &message,
-                    file_path,
-                    url: attachment_url.as_deref(),
-                    filename: None,
-                    description: attachment_description.as_deref(),
-                    is_patch,
-                };
-                bugs::add_bug_attachment(&client, bug_id, &params).await?;
-                println!(
-                    "{} Comment with attachment added to bug #{bug_id}.",
-                    "✓".green().bold()
-                );
-            } else {
-                bugs::add_bug_comment(&client, bug_id, &message).await?;
-                println!("{} Comment added to bug #{bug_id}.", "✓".green().bold());
-            }
-        }
-
-        BugCommand::Comments { bug_id } => {
-            let BugCommentsRead {
-                comments,
-                attachments,
-                download_urls,
-            } = fetch_bug_comments(&client, bug_id).await?;
-            for (i, c) in comments.iter().enumerate() {
-                // Skip comments that were previously deleted.
-                if c.date_deleted.is_some() {
-                    continue;
-                }
-                let idx = c.index.unwrap_or(i as u64);
-                let author = c.owner_link.as_deref().unwrap_or("unknown");
-                let date = c
-                    .date_created
-                    .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_default();
-                println!("{}", format!("Comment #{idx} — {author} — {date}").bold());
-                println!("{}", c.content.as_deref().unwrap_or(""));
-                // Show any attachments associated with this comment.
-                let comment_attachments: Vec<_> = attachments
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, a)| {
-                        a.message_link.as_deref() == c.self_link.as_deref() && c.self_link.is_some()
-                    })
-                    .collect();
-                for (idx, a) in &comment_attachments {
-                    let name = a.title.as_deref().unwrap_or("attachment");
-                    let kind = a.attachment_type.as_deref().unwrap_or("Unspecified");
-                    let url = &download_urls[*idx];
-                    if url == "—" {
-                        println!("  {} [{kind}]", format!("📎 {name}").cyan());
-                    } else {
-                        println!("  {} [{kind}] {url}", format!("📎 {name}").cyan());
-                    }
-                }
-                println!("{}", "─".repeat(60));
-            }
-        }
-
-        BugCommand::DeleteComment {
-            bug_id,
-            comment_index,
-        } => {
-            bugs::delete_bug_comment(&client, bug_id, comment_index).await?;
-            println!(
-                "{} Comment #{comment_index} deleted from bug #{bug_id}.",
-                "✓".green().bold()
-            );
-        }
-
-        BugCommand::Create {
-            target,
-            package,
-            title,
-            description,
-            attachment_file,
-            attachment_url,
-            attachment_description,
-            attachment_type,
-        } => {
-            let effective_target = match &package {
-                Some(pkg) => format!("{target}/+source/{pkg}"),
-                None => target.clone(),
-            };
-            let bug = bugs::create_bug(&client, &effective_target, &title, &description).await?;
-            println!("{} Bug #{} created.", "✓".green().bold(), bug.id);
-            if let Some(link) = &bug.web_link {
-                println!("URL: {}", link.underline());
-            }
-
-            let has_attachment = attachment_file.is_some() || attachment_url.is_some();
-            if has_attachment {
-                let is_patch = attachment_type
-                    .as_deref()
-                    .is_some_and(|t| t.eq_ignore_ascii_case("patch"));
-                let file_path = attachment_file.as_deref().map(std::path::Path::new);
-                let params = bugs::AddAttachmentParams {
-                    comment: "",
-                    file_path,
-                    url: attachment_url.as_deref(),
-                    filename: None,
-                    description: attachment_description.as_deref(),
-                    is_patch,
-                };
-                bugs::add_bug_attachment(&client, bug.id, &params).await?;
-                println!(
-                    "{} Attachment added to bug #{}.",
-                    "✓".green().bold(),
-                    bug.id
-                );
-            }
-        }
-
-        BugCommand::SetDescription {
-            bug_id,
-            description,
-            description_file,
-        } => {
-            let text = resolve_new_description(description, description_file.as_deref())?;
-            let updated = bugs::set_bug_description(&client, bug_id, &text).await?;
-            println!(
-                "{} Description updated for bug #{bug_id}.",
-                "✓".green().bold()
-            );
-            if let Some(link) = &updated.web_link {
-                println!("URL: {}", link.underline());
-            }
-        }
-
-        BugCommand::SetStatus {
-            bug_id,
-            target,
-            many_targets,
-            all_targets,
-            series,
-            many_series,
-            all_series,
-            no_series,
-            status,
-        } => {
-            let (series, many_series) =
-                canonical_bug_series(target.as_deref(), series, many_series);
-            let target_filter = TargetFilter::from_args(target, many_targets, all_targets);
-            let series_filter = SeriesFilter::from_args(series, many_series, all_series, no_series);
-            let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let matched = collect_matching_tasks(&tasks, bug_id, &target_filter, &series_filter)?;
-            for task in &matched {
-                let task_url = task.self_link.as_deref().ok_or_else(|| {
-                    lpcli::error::LpError::Other("Bug task has no self_link".into())
-                })?;
-                bugs::set_bug_status(&client, task_url, &bugs::BugTaskStatus::from(status)).await?;
-            }
-            println!(
-                "{} Status updated to '{}' for {} task(s) on bug #{bug_id}.",
-                "✓".green().bold(),
-                status,
-                matched.len(),
-            );
-        }
-
-        BugCommand::SetImportance {
-            bug_id,
-            target,
-            many_targets,
-            all_targets,
-            series,
-            many_series,
-            all_series,
-            no_series,
-            importance,
-        } => {
-            let (series, many_series) =
-                canonical_bug_series(target.as_deref(), series, many_series);
-            let target_filter = TargetFilter::from_args(target, many_targets, all_targets);
-            let series_filter = SeriesFilter::from_args(series, many_series, all_series, no_series);
-            let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let matched = collect_matching_tasks(&tasks, bug_id, &target_filter, &series_filter)?;
-            for task in &matched {
-                let task_url = task.self_link.as_deref().ok_or_else(|| {
-                    lpcli::error::LpError::Other("Bug task has no self_link".into())
-                })?;
-                bugs::set_bug_importance(&client, task_url, &bugs::BugImportance::from(importance))
-                    .await?;
-            }
-            println!(
-                "{} Importance updated to '{}' for {} task(s) on bug #{bug_id}.",
-                "✓".green().bold(),
-                importance,
-                matched.len(),
-            );
-        }
-
-        BugCommand::SetAssignee {
-            bug_id,
-            target,
-            many_targets,
-            all_targets,
-            series,
-            many_series,
-            all_series,
-            no_series,
-            name,
-        } => {
-            let (series, many_series) =
-                canonical_bug_series(target.as_deref(), series, many_series);
-            let target_filter = TargetFilter::from_args(target, many_targets, all_targets);
-            let series_filter = SeriesFilter::from_args(series, many_series, all_series, no_series);
-            let assignee_url = client.url(&format!("/~{name}"));
-            let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let matched = collect_matching_tasks(&tasks, bug_id, &target_filter, &series_filter)?;
-            for task in &matched {
-                let task_url = task.self_link.as_deref().ok_or_else(|| {
-                    lpcli::error::LpError::Other("Bug task has no self_link".into())
-                })?;
-                bugs::set_bug_assignee(&client, task_url, &assignee_url).await?;
-            }
-            println!(
-                "{} Assigned {} task(s) on bug #{bug_id} to ~{name}.",
-                "✓".green().bold(),
-                matched.len(),
-            );
-        }
-
-        BugCommand::Subscribe { bug_id, name } => {
-            let person_url = client.url(&format!("/~{name}"));
-            let sub = bugs::subscribe_to_bug(&client, bug_id, &person_url).await?;
-            println!(
-                "{} Subscribed ~{name} to bug #{bug_id}.",
-                "✓".green().bold()
-            );
-            if let Some(link) = &sub.self_link {
-                println!("Subscription: {link}");
-            }
-        }
-
-        BugCommand::Unsubscribe { bug_id, name } => {
-            let person_url = client.url(&format!("/~{name}"));
-            bugs::unsubscribe_from_bug(&client, bug_id, &person_url).await?;
-            println!(
-                "{} Unsubscribed ~{name} from bug #{bug_id}.",
-                "✓".green().bold()
-            );
-        }
-
-        BugCommand::Subscriptions { bug_id } => {
-            let subs = bugs::get_bug_subscriptions(&client, bug_id).await?;
-            let mut table = build_table(display, vec!["Person", "Subscribed By", "Date"]);
-            for s in &subs {
-                let person = s
-                    .person_link
-                    .as_deref()
-                    .and_then(|u| u.rsplit('/').next())
-                    .unwrap_or("—");
-                let by = s
-                    .subscribed_by_link
-                    .as_deref()
-                    .and_then(|u| u.rsplit('/').next())
-                    .unwrap_or("—");
-                let date = s
-                    .date_created
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_default();
-                table.add_row(vec![person, by, &date]);
-            }
-            println!("{table}");
-        }
-
-        BugCommand::Attachments { bug_id } => {
-            let attachments = bugs::get_bug_attachments(&client, bug_id).await?;
-            let download_urls = resolve_all_attachment_urls(&client, &attachments).await;
-            if attachments.is_empty() {
-                println!("No attachments for bug #{bug_id}.");
-            } else {
-                print_bug_attachments(&attachments, &download_urls, display);
-            }
-        }
-
-        BugCommand::AddTask {
-            bug_id,
-            target,
-            package,
-            series,
-            many_series,
-            importance,
-            status,
-            assignee,
-            bug_tracker,
-            remote_bug,
-        } => {
-            // Build the list of target URLs to add tasks for.  When no series
-            // is supplied we add a single task directly against the base target
-            // (i.e. the distribution or project without a series component).
-            enum TaskTarget {
-                Base,
-                Series(Vec<String>),
-            }
-            let (series, many_series) = canonical_bug_series(Some(&target), series, many_series);
-            let task_target = match (series, many_series) {
-                (Some(s), _) => TaskTarget::Series(vec![s]),
-                (None, Some(many)) => TaskTarget::Series(parse_comma_separated(&many)),
-                (None, None) => TaskTarget::Base,
-            };
-
-            // Resolve to a list of (label, url) pairs.
-            let targets: Vec<(String, String)> = match task_target {
-                TaskTarget::Base => {
-                    let path = if let Some(pkg) = &package {
-                        format!("/{target}/+source/{pkg}")
-                    } else {
-                        format!("/{target}")
-                    };
-                    vec![(target.clone(), client.url(&path))]
-                }
-                TaskTarget::Series(series_list) => series_list
-                    .into_iter()
-                    .map(|s| {
-                        let path = if let Some(pkg) = &package {
-                            format!("/{target}/{s}/+source/{pkg}")
-                        } else {
-                            format!("/{target}/{s}")
-                        };
-                        let url = client.url(&path);
-                        (s, url)
-                    })
-                    .collect(),
-            };
-
-            let mut created = 0usize;
-            let mut remote_link_failures = Vec::new();
-            for (series_name, target_url) in &targets {
-                let task = match bugs::add_bug_task(&client, bug_id, target_url).await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        eprintln!(
-                            "{} Failed to add task for series '{}' on bug #{bug_id}: {e}",
-                            "✗".red().bold(),
-                            series_name,
-                        );
-                        continue;
-                    }
-                };
-
-                let task_url = match task.self_link.as_deref() {
-                    Some(url) => url.to_string(),
-                    None => {
-                        eprintln!(
-                            "{} Task for series '{}' has no self_link; skipping attribute updates.",
-                            "!".yellow().bold(),
-                            series_name,
-                        );
-                        if let (Some(tracker_name), Some(remote_id)) = (&bug_tracker, &remote_bug) {
-                            remote_link_failures.push(remote_link_failure(
-                                series_name,
-                                tracker_name,
-                                remote_id,
-                                "new task has no self_link",
-                            ));
-                        }
-                        created += 1;
-                        continue;
-                    }
-                };
-
-                if let Some(imp) = &importance
-                    && let Err(e) = bugs::set_bug_importance(
-                        &client,
-                        &task_url,
-                        &bugs::BugImportance::from(*imp),
-                    )
-                    .await
-                {
-                    eprintln!(
-                        "{} Failed to set importance on task for '{}': {e}",
-                        "!".yellow().bold(),
-                        series_name,
-                    );
-                }
-                if let Some(st) = &status
-                    && let Err(e) =
-                        bugs::set_bug_status(&client, &task_url, &bugs::BugTaskStatus::from(*st))
-                            .await
-                {
-                    eprintln!(
-                        "{} Failed to set status on task for '{}': {e}",
-                        "!".yellow().bold(),
-                        series_name,
-                    );
-                }
-                if let Some(assignee_name) = &assignee {
-                    let assignee_api_url = client.url(&format!("/~{assignee_name}"));
-                    if let Err(e) =
-                        bugs::set_bug_assignee(&client, &task_url, &assignee_api_url).await
-                    {
-                        eprintln!(
-                            "{} Failed to set assignee on task for '{}': {e}",
-                            "!".yellow().bold(),
-                            series_name,
-                        );
-                    }
-                }
-
-                let display_name = task
-                    .bug_target_display_name
-                    .as_deref()
-                    .unwrap_or(series_name.as_str());
-                println!("{} Bug task added: {}", "✓".green().bold(), display_name,);
-
-                if let (Some(tracker_name), Some(remote_id)) = (&bug_tracker, &remote_bug) {
-                    let link_result = bugs::link_bug_task_remote(
-                        &client,
-                        bug_id,
-                        &task_url,
-                        tracker_name,
-                        remote_id,
-                    )
-                    .await;
-                    match link_result {
-                        Ok((_, watch)) => {
-                            let watch_id = watch
-                                .self_link
-                                .as_deref()
-                                .and_then(|u| u.rsplit('/').next())
-                                .unwrap_or(remote_id);
-                            let watch_title = watch.title.as_deref().unwrap_or(watch_id);
-                            println!(
-                                "{} Bug task linked to remote bug: {}",
-                                "✓".green().bold(),
-                                watch_title,
-                            );
-                            if let Some(url) = &watch.url {
-                                println!("  Remote URL: {url}");
-                            }
-                        }
-                        Err(e) => {
-                            remote_link_failures.push(remote_link_failure(
-                                series_name,
-                                tracker_name,
-                                remote_id,
-                                &e.to_string(),
-                            ));
-                            eprintln!(
-                                "{} Failed to link task for '{}' to remote bug '{}' on tracker '{}': {e}",
-                                "!".yellow().bold(),
-                                series_name,
-                                remote_id,
-                                tracker_name,
-                            );
-                        }
-                    }
-                }
-
-                created += 1;
-            }
-
-            if created == 0 {
-                return Err(lpcli::error::LpError::Other(format!(
-                    "No bug tasks were created on bug #{bug_id}."
-                )));
-            }
-
-            if let Some(error) = remote_link_failure_error(bug_id, &remote_link_failures) {
-                return Err(error);
-            }
-        }
-
-        BugCommand::DeleteTask {
-            bug_id,
-            target,
-            package,
-            series,
-            many_series,
-        } => {
-            let (series, many_series) = canonical_bug_series(Some(&target), series, many_series);
-            // The effective target name is the package name when a package is
-            // provided, otherwise the distribution/project name — matching how
-            // parse_target_link returns the package name (not the distro) for
-            // source-package tasks.
-            let effective_target = match &package {
-                Some(pkg) => pkg.clone(),
-                None => target.clone(),
-            };
-            let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-
-            // When no series is given, delete every task that matches the
-            // target regardless of series.  Otherwise apply the series filter.
-            let matched: Vec<&bugs::BugTask> = if series.is_none() && many_series.is_none() {
-                let parsed: Vec<(&bugs::BugTask, String, Option<String>)> = tasks
-                    .iter()
-                    .map(|t| {
-                        let (tgt, ser) =
-                            bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
-                        (t, tgt, ser)
-                    })
-                    .collect();
-                let result: Vec<&bugs::BugTask> = parsed
-                    .iter()
-                    .filter(|(_, tgt, _)| tgt.eq_ignore_ascii_case(&effective_target))
-                    .map(|(t, _, _)| *t)
-                    .collect();
-                if result.is_empty() {
-                    return Err(lpcli::error::LpError::NotFound(format!(
-                        "No tasks found for target '{}' on bug #{bug_id}.",
-                        effective_target,
-                    )));
-                }
-                result
-            } else {
-                let series_filter = match (series, many_series) {
-                    (Some(s), _) => SeriesFilter::One(s),
-                    (None, Some(many)) => SeriesFilter::Many(parse_comma_separated(&many)),
-                    (None, None) => unreachable!(),
-                };
-                let target_filter = TargetFilter::One(effective_target);
-                collect_matching_tasks(&tasks, bug_id, &target_filter, &series_filter)?
-            };
-
-            let mut deleted = 0usize;
-            let mut errors = 0usize;
-            for task in &matched {
-                let task_url = task.self_link.as_deref().ok_or_else(|| {
-                    lpcli::error::LpError::Other("Bug task has no self_link".into())
-                })?;
-                let display_name = task
-                    .bug_target_display_name
-                    .as_deref()
-                    .unwrap_or("(unknown)");
-                match bugs::delete_bug_task(&client, task_url).await {
-                    Ok(()) => {
-                        println!("{} Deleted bug task: {}", "✓".green().bold(), display_name,);
-                        deleted += 1;
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "{} Failed to delete task '{}': {e}",
-                            "✗".red().bold(),
-                            display_name,
-                        );
-                        errors += 1;
-                    }
-                }
-            }
-
-            println!(
-                "\n{} Deleted {deleted} task(s) on bug #{bug_id}{}.",
-                "✓".green().bold(),
-                if errors > 0 {
-                    format!(", {} error(s)", errors)
-                } else {
-                    String::new()
-                },
-            );
-        }
-
-        BugCommand::Tag {
-            bug_id,
-            add_tag,
-            add_many_tags,
-            remove_tag,
-            remove_many_tags,
-            remove_all_tags,
-        } => {
-            // Fetch the bug to get its current tags.
-            let bug = bugs::get_bug(&client, bug_id).await?;
-
-            // Apply removals first (per spec), then additions.
-            let after_remove =
-                apply_tag_removals(bug.tags, remove_tag, remove_many_tags, remove_all_tags);
-            let final_tags = apply_tag_additions(after_remove, add_tag, add_many_tags);
-
-            let updated = bugs::set_bug_tags(&client, bug_id, &final_tags).await?;
-            if updated.tags.is_empty() {
-                println!(
-                    "{} Bug #{bug_id} tags cleared (no tags).",
-                    "✓".green().bold()
-                );
-            } else {
-                println!(
-                    "{} Bug #{bug_id} tags updated: {}",
-                    "✓".green().bold(),
-                    updated.tags.join(", ").cyan()
-                );
-            }
-        }
-
-        BugCommand::LinkRemote {
-            bug_id,
-            github,
-            bug_tracker,
-            remote_bug,
-            target,
-            package,
-            series,
-            task_url,
-        } => {
-            let series =
-                series.map(|s| canonical_series(target.as_deref().unwrap_or(""), &s).to_string());
-            let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let selector = TaskLinkSelector {
-                target: target.clone(),
-                package: package.clone(),
-                series: series.clone(),
-                task_url: task_url.clone(),
-            };
-            // Task selection is identical for the explicit tracker form and
-            // the --github shorthand: the shorthand only changes how the
-            // tracker and remote bug are resolved. Without any selector,
-            // only a bug with exactly one task is linked; see
-            // `find_task_to_link` for the series-less preference that
-            // applies once --target/--package narrow the candidates.
-            let task = find_task_to_link(&tasks, bug_id, &selector)?;
-            let effective_task_url = task.self_link.as_deref().ok_or_else(|| {
-                lpcli::error::LpError::NotFound(format!(
-                    "Selected bug task has no self_link on bug #{bug_id}."
-                ))
-            })?;
-            let display_name = task
-                .bug_target_display_name
-                .as_deref()
-                .unwrap_or(effective_task_url);
-
-            let (watch, remote_bug_label, url_line): (bugs::BugWatch, String, String) =
-                match &github {
-                    Some(github_ref) => {
-                        // Shorthand: one library call finds-or-registers the
-                        // correctly configured auto-github-<owner>-<repo>
-                        // tracker, reuses or creates the watch, validates the
-                        // watch URL shape before touching the task, and links
-                        // it. The tracker is validated (type + base URL) by
-                        // the library, so a mis-configured tracker fails
-                        // before any task mutation.
-                        let (_updated_task, watch) = bugs::link_github_bug_task(
-                            &client,
-                            bug_id,
-                            effective_task_url,
-                            github_ref,
-                        )
-                        .await?;
-                        let url_line = watch_url_line(&watch);
-                        (watch, github_ref.to_string(), url_line)
-                    }
-                    None => {
-                        // Clap's remote_link_spec group requires one of
-                        // --github/--bug-tracker, and --bug-tracker requires
-                        // --remote-bug, so both are present here.
-                        let tracker_name = bug_tracker.as_deref().ok_or_else(|| {
-                            lpcli::error::LpError::Other(
-                                "--bug-tracker is required when --github is not given".into(),
-                            )
-                        })?;
-                        let remote_bug_id = remote_bug.as_deref().ok_or_else(|| {
-                            lpcli::error::LpError::Other(
-                                "--remote-bug is required when --github is not given".into(),
-                            )
-                        })?;
-                        let (_updated_task, watch) = bugs::link_bug_task_remote(
-                            &client,
-                            bug_id,
-                            effective_task_url,
-                            tracker_name,
-                            remote_bug_id,
-                        )
-                        .await?;
-                        let url_line = watch_url_line(&watch);
-                        (watch, remote_bug_id.to_string(), url_line)
-                    }
-                };
-
-            let watch_id = watch
-                .self_link
-                .as_deref()
-                .and_then(|u| u.rsplit('/').next())
-                .unwrap_or(&remote_bug_label);
-            let watch_title = watch.title.as_deref().unwrap_or(watch_id);
-
-            println!(
-                "{} Linked task '{}' to remote bug: {}",
-                "✓".green().bold(),
-                display_name,
-                watch_title,
-            );
-            // The final watch URL is always printed: Launchpad derives it
-            // from the tracker, so a missing URL must stay visible rather
-            // than be silently skipped (mis-typed trackers generate junk
-            // URLs that otherwise only show up in `bug watches`).
-            println!("{url_line}");
-        }
-
-        BugCommand::UnlinkRemote {
-            bug_id,
-            target,
-            package,
-            series,
-            task_url,
-        } => {
-            let series =
-                series.map(|s| canonical_series(target.as_deref().unwrap_or(""), &s).to_string());
-            let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let selector = TaskLinkSelector {
-                target: target.clone(),
-                package: package.clone(),
-                series: series.clone(),
-                task_url: task_url.clone(),
-            };
-            let task = find_task_to_link(&tasks, bug_id, &selector)?;
-            let effective_task_url = task.self_link.as_deref().ok_or_else(|| {
-                lpcli::error::LpError::NotFound(format!(
-                    "Selected bug task has no self_link on bug #{bug_id}."
-                ))
-            })?;
-            let display_name = task
-                .bug_target_display_name
-                .as_deref()
-                .unwrap_or(effective_task_url);
-
-            bugs::unset_bug_watch(&client, effective_task_url).await?;
-
-            println!(
-                "{} Unlinked remote bug watch from task '{}'.",
-                "✓".green().bold(),
-                display_name,
-            );
-            // Unlinking only detaches the task; the watch object survives
-            // (the REST API cannot delete watches) and becomes an orphan
-            // that `bug watches` will report. Point at the web UI, which is
-            // the only place a watch can be deleted.
-            if let Some(watch_id) = task.bug_watch_id() {
-                println!(
-                    "  Note: the watch itself remains on bug #{bug_id}; delete it in the web UI at https://bugs.launchpad.net/bugs/{bug_id}/+watch/{watch_id}"
-                );
-            }
-        }
-
-        BugCommand::Watches { bug_id } => {
-            let watches = bugs::get_bug_watches(&client, bug_id).await?;
-            if watches.is_empty() {
-                println!("No bug watches found for bug #{bug_id}.");
-                return Ok(());
-            }
-
-            // Map watch IDs to the bug tasks linking to them so orphaned
-            // watches are visible. A failure to fetch the tasks propagates:
-            // it must not be read as "nothing is linked" and render every
-            // watch as an orphan.
-            let tasks = bugs::get_bug_tasks(&client, bug_id).await?;
-            let task_links = collect_watch_task_links(&tasks);
-
-            let mut table = build_table(
-                display,
-                vec![
-                    "Watch ID",
-                    "Tracker",
-                    "Remote Bug",
-                    "Status",
-                    "URL",
-                    "Linked Tasks",
-                ],
-            );
-            for w in &watches {
-                let watch_id = w
-                    .self_link
-                    .as_deref()
-                    .and_then(|u| u.rsplit('/').next())
-                    .unwrap_or("—");
-                let tracker = w
-                    .bug_tracker_link
-                    .as_deref()
-                    .and_then(|u| u.rsplit('/').next())
-                    .unwrap_or("—");
-                let remote_bug = w.remote_bug.as_deref().unwrap_or("—");
-                let status = w.remote_status.as_deref().unwrap_or("—");
-                let url = w.url.as_deref().unwrap_or("—");
-                let linked_tasks = watch_linked_tasks_cell(w.id(), &task_links);
-                table.add_row(vec![
-                    watch_id.to_string(),
-                    tracker.to_string(),
-                    remote_bug.to_string(),
-                    status.to_string(),
-                    url.to_string(),
-                    linked_tasks,
-                ]);
-            }
-            println!("{}", "Bug Watches".bold());
-            println!("{table}");
-            println!("{} bug watch(es).", watches.len());
-        }
-
-        BugCommand::RemoteBugTrackers {
-            limit,
-            search,
-            json,
-        } => {
-            let trackers = bugs::search_bug_trackers(&client, search.as_deref(), limit).await?;
-            if json {
-                // Machine-readable mode: pure JSON, no table or summary prose.
-                println!("{}", trackers_to_json(&trackers)?);
-                return Ok(());
-            }
-            if trackers.is_empty() {
-                if search.is_some() {
-                    println!("No remote bug trackers matched the search.");
-                } else {
-                    println!("No remote bug trackers found.");
-                }
-                return Ok(());
-            }
-
-            let mut table = build_table(display, vec!["Name", "Title", "Type", "Base URL"]);
-            for tracker in &trackers {
-                table.add_row(vec![
-                    tracker.name.as_deref().unwrap_or("—").to_string(),
-                    tracker.title.as_deref().unwrap_or("—").to_string(),
-                    tracker
-                        .bug_tracker_type
-                        .as_deref()
-                        .unwrap_or("—")
-                        .to_string(),
-                    tracker.base_url.as_deref().unwrap_or("—").to_string(),
-                ]);
-            }
-            println!("{table}");
-            println!(
-                "{} remote bug tracker(s). Use the Name value with --bug-tracker.",
-                trackers.len()
-            );
-        }
-
-        BugCommand::Tracker {
-            command:
-                TrackerCommand::Create {
-                    base_url,
-                    tracker_type,
-                    name,
-                    title,
-                    summary,
-                },
-        } => {
-            // validate_cli already rejected invalid combinations; re-resolve
-            // here (pure, no network) to obtain the requested tracker type
-            // and name for dispatch.
-            let resolved = resolve_tracker_create(&base_url, tracker_type, name.as_deref())
-                .map_err(lpcli::error::LpError::Other)?;
-            let params = bugs::EnsureBugTrackerParams {
-                base_url: &resolved.base_url,
-                bug_tracker_type: resolved.bug_tracker_type,
-                name: resolved.name.as_deref(),
-                title: title.as_deref(),
-                summary: summary.as_deref(),
-            };
-            // The library validates the tracker it returns against the
-            // request (exact type, matching base URL). The printed identity,
-            // type and base URL come from the tracker entry Launchpad
-            // returned — not from the requested arguments — together with
-            // whether the tracker was created or reused.
-            let bugs::EnsureBugTrackerOutcome { tracker, created } =
-                bugs::ensure_bug_tracker(&client, &params).await?;
-            for line in format_ensure_tracker_result(&tracker, created) {
-                println!("{line}");
-            }
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Bug tracker registration output helpers
-// ---------------------------------------------------------------------------
-
-/// Build the output lines for `bug tracker create`.
-///
-/// The printed name, type and base URL come from the tracker entry
-/// Launchpad returned — ensureBugTracker may return an existing tracker
-/// found by base URL, silently ignoring the requested name and type — plus
-/// whether the tracker was created or reused.
-fn format_ensure_tracker_result(tracker: &bugs::BugTracker, created: bool) -> Vec<String> {
-    let name = tracker.name.as_deref().unwrap_or("(unknown name)");
-    let state = if created {
-        "created"
-    } else {
-        "reused (already existed)"
-    };
-    let mut lines = vec![format!(
-        "{} Bug tracker '{}' {state}.",
-        "✓".green().bold(),
-        name
-    )];
-    if let Some(tracker_type) = tracker.bug_tracker_type.as_deref() {
-        lines.push(format!("  Type:     {tracker_type}"));
-    }
-    if let Some(base_url) = tracker.base_url.as_deref() {
-        lines.push(format!("  Base URL: {base_url}"));
-    }
-    if let Some(self_link) = tracker.self_link.as_deref() {
-        lines.push(format!("  API:      {self_link}"));
-    }
-    lines
-}
-
-/// The final watch URL line printed after a successful link, for both the
-/// explicit tracker form and the --github shorthand.
-///
-/// The URL is printed unconditionally: Launchpad derives it from the
-/// tracker, so a missing URL must stay visible rather than be silently
-/// skipped (mis-typed trackers generate junk URLs that otherwise only show
-/// up in `bug watches`).
-fn watch_url_line(watch: &bugs::BugWatch) -> String {
-    match watch.url.as_deref() {
-        Some(url) => format!("  URL: {url}"),
-        None => "  URL: (Launchpad returned no watch URL; check `lpcli bug watches`)".to_string(),
-    }
 }
 
 fn parse_positive_limit(value: &str) -> Result<usize, String> {
@@ -3700,2597 +2625,157 @@ fn parse_positive_limit(value: &str) -> Result<usize, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Person handlers
-// ---------------------------------------------------------------------------
-
-async fn handle_person(
-    cmd: PersonCommand,
-    display: &Display,
-    policy: ReadAuthPolicy,
-    cache_timeout: std::time::Duration,
-) -> lpcli::error::Result<()> {
-    let client = read_client(policy, cache_timeout)?;
-
-    match cmd {
-        PersonCommand::Show { name } => {
-            let person = people::get_person(&client, &name).await?;
-            println!("{}", person.display_name.bold());
-            println!("Name:    ~{}", person.name);
-            if let Some(kind) = &person.account_type {
-                println!("Type:    {kind}");
-            }
-            if let Some(karma) = person.karma {
-                println!("Karma:   {karma}");
-            }
-            if let Some(desc) = &person.description {
-                println!("\n{desc}");
-            }
-            if let Some(link) = &person.web_link {
-                println!("\nURL:     {}", link.underline());
-            }
-        }
-
-        PersonCommand::Search { query } => {
-            let results = people::search_people(&client, &query).await?;
-            let mut table = build_table(display, vec!["Name", "Display Name", "Type"]);
-            for p in &results {
-                table.add_row(vec![
-                    format!("~{}", p.name),
-                    p.display_name.clone(),
-                    p.account_type
-                        .as_ref()
-                        .map(|t| t.to_string())
-                        .unwrap_or_default(),
-                ]);
-            }
-            println!("{table}");
-        }
-
-        PersonCommand::Members { team } => {
-            let members = people::get_team_members(&client, &team).await?;
-            let mut table = build_table(display, vec!["Member", "Status", "Since"]);
-            for m in &members {
-                // Extract "~username" from the full API URL (e.g. ".../~jdoe" → "~jdoe").
-                let member_name = m
-                    .member_link
-                    .as_deref()
-                    .and_then(|url| url.rsplit('/').next())
-                    .unwrap_or("—");
-                let date = m
-                    .date_joined
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_default();
-                table.add_row(vec![member_name, m.status.as_deref().unwrap_or("—"), &date]);
-            }
-            println!("{table}");
-        }
-
-        PersonCommand::Bugs { name } => {
-            let bugs_list = people::get_person_bugs(&client, &name).await?;
-            let mut table = build_table(display, vec!["Bug", "Title", "Status", "Importance"]);
-            for b in &bugs_list {
-                let bug_id = b
-                    .bug_link
-                    .as_deref()
-                    .and_then(|url| url.rsplit('/').next())
-                    .unwrap_or("—");
-                table.add_row(vec![
-                    bug_id.to_string(),
-                    b.title.as_deref().unwrap_or("—").to_string(),
-                    b.status.as_deref().unwrap_or("—").to_string(),
-                    b.importance.as_deref().unwrap_or("—").to_string(),
-                ]);
-            }
-            println!("{table}");
-            println!("{} bug task(s) found.", bugs_list.len());
-        }
-
-        PersonCommand::Ppas { name } => {
-            let ppas = people::list_person_ppas(&client, &name).await?;
-            let mut table = build_table(display, vec!["Name", "Description", "Enabled"]);
-            for p in &ppas {
-                table.add_row(vec![
-                    p.name.as_deref().unwrap_or("—"),
-                    p.description.as_deref().unwrap_or(""),
-                    &p.enabled.map(|e| e.to_string()).unwrap_or_default(),
-                ]);
-            }
-            println!("{table}");
-        }
-
-        PersonCommand::OwnedTeams { name } => {
-            let teams = people::get_person_owned_teams(&client, &name).await?;
-            let mut table = build_table(display, vec!["Name", "Display Name"]);
-            for t in &teams {
-                table.add_row(vec![format!("~{}", t.name), t.display_name.clone()]);
-            }
-            println!("{table}");
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Package handlers
-// ---------------------------------------------------------------------------
-
-async fn handle_package(
-    cmd: PackageCommand,
-    display: &Display,
-    policy: ReadAuthPolicy,
-    cache_timeout: std::time::Duration,
-) -> lpcli::error::Result<()> {
-    let client = read_client(policy, cache_timeout)?;
-
-    match cmd {
-        PackageCommand::Series { series, distro } => {
-            let series_name = canonical_series(&distro, &series);
-            let s = packages::get_distro_series(&client, &distro, series_name).await?;
-            println!("{}", s.display_name.as_deref().unwrap_or(&s.name).bold());
-            if let Some(v) = &s.version {
-                println!("Version: {v}");
-            }
-            if let Some(status) = &s.status {
-                println!("Status:  {status}");
-            }
-            if let Some(active) = s.active {
-                println!("Active:  {active}");
-            }
-        }
-
-        PackageCommand::ListSeries { distro } => {
-            let series = packages::list_distro_series(&client, &distro).await?;
-            let mut table = build_table(display, vec!["Name", "Version", "Status", "Active"]);
-            for s in &series {
-                table.add_row(vec![
-                    s.name.as_str(),
-                    s.version.as_deref().unwrap_or("—"),
-                    s.status.as_deref().unwrap_or("—"),
-                    &s.active.map(|a| a.to_string()).unwrap_or_default(),
-                ]);
-            }
-            println!("{table}");
-        }
-
-        PackageCommand::Search {
-            series,
-            name,
-            version,
-            pocket,
-            distro,
-            limit,
-        } => {
-            let series_name = canonical_series(&distro, &series);
-            let params = SourceSearchParams {
-                source_name: name.as_deref(),
-                version: version.as_deref(),
-                pocket: pocket.map(pocket_launchpad_name),
-                status: Some("Published"),
-                limit: Some(limit),
-                ..Default::default()
-            };
-            let pubs =
-                packages::search_published_sources(&client, &distro, series_name, &params).await?;
-            let mut table = build_table(display, vec!["Package", "Version", "Component", "Pocket"]);
-            for p in &pubs {
-                table.add_row(vec![
-                    p.source_package_name.as_deref().unwrap_or("—"),
-                    p.source_package_version.as_deref().unwrap_or("—"),
-                    p.component_name.as_deref().unwrap_or("—"),
-                    p.pocket.as_deref().unwrap_or("—"),
-                ]);
-            }
-            println!("{table}");
-        }
-
-        PackageCommand::Ppa { owner, ppa } => {
-            let archive = packages::get_ppa(&client, &owner, &ppa).await?;
-            println!("{}", archive.name.as_deref().unwrap_or("PPA").bold());
-            if let Some(desc) = &archive.description {
-                println!("{desc}");
-            }
-            if let Some(enabled) = archive.enabled {
-                println!("Enabled: {enabled}");
-            }
-            if let Some(link) = &archive.web_link {
-                println!("URL:     {}", link.underline());
-            }
-        }
-
-        PackageCommand::PpaSources { owner, ppa, name } => {
-            let params = SourceSearchParams {
-                source_name: name.as_deref(),
-                ..Default::default()
-            };
-            let pubs = packages::list_ppa_sources(&client, &owner, &ppa, &params).await?;
-            let mut table = build_table(display, vec!["Package", "Version", "Status"]);
-            for p in &pubs {
-                table.add_row(vec![
-                    p.source_package_name.as_deref().unwrap_or("—"),
-                    p.source_package_version.as_deref().unwrap_or("—"),
-                    p.status.as_deref().unwrap_or("—"),
-                ]);
-            }
-            println!("{table}");
-        }
-
-        PackageCommand::Distro { distro } => {
-            let d = packages::get_distro(&client, &distro).await?;
-            println!("{}", d.display_name.as_deref().unwrap_or(&d.name).bold());
-            if let Some(title) = &d.title {
-                println!("Title:    {title}");
-            }
-            if let Some(summary) = &d.summary {
-                println!("{summary}");
-            }
-            if let Some(official) = d.official_packages {
-                println!("Official: {official}");
-            }
-            if let Some(link) = &d.web_link {
-                println!("URL:      {}", link.underline());
-            }
-        }
-
-        PackageCommand::Download {
-            name,
-            version,
-            series,
-            distro,
-            output,
-        } => {
-            let series_name = canonical_series(&distro, &series).to_string();
-            return handle_package_download(&client, name, version, series_name, distro, output)
-                .await;
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Project handlers
-// ---------------------------------------------------------------------------
-
-async fn handle_project(
-    cmd: ProjectCommand,
-    display: &Display,
-    policy: ReadAuthPolicy,
-    cache_timeout: std::time::Duration,
-) -> lpcli::error::Result<()> {
-    let client = read_client(policy, cache_timeout)?;
-
-    match cmd {
-        ProjectCommand::Show { name } => {
-            let project = projects::get_project(&client, &name).await?;
-            println!(
-                "{}",
-                project
-                    .display_name
-                    .as_deref()
-                    .unwrap_or(&project.name)
-                    .bold()
-            );
-            if let Some(summary) = &project.summary {
-                println!("{summary}");
-            }
-            if let Some(url) = &project.homepage_url {
-                println!("Website: {}", url.underline());
-            }
-            if let Some(link) = &project.web_link {
-                println!("Launchpad: {}", link.underline());
-            }
-        }
-
-        ProjectCommand::Search { query } => {
-            let results = projects::search_projects(&client, &query).await?;
-            let mut table = build_table(display, vec!["Name", "Display Name", "Summary"]);
-            for p in &results {
-                table.add_row(vec![
-                    p.name.as_str(),
-                    p.display_name.as_deref().unwrap_or("—"),
-                    p.summary.as_deref().unwrap_or(""),
-                ]);
-            }
-            println!("{table}");
-        }
-
-        ProjectCommand::Milestones { project, active } => {
-            let milestones = if active {
-                projects::list_active_milestones(&client, &project).await?
-            } else {
-                projects::list_milestones(&client, &project).await?
-            };
-            let mut table = build_table(display, vec!["Name", "Title", "Active", "Target Date"]);
-            for m in &milestones {
-                table.add_row(vec![
-                    m.name.as_str(),
-                    m.title.as_deref().unwrap_or("—"),
-                    &m.is_active.map(|a| a.to_string()).unwrap_or_default(),
-                    &m.date_targeted
-                        .map(|d| d.to_string())
-                        .unwrap_or_else(|| "—".to_string()),
-                ]);
-            }
-            println!("{table}");
-        }
-
-        ProjectCommand::ShowMilestone { project, name } => {
-            let m = projects::get_milestone(&client, &project, &name).await?;
-            println!("{}", m.name.bold());
-            if let Some(title) = &m.title {
-                println!("Title:   {title}");
-            }
-            if let Some(active) = m.is_active {
-                println!("Active:  {active}");
-            }
-            if let Some(date) = m.date_targeted {
-                println!("Target:  {date}");
-            }
-            if let Some(link) = &m.web_link {
-                println!("URL:     {}", link.underline());
-            }
-        }
-
-        ProjectCommand::SeriesShow { project, series } => {
-            let s = projects::get_project_series(&client, &project, &series).await?;
-            println!("{}", s.name.bold());
-            if let Some(title) = &s.title {
-                println!("Title:   {title}");
-            }
-            if let Some(status) = &s.status {
-                println!("Status:  {status}");
-            }
-            if let Some(summary) = &s.summary {
-                println!("\n{summary}");
-            }
-            if let Some(link) = &s.web_link {
-                println!("URL:     {}", link.underline());
-            }
-        }
-
-        ProjectCommand::ListSeries { project } => {
-            let series = projects::list_project_series(&client, &project).await?;
-            let mut table = build_table(display, vec!["Name", "Title", "Status"]);
-            for s in &series {
-                table.add_row(vec![
-                    s.name.as_str(),
-                    s.title.as_deref().unwrap_or("—"),
-                    s.status.as_deref().unwrap_or("—"),
-                ]);
-            }
-            println!("{table}");
-        }
-
-        ProjectCommand::SeriesReleases { project, series } => {
-            let releases = projects::list_series_releases(&client, &project, &series).await?;
-            let mut table = build_table(display, vec!["Version", "Release Date", "Notes"]);
-            for r in &releases {
-                let date = r
-                    .date_released
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_else(|| "—".to_string());
-                let notes = r.release_notes.as_deref().unwrap_or("").to_string();
-                table.add_row(vec![r.version.as_deref().unwrap_or("—"), &date, &notes]);
-            }
-            println!("{table}");
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// CVE handlers
-// ---------------------------------------------------------------------------
-
-async fn handle_cve(
-    cmd: CveCommand,
-    display: &Display,
-    policy: ReadAuthPolicy,
-    cache_timeout: std::time::Duration,
-) -> lpcli::error::Result<()> {
-    let client = read_client(policy, cache_timeout)?;
-
-    match cmd {
-        CveCommand::Show { sequence } => {
-            let cve = cves::get_cve(&client, &sequence).await?;
-            println!("{}", cve.sequence.bold());
-            if let Some(title) = &cve.title {
-                println!("{title}");
-            }
-            if let Some(status) = &cve.status {
-                println!("Status:  {status}");
-            }
-            if let Some(desc) = &cve.description {
-                println!("\n{desc}");
-            }
-            if let Some(link) = &cve.web_link {
-                println!("\nURL:     {}", link.underline());
-            }
-        }
-
-        CveCommand::Search {
-            distro,
-            keyword,
-            limit,
-        } => {
-            let params = CveSearchParams {
-                in_distribution: Some(distro.as_str()),
-                limit: Some(limit),
-                search_text: keyword.as_deref(),
-                ..Default::default()
-            };
-            let results = cves::search_cves(&client, &params).await?;
-            let mut table = build_table(display, vec!["CVE", "Status", "Title"]);
-            for c in &results {
-                table.add_row(vec![
-                    c.sequence.as_str(),
-                    c.status.as_deref().unwrap_or("—"),
-                    c.title.as_deref().unwrap_or(""),
-                ]);
-            }
-            println!("{table}");
-            println!("{} CVE(s) found.", results.len());
-        }
-
-        CveCommand::BugCves { bug_id } => {
-            let results = cves::get_bug_cves(&client, bug_id).await?;
-            let mut table = build_table(display, vec!["CVE", "Status", "Title"]);
-            for c in &results {
-                table.add_row(vec![
-                    c.sequence.as_str(),
-                    c.status.as_deref().unwrap_or("—"),
-                    c.title.as_deref().unwrap_or(""),
-                ]);
-            }
-            println!("{table}");
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Git handlers
-// ---------------------------------------------------------------------------
-
-async fn handle_git(
-    cmd: GitCommand,
-    display: &Display,
-    policy: ReadAuthPolicy,
-    cache_timeout: std::time::Duration,
-) -> lpcli::error::Result<()> {
-    let client = read_client(policy, cache_timeout)?;
-
-    match cmd {
-        GitCommand::Show { path } => {
-            let repo = git::get_git_repository(&client, &path).await?;
-            println!(
-                "{}",
-                repo.unique_name
-                    .as_deref()
-                    .or(repo.name.as_deref())
-                    .unwrap_or("—")
-                    .bold()
-            );
-            if let Some(desc) = &repo.description {
-                println!("{desc}");
-            }
-            if let Some(kind) = &repo.repository_type {
-                println!("Type:     {kind}");
-            }
-            if let Some(info) = &repo.information_type {
-                println!("Access:   {info}");
-            }
-            if let Some(modified) = repo.date_last_modified {
-                println!("Modified: {}", modified.format("%Y-%m-%d"));
-            }
-            if let Some(link) = &repo.web_link {
-                println!("URL:      {}", link.underline());
-            }
-        }
-
-        GitCommand::Default { target } => {
-            let repo = git::get_default_git_repository(&client, &target).await?;
-            println!(
-                "{}",
-                repo.unique_name
-                    .as_deref()
-                    .or(repo.name.as_deref())
-                    .unwrap_or("—")
-                    .bold()
-            );
-            if let Some(link) = &repo.web_link {
-                println!("URL: {}", link.underline());
-            }
-        }
-
-        GitCommand::ListPersonRepos { name } => {
-            let repos = git::list_person_git_repositories(&client, &name).await?;
-            let mut table = build_table(display, vec!["Repository", "Type", "Modified"]);
-            for r in &repos {
-                let modified = r
-                    .date_last_modified
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_default();
-                table.add_row(vec![
-                    r.unique_name
-                        .as_deref()
-                        .or(r.name.as_deref())
-                        .unwrap_or("—"),
-                    r.repository_type.as_deref().unwrap_or("—"),
-                    &modified,
-                ]);
-            }
-            println!("{table}");
-        }
-
-        GitCommand::Refs { path } => {
-            let refs = git::list_git_refs(&client, &path).await?;
-            let mut table = build_table(display, vec!["Ref", "Display Name", "SHA1"]);
-            for r in &refs {
-                table.add_row(vec![
-                    r.path.as_deref().unwrap_or("—"),
-                    r.display_name.as_deref().unwrap_or("—"),
-                    r.commit_sha1
-                        .as_deref()
-                        .map(|s| &s[..12.min(s.len())])
-                        .unwrap_or("—"),
-                ]);
-            }
-            println!("{table}");
-        }
-
-        GitCommand::Proposals { path, status } => {
-            let proposals = git::list_merge_proposals(&client, &path, status.as_deref()).await?;
-            let mut table = build_table(
-                display,
-                vec!["ID", "Status", "Source Branch", "Target Branch", "Date"],
-            );
-            for p in &proposals {
-                let mp_id = p
-                    .self_link
-                    .as_deref()
-                    .and_then(git::extract_mp_id)
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "—".to_string());
-                let date = p
-                    .date_created
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_default();
-                table.add_row(vec![
-                    &mp_id,
-                    p.queue_status.as_deref().unwrap_or("—"),
-                    p.source_git_path.as_deref().unwrap_or("—"),
-                    p.target_git_path.as_deref().unwrap_or("—"),
-                    &date,
-                ]);
-            }
-            println!("{table}");
-        }
-
-        GitCommand::Comments { path, id, diff } => {
-            let (comments, (inline, diff_map)) = tokio::try_join!(
-                git::get_merge_proposal_comments(&client, &path, id),
-                git::get_inline_comments(&client, &path, id, diff),
-            )?;
-            if comments.is_empty() {
-                println!("No review comments.");
-            } else {
-                println!("{}", "Review Comments".bold());
-                println!("{}", "─".repeat(60));
-                for (i, c) in comments.iter().enumerate() {
-                    let idx = c.id.unwrap_or(i as u64);
-                    let author = c
-                        .author_link
-                        .as_deref()
-                        .and_then(|u| u.rsplit('/').next())
-                        .unwrap_or("unknown");
-                    let date = c
-                        .date_created
-                        .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-                        .unwrap_or_default();
-                    let vote_str = c
-                        .vote
-                        .as_deref()
-                        .map(|v| format!(" [{v}]"))
-                        .unwrap_or_default();
-                    println!(
-                        "{}",
-                        format!("Comment #{idx} — {author} — {date}{vote_str}").bold()
-                    );
-                    println!("{}", c.content.as_deref().unwrap_or(""));
-                    println!("{}", "─".repeat(60));
-                }
-            }
-
-            // Inline (diff) comments.
-            if !inline.is_empty() {
-                println!();
-                println!("{}", "Inline Comments".bold());
-                println!("{}", "─".repeat(60));
-                for ic in &inline {
-                    let author = ic.author_display();
-                    let diff_line_num: Option<u64> =
-                        ic.line_number.as_deref().and_then(|n| n.parse().ok());
-
-                    // Look up file/line context from the diff map.
-                    let context = diff_line_num
-                        .and_then(|n| diff_map.iter().find(|(ln, _)| *ln == n).map(|(_, ctx)| ctx));
-
-                    let location = if let Some(ctx) = context {
-                        let line_info = ctx.new_line.map(|n| format!(":{n}")).unwrap_or_default();
-                        format!("{}{line_info}", ctx.file)
-                    } else {
-                        ic.line_number
-                            .as_deref()
-                            .map(|n| format!("diff L{n}"))
-                            .unwrap_or_else(|| "?".to_string())
-                    };
-
-                    let date = ic.date.as_deref().unwrap_or("");
-                    println!("{}", format!("{location} — {author} — {date}").bold());
-                    if let Some(ctx) = context {
-                        println!("  {}", ctx.content.dimmed());
-                    }
-                    println!("{}", ic.text.as_deref().unwrap_or(""));
-                    println!("{}", "─".repeat(60));
-                }
-            }
-        }
-        GitCommand::Diffs { path, id } => {
-            let diffs = git::get_preview_diffs(&client, &path, id).await?;
-            if diffs.is_empty() {
-                println!("No preview diffs found.");
-            } else {
-                println!("{}", "Preview Diffs".bold());
-                println!("{}", "─".repeat(60));
-                for d in &diffs {
-                    let diff_id =
-                        d.id.map(|i| i.to_string())
-                            .unwrap_or_else(|| "?".to_string());
-                    let date = d
-                        .date_created
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                        .unwrap_or_default();
-                    let lines = d
-                        .diff_lines_count
-                        .map(|n| format!(" ({n} lines)"))
-                        .unwrap_or_default();
-                    let rev = d
-                        .source_revision_id
-                        .as_deref()
-                        .map(|r| {
-                            let short = if r.len() > 12 { &r[..12] } else { r };
-                            format!(" [{short}]")
-                        })
-                        .unwrap_or_default();
-                    println!("  #{diff_id}  {date}{lines}{rev}");
-                }
-                println!("{}", "─".repeat(60));
-                println!("Use --diff <ID> with the comments command to select a specific diff.");
-            }
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Spec handlers
-// ---------------------------------------------------------------------------
-
-async fn handle_spec(
-    cmd: SpecCommand,
-    display: &Display,
-    policy: ReadAuthPolicy,
-    cache_timeout: std::time::Duration,
-) -> lpcli::error::Result<()> {
-    let client = read_client(policy, cache_timeout)?;
-
-    match cmd {
-        SpecCommand::Show { target, name } => {
-            let spec = specifications::get_specification(&client, &target, &name).await?;
-            println!("{}", spec.name.bold());
-            if let Some(title) = &spec.title {
-                println!("{title}");
-            }
-            if let Some(priority) = &spec.priority {
-                println!("Priority:   {priority}");
-            }
-            if let Some(lifecycle) = &spec.lifecycle_status {
-                println!("Lifecycle:  {lifecycle}");
-            }
-            if let Some(impl_status) = &spec.implementation_status {
-                println!("Impl:       {impl_status}");
-            }
-            if let Some(def_status) = &spec.definition_status {
-                println!("Definition: {def_status}");
-            }
-            if let Some(summary) = &spec.summary {
-                println!("\n{summary}");
-            }
-            if let Some(link) = &spec.web_link {
-                println!("\nURL: {}", link.underline());
-            }
-        }
-
-        SpecCommand::List { target, all } => {
-            let specs = if all {
-                specifications::list_project_specifications(&client, &target).await?
-            } else {
-                specifications::list_valid_project_specifications(&client, &target).await?
-            };
-            let mut table = build_table(
-                display,
-                vec!["Name", "Title", "Priority", "Lifecycle", "Impl"],
-            );
-            for s in &specs {
-                table.add_row(vec![
-                    s.name.as_str(),
-                    s.title.as_deref().unwrap_or(""),
-                    s.priority.as_deref().unwrap_or("—"),
-                    s.lifecycle_status.as_deref().unwrap_or("—"),
-                    s.implementation_status.as_deref().unwrap_or("—"),
-                ]);
-            }
-            println!("{table}");
-            println!("{} spec(s) found.", specs.len());
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Question handlers
-// ---------------------------------------------------------------------------
-
-async fn handle_question(
-    cmd: QuestionCommand,
-    display: &Display,
-    policy: ReadAuthPolicy,
-    cache_timeout: std::time::Duration,
-) -> lpcli::error::Result<()> {
-    let client = read_client(policy, cache_timeout)?;
-
-    match cmd {
-        QuestionCommand::Show { question_id } => {
-            let q = questions::get_question_by_id(&client, question_id).await?;
-            println!("{}", format!("Question #{question_id}").bold());
-            println!("{}", "─".repeat(60));
-            if let Some(title) = &q.title {
-                println!("{}", title.bold());
-            }
-            if let Some(status) = &q.status {
-                println!("Status:  {status}");
-            }
-            if let Some(desc) = &q.description {
-                println!("\n{desc}");
-            }
-            if let Some(link) = &q.web_link {
-                println!("\nURL: {}", link.underline());
-            }
-        }
-
-        QuestionCommand::Search {
-            target,
-            query,
-            status,
-        } => {
-            let params = QuestionSearchParams {
-                search_text: query.as_deref(),
-                status: status.as_deref(),
-            };
-            let results = questions::search_questions(&client, &target, &params).await?;
-            let mut table = build_table(display, vec!["ID", "Title", "Status"]);
-            for q in &results {
-                let id = q
-                    .self_link
-                    .as_deref()
-                    .and_then(|u| u.rsplit('/').next())
-                    .unwrap_or("—");
-                table.add_row(vec![
-                    id,
-                    q.title.as_deref().unwrap_or(""),
-                    q.status.as_deref().unwrap_or("—"),
-                ]);
-            }
-            println!("{table}");
-            println!("{} question(s) found.", results.len());
-        }
-
-        QuestionCommand::Messages {
-            target,
-            question_id,
-        } => {
-            let msgs = questions::get_question_messages(&client, &target, question_id).await?;
-            for m in &msgs {
-                let idx = m
-                    .index
-                    .map(|i| i.to_string())
-                    .unwrap_or_else(|| "?".to_string());
-                let author = m
-                    .owner_link
-                    .as_deref()
-                    .and_then(|u| u.rsplit('/').next())
-                    .unwrap_or("unknown");
-                let date = m
-                    .date_created
-                    .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_default();
-                println!("{}", format!("Message #{idx} — {author} — {date}").bold());
-                if let Some(action) = &m.action {
-                    println!("[{action}]");
-                }
-                println!("{}", m.content.as_deref().unwrap_or(""));
-                println!("{}", "─".repeat(60));
-            }
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Webhook handlers
-// ---------------------------------------------------------------------------
-
-async fn handle_webhook(
-    cmd: WebhookCommand,
-    display: &Display,
-    cache_timeout: std::time::Duration,
-) -> lpcli::error::Result<()> {
-    let client = authenticated_client(cache_timeout)?;
-
-    match cmd {
-        WebhookCommand::List { target } => {
-            let hooks = webhooks::list_target_webhooks(&client, &target).await?;
-            let mut table =
-                build_table(display, vec!["Delivery URL", "Active", "Events", "Created"]);
-            for h in &hooks {
-                let events = h
-                    .event_types
-                    .as_ref()
-                    .map(|v| v.join(", "))
-                    .unwrap_or_default();
-                let date = h
-                    .date_created
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_default();
-                table.add_row(vec![
-                    h.delivery_url.as_deref().unwrap_or("—"),
-                    &h.active.map(|a| a.to_string()).unwrap_or_default(),
-                    &events,
-                    &date,
-                ]);
-            }
-            println!("{table}");
-        }
-
-        WebhookCommand::Create {
-            target,
-            delivery_url,
-            event_types,
-            inactive,
-            secret,
-        } => {
-            let types: Vec<&str> = event_types.split(',').map(str::trim).collect();
-            let hook = webhooks::create_webhook(
-                &client,
-                &target,
-                &delivery_url,
-                &types,
-                !inactive,
-                secret.as_deref(),
-            )
-            .await?;
-            println!("{} Webhook created.", "✓".green().bold());
-            if let Some(link) = &hook.self_link {
-                println!("Webhook URL: {link}");
-            }
-        }
-
-        WebhookCommand::Delete { webhook_url } => {
-            webhooks::delete_webhook(&client, &webhook_url).await?;
-            println!("{} Webhook deleted.", "✓".green().bold());
-        }
-
-        WebhookCommand::Ping { webhook_url } => {
-            let delivery = webhooks::ping_webhook(&client, &webhook_url).await?;
-            println!("{} Test delivery sent.", "✓".green().bold());
-            if let Some(status) = delivery.response_status_code {
-                println!("Response status: {status}");
-            }
-            if let Some(success) = delivery.successful {
-                println!("Successful: {success}");
-            }
-        }
-
-        WebhookCommand::Deliveries { webhook_url } => {
-            let deliveries = webhooks::list_deliveries(&client, &webhook_url).await?;
-            let mut table = build_table(
-                display,
-                vec!["Sent", "Successful", "Status Code", "Pending"],
-            );
-            for d in &deliveries {
-                let date = d
-                    .date_sent
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_default();
-                table.add_row(vec![
-                    &date,
-                    &d.successful.map(|s| s.to_string()).unwrap_or_default(),
-                    &d.response_status_code
-                        .map(|c| c.to_string())
-                        .unwrap_or_default(),
-                    &d.pending.map(|p| p.to_string()).unwrap_or_default(),
-                ]);
-            }
-            println!("{table}");
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Translation handlers
-// ---------------------------------------------------------------------------
-
-async fn handle_translation(
-    cmd: TranslationCommand,
-    display: &Display,
-    policy: ReadAuthPolicy,
-    cache_timeout: std::time::Duration,
-) -> lpcli::error::Result<()> {
-    let client = read_client(policy, cache_timeout)?;
-
-    match cmd {
-        TranslationCommand::Queue { distro, series } => {
-            let series_name = canonical_series(&distro, &series);
-            let entries =
-                translations::get_distro_series_import_queue(&client, &distro, series_name).await?;
-            let mut table = build_table(display, vec!["Path", "Status", "Date"]);
-            for e in &entries {
-                let date = e
-                    .date_created
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_default();
-                table.add_row(vec![
-                    e.path.as_deref().unwrap_or("—"),
-                    e.status.as_deref().unwrap_or("—"),
-                    &date,
-                ]);
-            }
-            println!("{table}");
-            println!("{} entry/entries in queue.", entries.len());
-        }
-
-        TranslationCommand::Templates { distro, series } => {
-            let series_name = canonical_series(&distro, &series);
-            let templates =
-                translations::get_distro_series_templates(&client, &distro, series_name).await?;
-            let mut table = build_table(display, vec!["Name", "Path", "Priority", "Current"]);
-            for t in &templates {
-                table.add_row(vec![
-                    t.name.as_deref().unwrap_or("—"),
-                    t.path.as_deref().unwrap_or("—"),
-                    &t.priority.map(|p| p.to_string()).unwrap_or_default(),
-                    &t.is_current.map(|c| c.to_string()).unwrap_or_default(),
-                ]);
-            }
-            println!("{table}");
-            println!("{} template(s) found.", templates.len());
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Snap handlers
-// ---------------------------------------------------------------------------
-
-async fn handle_snap(
-    cmd: SnapCommand,
-    display: &Display,
-    policy: ReadAuthPolicy,
-    cache_timeout: std::time::Duration,
-) -> lpcli::error::Result<()> {
-    let client = read_client(policy, cache_timeout)?;
-
-    match cmd {
-        SnapCommand::Show { owner, name } => {
-            let snap = snaps::get_snap(&client, &owner, &name).await?;
-            println!("{}", snap.name.as_deref().unwrap_or(&name).bold());
-            if let Some(desc) = &snap.description {
-                println!("{desc}");
-            }
-            if let Some(store) = &snap.store_name {
-                println!("Store name:   {store}");
-            }
-            if let Some(private) = snap.private {
-                println!("Private:      {private}");
-            }
-            if let Some(upload) = snap.store_upload {
-                println!("Auto-upload:  {upload}");
-            }
-            if let Some(git_url) = &snap.git_repository_url {
-                println!("Git URL:      {git_url}");
-            }
-            if let Some(git_path) = &snap.git_path {
-                println!("Git path:     {git_path}");
-            }
-            if let Some(link) = &snap.web_link {
-                println!("URL:          {}", link.underline());
-            }
-        }
-
-        SnapCommand::Find { owner } => {
-            let snap_list = snaps::find_snaps_by_owner(&client, &owner).await?;
-            let mut table = build_table(display, vec!["Name", "Store Name", "Private"]);
-            for s in &snap_list {
-                table.add_row(vec![
-                    s.name.as_deref().unwrap_or("—"),
-                    s.store_name.as_deref().unwrap_or("—"),
-                    &s.private.map(|p| p.to_string()).unwrap_or_default(),
-                ]);
-            }
-            println!("{table}");
-        }
-
-        SnapCommand::Builds { owner, name } => {
-            let builds = snaps::get_snap_pending_builds(&client, &owner, &name).await?;
-            let mut table = build_table(display, vec!["Title", "Pocket", "Score", "Upload Status"]);
-            for b in &builds {
-                table.add_row(vec![
-                    b.title.as_deref().unwrap_or("—"),
-                    b.pocket.as_deref().unwrap_or("—"),
-                    &b.score.map(|s| s.to_string()).unwrap_or_default(),
-                    b.store_upload_status.as_deref().unwrap_or("—"),
-                ]);
-            }
-            println!("{table}");
-        }
-
-        SnapCommand::RequestBuilds {
-            owner,
-            name,
-            pocket,
-            distro,
-        } => {
-            let archive_url = client.url(&format!("/{distro}/+archive/primary"));
-            let req = snaps::request_snap_builds(
-                &client,
-                &owner,
-                &name,
-                &archive_url,
-                pocket_launchpad_name(pocket),
-            )
-            .await?;
-            println!("{} Build request submitted.", "✓".green().bold());
-            if let Some(status) = &req.status {
-                println!("Status: {status}");
-            }
-            if let Some(link) = &req.self_link {
-                println!("Request URL: {link}");
-            }
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// AccessToken handlers
-// ---------------------------------------------------------------------------
-
-async fn handle_access_token(
-    cmd: AccessTokenCommand,
-    display: &Display,
-    cache_timeout: std::time::Duration,
-) -> lpcli::error::Result<()> {
-    let client = authenticated_client(cache_timeout)?;
-
-    match cmd {
-        AccessTokenCommand::Issue {
-            project,
-            description,
-            scopes,
-        } => {
-            let scope_list: Vec<&str> = scopes.split(',').map(str::trim).collect();
-            let secret = access_tokens::issue_project_access_token(
-                &client,
-                &project,
-                &description,
-                &scope_list,
-            )
-            .await?;
-            println!("{} Access token issued.", "✓".green().bold());
-            println!(
-                "{} Save this secret — it will not be shown again:",
-                "!".yellow().bold()
-            );
-            println!("{}", secret.bold());
-        }
-
-        AccessTokenCommand::IssueGit {
-            repo,
-            description,
-            scopes,
-        } => {
-            let scope_list: Vec<&str> = scopes.split(',').map(str::trim).collect();
-            let secret =
-                access_tokens::issue_git_access_token(&client, &repo, &description, &scope_list)
-                    .await?;
-            println!("{} Access token issued.", "✓".green().bold());
-            println!(
-                "{} Save this secret — it will not be shown again:",
-                "!".yellow().bold()
-            );
-            println!("{}", secret.bold());
-        }
-
-        AccessTokenCommand::List { project } => {
-            let tokens = access_tokens::list_project_access_tokens(&client, &project).await?;
-            let mut table = build_table(
-                display,
-                vec!["Description", "Scopes", "Created", "Last Used"],
-            );
-            for t in &tokens {
-                let scopes = t.scopes.as_ref().map(|v| v.join(", ")).unwrap_or_default();
-                let created = t
-                    .date_created
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_default();
-                let last_used = t
-                    .date_last_used
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_else(|| "never".to_string());
-                table.add_row(vec![
-                    t.description.as_deref().unwrap_or("—"),
-                    &scopes,
-                    &created,
-                    &last_used,
-                ]);
-            }
-            println!("{table}");
-        }
-
-        AccessTokenCommand::ListGit { repo } => {
-            let tokens = access_tokens::list_git_access_tokens(&client, &repo).await?;
-            let mut table = build_table(
-                display,
-                vec!["Description", "Scopes", "Created", "Last Used"],
-            );
-            for t in &tokens {
-                let scopes = t.scopes.as_ref().map(|v| v.join(", ")).unwrap_or_default();
-                let created = t
-                    .date_created
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_default();
-                let last_used = t
-                    .date_last_used
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_else(|| "never".to_string());
-                table.add_row(vec![
-                    t.description.as_deref().unwrap_or("—"),
-                    &scopes,
-                    &created,
-                    &last_used,
-                ]);
-            }
-            println!("{table}");
-        }
-
-        AccessTokenCommand::Revoke { token_url } => {
-            access_tokens::revoke_access_token(&client, &token_url).await?;
-            println!("{} Access token revoked.", "✓".green().bold());
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Hardware-bound token handlers
-// ---------------------------------------------------------------------------
-
-/// `lpcli login --hardware-token`: import a grant or use the stored one.
-async fn handle_hardware_login(
-    args: LoginArgs,
-    cache_timeout: std::time::Duration,
-) -> lpcli::error::Result<()> {
-    let mut login = HardwareLogin::new().cache_timeout(cache_timeout);
-    if let Some(token) = args.grant_token {
-        let account = args.account.as_deref().ok_or_else(|| {
-            lpcli::error::LpError::HardwareToken(
-                "--account is required to import a grant.".to_string(),
-            )
-        })?;
-        let secret = read_grant_secret()?;
-        login = login.grant(HardwareTokenGrant::new(token, secret.as_str(), account)?);
-    }
-    if let Some(account) = args.account {
-        login = login.account(account);
-    }
-    if let Some(consumer) = args.consumer {
-        login = login.consumer(consumer);
-    }
-    if let Some(credential_id) = args.credential_id {
-        login = login.credential_id(credential_id);
-    }
-
-    println!(
-        "{}",
-        "Logging in to Launchpad with a hardware-bound grant...".bold()
-    );
-    let outcome = hardware_tokens::login_with_hardware_token(login, usb_authenticator()).await?;
-    print_hardware_login(&outcome);
-    Ok(())
-}
-
-/// Read the secret of a grant being imported, without echoing it.
-fn read_grant_secret() -> lpcli::error::Result<zeroize::Zeroizing<String>> {
-    if let Some(secret) = std::env::var_os(GRANT_SECRET_ENV) {
-        return secret
-            .into_string()
-            .map(zeroize::Zeroizing::new)
-            .map_err(|_| {
-                lpcli::error::LpError::HardwareToken(format!(
-                    "{GRANT_SECRET_ENV} is not valid UTF-8."
-                ))
-            });
-    }
-    let secret = zeroize::Zeroizing::new(rpassword::prompt_password(
-        "Grant secret (oauth_token_secret): ",
-    )?);
-    Ok(secret)
-}
-
-fn print_hardware_login(outcome: &HardwareLoginOutcome) {
-    println!(
-        "{} Logged in as {} with a hardware-bound grant.",
-        "✓".green().bold(),
-        format!("~{}", outcome.account).cyan().bold()
-    );
-    match &outcome.stored_in {
-        Some(StoredIn::Memory) => println!(
-            "{} Running under sudo, so the grant was kept in memory only. Set {} to store it \
-             in a file.",
-            "!".yellow().bold(),
-            hardware_tokens::CREDENTIALS_FILE_ENV
-        ),
-        Some(location) => println!("  Grant stored in {location}."),
-        None => println!("  Using the stored grant."),
-    }
-}
-
-/// Find an active registered security key by its ID or name.
-async fn find_registered_key(
-    client: &LaunchpadClient,
-    key: &str,
-) -> lpcli::error::Result<RegisteredAuthenticator> {
-    let mut matches: Vec<RegisteredAuthenticator> =
-        hardware_tokens::list_registered_authenticators(client)
-            .await?
-            .into_iter()
-            .filter(|a| a.is_active())
-            .filter(|a| {
-                a.id.is_some_and(|id| id.to_string() == key) || a.name.as_deref() == Some(key)
-            })
-            .collect();
-    match matches.len() {
-        1 => Ok(matches.remove(0)),
-        0 => Err(lpcli::error::LpError::NotFound(format!(
-            "No active security key with ID or name '{key}'; see `lpcli hardware-token keys`."
-        ))),
-        _ => Err(lpcli::error::LpError::Other(format!(
-            "Several security keys are named '{key}'; use the key's ID instead."
-        ))),
-    }
-}
-
-fn key_label(key: &RegisteredAuthenticator) -> String {
-    let name = key.name.as_deref().unwrap_or("unnamed");
-    match key.id {
-        Some(id) => format!("'{name}' (ID {id})"),
-        None => format!("'{name}'"),
-    }
-}
-
-fn handle_clear_cache() -> lpcli::error::Result<()> {
-    hardware_tokens::clear_cached_access_token()?;
-    println!(
-        "Cleared the local hardware access-token cache. The stored grant is unchanged; \
-         nothing was revoked on Launchpad."
-    );
-    Ok(())
-}
-
-async fn handle_hardware_token(
-    cmd: HardwareTokenCommand,
-    display: &Display,
-    cache_timeout: std::time::Duration,
-) -> lpcli::error::Result<()> {
-    match cmd {
-        HardwareTokenCommand::ClearCache => handle_clear_cache()?,
-
-        HardwareTokenCommand::Show => {
-            let store = GrantStore::from_env();
-            let Some(credentials) = store.load()? else {
-                println!("No hardware-bound grant is stored.");
-                return Ok(());
-            };
-            // Only configuration is shown.  Values from the grant record that
-            // identify the account or form part of the credential (the account
-            // name and token key) are never written to output, which may be
-            // captured in logs.
-            println!("{}", "Hardware-bound grant".bold());
-            println!("{}", "─".repeat(40));
-            println!("Consumer:      {}", credentials.consumer());
-            println!(
-                "Credential ID: {}",
-                credentials
-                    .grant()
-                    .credential_id()
-                    .unwrap_or("any registered key")
-            );
-            println!("Service root:  {}", credentials.service_root());
-            println!(
-                "Stored in:     {}",
-                match store {
-                    GrantStore::File(path) => path.display().to_string(),
-                    _ => "the system keyring (or ~/.config/lpcli/hardware-token.json)".to_string(),
-                }
-            );
-        }
-
-        HardwareTokenCommand::Keys => {
-            let client = authenticated_client(cache_timeout)?;
-            let keys = hardware_tokens::list_registered_authenticators(&client).await?;
-            if keys.is_empty() {
-                println!(
-                    "No security keys are registered. Register one with {}.",
-                    "`lpcli hardware-token register <NAME>`".bold()
-                );
-                return Ok(());
-            }
-            let mut table = build_table(
-                display,
-                vec!["ID", "Name", "Registered", "Last Used", "Status"],
-            );
-            let date = |d: Option<chrono::DateTime<chrono::Utc>>| {
-                d.map(|d| d.format("%Y-%m-%d").to_string())
-            };
-            for key in &keys {
-                table.add_row(vec![
-                    key.id.map(|id| id.to_string()).unwrap_or_default(),
-                    key.name.clone().unwrap_or_default(),
-                    date(key.date_created).unwrap_or_default(),
-                    date(key.date_last_used).unwrap_or_else(|| "never".to_string()),
-                    if key.is_active() { "active" } else { "revoked" }.to_string(),
-                ]);
-            }
-            println!("{table}");
-        }
-
-        HardwareTokenCommand::Register { name, classic } => {
-            let client = if classic {
-                classic_authenticated_client()?
-            } else {
-                authenticated_client(cache_timeout)?
-            };
-            println!("Registering a security key with Launchpad...");
-            if client.is_hardware_bound() {
-                eprintln!("First authenticate with the key bound to your stored grant.");
-                eprintln!(
-                    "To use an existing OAuth session instead, rerun registration with --classic."
-                );
-            } else {
-                eprintln!("Authenticating API requests with the stored classic OAuth session.");
-            }
-            let key =
-                hardware_tokens::register_hardware_key(&client, &name, usb_authenticator()).await?;
-            println!(
-                "{} Registered security key {}.",
-                "✓".green().bold(),
-                key_label(&key)
-            );
-            println!(
-                "  Issue a grant bound to it with {}.",
-                format!(
-                    "`lpcli hardware-token issue --key {}`",
-                    key.id.map(|id| id.to_string()).unwrap_or(name)
-                )
-                .bold()
-            );
-        }
-
-        HardwareTokenCommand::RevokeKey { key } => {
-            let client = authenticated_client(cache_timeout)?;
-            let registered = find_registered_key(&client, &key).await?;
-            let link = registered.self_link.as_deref().ok_or_else(|| {
-                lpcli::error::LpError::Other("The security key has no self_link.".to_string())
-            })?;
-            hardware_tokens::revoke_registered_authenticator(&client, link).await?;
-            println!(
-                "{} Revoked security key {}.",
-                "✓".green().bold(),
-                key_label(&registered)
-            );
-        }
-
-        HardwareTokenCommand::Issue {
-            key,
-            permission,
-            context,
-            expires,
-            consumer,
-            print,
-        } => {
-            let login = HardwareLogin::new().cache_timeout(cache_timeout);
-            let client = authenticated_client(cache_timeout)?;
-            let registered = find_registered_key(&client, &key).await?;
-            let request = IssueGrantRequest {
-                consumer_key: consumer.clone(),
-                authenticator_link: registered.self_link.clone().ok_or_else(|| {
-                    lpcli::error::LpError::Other("The security key has no self_link.".to_string())
-                })?,
-                permission: permission.into(),
-                context,
-                date_expires: expires,
-            };
-            let grant =
-                hardware_tokens::issue_hardware_bound_oauth_token(&client, &request).await?;
-
-            if print {
-                println!("{}", grant.to_issuance_json().as_str());
-                eprintln!(
-                    "{} This is the grant secret; it will not be shown again.",
-                    "!".yellow().bold()
-                );
-                return Ok(());
-            }
-
-            println!(
-                "{} Issued a hardware-bound grant bound to {}. Logging in with it...",
-                "✓".green().bold(),
-                key_label(&registered)
-            );
-            let login = login.grant(grant).consumer(consumer);
-            let outcome =
-                hardware_tokens::login_with_hardware_token(login, usb_authenticator()).await?;
-            print_hardware_login(&outcome);
-
-            if !client.is_hardware_bound() {
-                println!();
-                println!("Now remove the classic bootstrap token, which does not need your key:");
-                // `+me` resolves to the logged-in user, so the account name is
-                // not needed in (or leaked through) this output.
-                println!(
-                    "  1. Revoke the \"{}\" authorization at {OAUTH_TOKENS_URL}",
-                    auth::CONSUMER_KEY
-                );
-                println!(
-                    "  2. Run {} to delete the local copy.",
-                    "`lpcli logout --classic`".bold()
-                );
-            }
-        }
-
-        HardwareTokenCommand::Revoke { token } => {
-            let store = GrantStore::from_env();
-            let stored = store.load()?;
-            let token_key = match (token, &stored) {
-                (Some(token), _) => token,
-                (None, Some(credentials)) => credentials.grant().token().to_string(),
-                (None, None) => {
-                    return Err(lpcli::error::LpError::HardwareToken(
-                        "No hardware-bound grant is stored; pass --token to revoke another grant."
-                            .to_string(),
-                    ));
-                }
-            };
-
-            let client = authenticated_client(cache_timeout)?;
-            hardware_tokens::revoke_hardware_bound_oauth_token(&client, &token_key).await?;
-            println!(
-                "{} Revoked the hardware-bound grant on Launchpad.",
-                "✓".green().bold()
-            );
-            if stored.is_some_and(|credentials| credentials.grant().token() == token_key) {
-                store.delete()?;
-                println!("  Removed the stored copy.");
-            }
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Status handler
 // ---------------------------------------------------------------------------
 
 /// Display authentication status and Launchpad server reachability.
 ///
 /// Both checks run concurrently to minimise latency.
-async fn handle_status() -> lpcli::error::Result<()> {
-    // Run both checks in parallel.
+async fn handle_status(output: &Output) -> lpcli::error::Result<()> {
     let (server, auth) = tokio::join!(status::check_server(), status::check_auth());
-
-    // Authentication section.
-    println!("{}", "Authentication".bold());
-    println!("{}", "─".repeat(40));
-    if let Some(account) = &auth.hardware_account {
-        println!(
-            "{} Hardware-bound grant stored for {}",
-            "✓".green().bold(),
-            format!("~{account}").cyan().bold()
-        );
-        println!("  Not verified with Launchpad, which would need a touch of your security key.");
-    } else if auth.logged_in {
-        match &auth.username {
-            Some(name) => println!("{} Logged in as {}", "✓".green().bold(), name.cyan().bold()),
-            None => println!(
-                "{} Credentials found (could not verify with server)",
-                "~".yellow().bold()
-            ),
-        }
-    } else {
-        println!(
-            "{} Not logged in.  Run {} to authenticate.",
-            "✗".red().bold(),
-            "`lpcli login`".bold()
-        );
-    }
-
-    println!();
-
-    // Launchpad server section.
-    println!("{}", "Launchpad API Server".bold());
-    println!("{}", "─".repeat(40));
-    if server.reachable {
-        println!("{} Online", "✓".green().bold());
-        if let Some(ref rtl) = server.resource_type_link {
-            println!("  Endpoint: {rtl}");
-        }
-    } else {
-        println!("{} Unreachable", "✗".red().bold());
-        if let Some(status_code) = server.http_status {
-            println!("  HTTP status: {status_code}");
-        }
-        if let Some(ref err) = server.error {
-            println!("  Error: {err}");
-        }
-    }
-
-    Ok(())
+    output.print(&status_report(&server, &auth))
 }
 
-// ---------------------------------------------------------------------------
-// Queue handler
-// ---------------------------------------------------------------------------
-
-/// A queue archive resolved to a Launchpad API URL and a display label.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct QueueArchive {
-    /// Full Launchpad API URL passed to `getPackageUploads`.
-    api_url: String,
-    /// Short label used in output, e.g. `ubuntu` or `~owner/ppa`.
-    label: String,
+/// Which kind of stored credentials `status` found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusCredentials {
+    HardwareToken,
+    OAuth,
+    None,
 }
 
-impl QueueArchive {
-    /// Describe the target as `distro/series`, appending the archive when it
-    /// is not the distribution's primary archive.
-    fn target_label(&self, distro: &str, series: &str) -> String {
-        if self.label.eq_ignore_ascii_case(distro) {
-            format!("{distro}/{series}")
-        } else {
-            format!("{distro}/{series} ({})", self.label)
+impl StatusCredentials {
+    fn key(self) -> &'static str {
+        match self {
+            Self::HardwareToken => "hardware_token",
+            Self::OAuth => "oauth",
+            Self::None => "none",
         }
     }
 }
 
-/// Resolve `--archive`/`--ppa` to the Launchpad archive API URL.
-fn resolve_queue_archive(
-    client: &LaunchpadClient,
-    distro: &str,
-    archive: Option<&str>,
-    ppa: Option<&PpaRef>,
-) -> lpcli::error::Result<QueueArchive> {
-    if let Some(ppa) = ppa {
-        return ppa_queue_archive(client, distro, ppa);
-    }
-    let Some(archive) = archive else {
-        return Ok(primary_queue_archive(client, distro));
-    };
-    let value = archive.trim();
-    if value.is_empty() {
-        return Err(lpcli::error::LpError::Other(
-            "--archive must not be empty".to_string(),
-        ));
-    }
-    if let Some(ppa) = value.strip_prefix("ppa:") {
-        let ppa = parse_ppa_ref(ppa).map_err(lpcli::error::LpError::Other)?;
-        return ppa_queue_archive(client, distro, &ppa);
-    }
-    if value.starts_with("http://") || value.starts_with("https://") {
-        let label = archive_label(value).unwrap_or_else(|| value.trim_end_matches('/').to_string());
-        if label.starts_with('~') {
-            validate_ppa_distro(distro)?;
-        }
-        return Ok(QueueArchive {
-            api_url: value.to_string(),
-            label,
-        });
-    }
-    if value.contains("/+archive/") {
-        let trimmed = value.trim_matches('/');
-        let label = archive_label(trimmed).unwrap_or_else(|| trimmed.to_string());
-        if label.starts_with('~') {
-            validate_ppa_distro(distro)?;
-        }
-        return Ok(QueueArchive {
-            api_url: client.url(&format!("/{trimmed}")),
-            label,
-        });
-    }
-    if value.eq_ignore_ascii_case("primary") {
-        return Ok(primary_queue_archive(client, distro));
-    }
-    Ok(QueueArchive {
-        api_url: client.url(&format!("/{}/+archive/{}", distro, value)),
-        label: format!("{distro}/{value}"),
-    })
-}
-
-/// The primary archive for a distribution.
-fn primary_queue_archive(client: &LaunchpadClient, distro: &str) -> QueueArchive {
-    QueueArchive {
-        api_url: client.url(&format!("/{distro}/+archive/primary")),
-        label: distro.to_string(),
-    }
-}
-
-/// Reject PPA-shaped archive targets for non-Ubuntu distributions.
-fn validate_ppa_distro(distro: &str) -> lpcli::error::Result<()> {
-    if distro.eq_ignore_ascii_case("ubuntu") {
-        Ok(())
-    } else {
-        Err(lpcli::error::LpError::Other(format!(
-            "PPA archives are only available for Ubuntu, not '{distro}'"
-        )))
-    }
-}
-
-/// A PPA archive; PPAs live under the Ubuntu distribution.
-fn ppa_queue_archive(
-    client: &LaunchpadClient,
-    distro: &str,
-    ppa: &PpaRef,
-) -> lpcli::error::Result<QueueArchive> {
-    validate_ppa_distro(distro)?;
-    Ok(QueueArchive {
-        api_url: client.url(&ppa.api_path()),
-        label: ppa.label(),
-    })
-}
-
-/// Derive a short label from an archive reference or API URL.
+/// Build the `status` report.
 ///
-/// Recognises both `distro/+archive/name` and `~owner/+archive/distro/name`.
-fn archive_label(reference: &str) -> Option<String> {
-    let path = url::Url::parse(reference)
-        .ok()
-        .map(|url| url.path().to_string())
-        .unwrap_or_else(|| reference.to_string());
-    let segments: Vec<&str> = path
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect();
-    let archive_index = segments.iter().position(|segment| *segment == "+archive")?;
-    let distro = segments.get(archive_index.checked_sub(1)?)?;
-    if distro.starts_with('~') {
-        let name = segments.get(archive_index + 2)?;
-        return Some(format!("{distro}/{name}"));
-    }
-    let name = segments.get(archive_index + 1)?;
-    if name.eq_ignore_ascii_case("primary") {
-        Some((*distro).to_string())
+/// There is no Launchpad entry to pass through, so the JSON is an
+/// lpcli-defined object under the `lpcli` member. It names the account but
+/// never contains credentials, tokens, or grant secrets, which `AuthStatus`
+/// does not carry.
+fn status_report(server: &status::ServerStatus, auth: &status::AuthStatus) -> Report {
+    // Launchpad names have no leading `~`; the display form adds one.
+    let name = |account: &str| account.trim_start_matches('~').to_string();
+    let (credentials, account, verified) = if let Some(account) = &auth.hardware_account {
+        (StatusCredentials::HardwareToken, Some(name(account)), false)
+    } else if auth.logged_in {
+        let account = auth.username.as_deref().map(name);
+        let verified = account.is_some();
+        (StatusCredentials::OAuth, account, verified)
     } else {
-        Some(format!("{distro}/{name}"))
-    }
-}
-
-/// Add archive context to an HTTP 401/403 error from a queue mutation.
-fn queue_mutation_permission_error(
-    err: lpcli::error::LpError,
-    action: &str,
-    archive: &QueueArchive,
-    distro: &str,
-    series: &str,
-) -> lpcli::error::LpError {
-    match err {
-        lpcli::error::LpError::Api { status, message } if status == 401 || status == 403 => {
-            lpcli::error::LpError::Unauthorized(format!(
-                "You do not have queue-admin permission to {action} packages in {}. {message}",
-                archive.target_label(distro, series),
-            ))
-        }
-        other => other,
-    }
-}
-
-/// Add archive context to an HTTP 401/403 error from a queue read.
-fn queue_read_permission_error(
-    err: lpcli::error::LpError,
-    archive: &QueueArchive,
-    distro: &str,
-    series: &str,
-) -> lpcli::error::LpError {
-    match err {
-        lpcli::error::LpError::Api { status, message } if status == 401 || status == 403 => {
-            lpcli::error::LpError::Unauthorized(format!(
-                "You do not have permission to read the upload queue for {}. {message}",
-                archive.target_label(distro, series),
-            ))
-        }
-        other => other,
-    }
-}
-
-async fn handle_queue(
-    cmd: QueueCommand,
-    display: &Display,
-    policy: ReadAuthPolicy,
-    cache_timeout: std::time::Duration,
-) -> lpcli::error::Result<()> {
-    let client = read_client(policy, cache_timeout)?;
-    match cmd {
-        QueueCommand::Search {
-            pocket,
-            status,
-            name,
-            version,
-            exact_match,
-            archive,
-            ppa,
-            distro,
-            series,
-            limit,
-        } => {
-            let archive =
-                resolve_queue_archive(&client, &distro, archive.as_deref(), ppa.as_ref())?;
-            handle_queue_search(
-                display,
-                &client,
-                pocket,
-                status,
-                name,
-                version,
-                exact_match,
-                &archive,
-                distro,
-                series,
-                limit,
-            )
-            .await
-        }
-        QueueCommand::Download {
-            name,
-            version,
-            status,
-            arch,
-            archive,
-            ppa,
-            distro,
-            series,
-            output,
-        } => {
-            let archive =
-                resolve_queue_archive(&client, &distro, archive.as_deref(), ppa.as_ref())?;
-            handle_queue_download(
-                &client, name, version, status, arch, &archive, distro, series, output,
-            )
-            .await
-        }
-        QueueCommand::Info {
-            name,
-            version,
-            status,
-            arch,
-            archive,
-            ppa,
-            distro,
-            series,
-        } => {
-            let archive =
-                resolve_queue_archive(&client, &distro, archive.as_deref(), ppa.as_ref())?;
-            handle_queue_info(
-                display, &client, name, version, status, arch, &archive, distro, series,
-            )
-            .await
-        }
-        QueueCommand::Accept {
-            name,
-            version,
-            status,
-            arch,
-            archive,
-            ppa,
-            distro,
-            series,
-        } => {
-            let archive =
-                resolve_queue_archive(&client, &distro, archive.as_deref(), ppa.as_ref())?;
-            handle_queue_accept(
-                &client, name, version, status, arch, &archive, distro, series,
-            )
-            .await
-        }
-        QueueCommand::Reject {
-            name,
-            version,
-            status,
-            arch,
-            archive,
-            ppa,
-            comment,
-            distro,
-            series,
-        } => {
-            let archive =
-                resolve_queue_archive(&client, &distro, archive.as_deref(), ppa.as_ref())?;
-            handle_queue_reject(
-                &client, name, version, status, arch, &archive, comment, distro, series,
-            )
-            .await
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_queue_search(
-    display: &Display,
-    client: &LaunchpadClient,
-    pocket: Option<Pocket>,
-    status: Option<String>,
-    name: Option<String>,
-    version: Option<String>,
-    exact_match: bool,
-    archive: &QueueArchive,
-    distro: String,
-    series: Option<String>,
-    limit: u32,
-) -> lpcli::error::Result<()> {
-    // Determine the series to query. If not provided, resolve the current
-    // Ubuntu development series.
-    let series_name = match series {
-        Some(s) => canonical_series(&distro, &s).to_string(),
-        None => queue::get_devel_series_name(client, &distro).await?,
+        (StatusCredentials::None, None, false)
     };
 
-    let params = QueueSearchParams {
-        pocket: pocket.map(pocket_launchpad_name),
-        status: status.as_deref(),
-        name: name.as_deref(),
-        version: version.as_deref(),
-        exact_match,
-        archive: Some(&archive.api_url),
-        limit: Some(limit),
-    };
-
-    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params)
-        .await
-        .map_err(|err| queue_read_permission_error(err, archive, &distro, &series_name))?;
-
-    if uploads.is_empty() {
-        println!(
-            "{} No packages found in the queue for {} ({}).",
-            "ℹ".cyan().bold(),
-            series_name.bold(),
-            archive.label
-        );
-        return Ok(());
-    }
-
-    // Print a summary header.
-    println!(
-        "{} {} package(s) in queue for {} ({}):\n",
-        "●".green().bold(),
-        uploads.len(),
-        series_name.bold(),
-        archive.label,
-    );
-
-    let mut table = build_table(
-        display,
-        vec![
-            "Package",
-            "Version",
-            "Component",
-            "Pocket",
-            "Status",
-            "Archs",
-            "Created",
-        ],
-    );
-    for upload in &uploads {
-        let pkg_name = upload
-            .package_name
-            .as_deref()
-            .or(upload.display_name.as_deref())
-            .unwrap_or("—");
-        let pkg_version = upload
-            .package_version
-            .as_deref()
-            .or(upload.display_version.as_deref())
-            .unwrap_or("—");
-        let component = upload.component_name.as_deref().unwrap_or("—");
-        let pocket_str = upload.pocket.as_deref().unwrap_or("—");
-        let status_str = upload.status.as_deref().unwrap_or("—");
-        let arches = upload.display_arches.as_deref().unwrap_or("—");
-        let created = upload
-            .date_created
-            .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-            .unwrap_or_else(|| "—".to_string());
-
-        table.add_row(vec![
-            pkg_name.to_string(),
-            pkg_version.to_string(),
-            component.to_string(),
-            pocket_str.to_string(),
-            status_str.to_string(),
-            arches.to_string(),
-            created,
-        ]);
-    }
-    println!("{table}");
-
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_queue_download(
-    client: &LaunchpadClient,
-    name: String,
-    version: Option<String>,
-    status: String,
-    arch: QueueArch,
-    archive: &QueueArchive,
-    distro: String,
-    series: Option<String>,
-    output: String,
-) -> lpcli::error::Result<()> {
-    // Resolve the series (default: current development series).
-    let series_name = match series {
-        Some(s) => canonical_series(&distro, &s).to_string(),
-        None => queue::get_devel_series_name(client, &distro).await?,
-    };
-
-    // Search for the package in the queue.  Fetch multiple results so we can
-    // filter by architecture client-side.
-    let params = QueueSearchParams {
-        archive: Some(&archive.api_url),
-        status: Some(&status),
-        name: Some(&name),
-        version: version.as_deref(),
-        exact_match: true,
-        limit: Some(30),
-        ..Default::default()
-    };
-
-    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params)
-        .await
-        .map_err(|err| queue_read_permission_error(err, archive, &distro, &series_name))?;
-
-    // Find the first upload whose display_arches field contains the
-    // requested architecture.
-    let upload = uploads.iter().find(|u| {
-        u.display_arches
-            .as_deref()
-            .unwrap_or("")
-            .split(',')
-            .any(|a| a.trim().eq_ignore_ascii_case(arch.as_str()))
-    });
-
-    let upload = upload.ok_or_else(|| {
-        lpcli::error::LpError::NotFound(format!(
-            "No package '{}'{} [arch={}] found in queue with status '{}' for {}.",
-            name,
-            version
-                .as_ref()
-                .map(|v| format!(" ({v})"))
-                .unwrap_or_default(),
-            arch,
-            status,
-            archive.target_label(&distro, &series_name),
-        ))
-    })?;
-
-    let self_link = upload.self_link.as_deref().ok_or_else(|| {
-        lpcli::error::LpError::Other("Package upload has no self_link.".to_string())
-    })?;
-
-    // Collect file URLs based on what the upload contains (source, binary, or both).
-    let mut urls = Vec::new();
-    if upload.contains_source.unwrap_or(false) {
-        let source_urls = queue::get_source_file_urls(client, self_link).await?;
-        urls.extend(source_urls);
-    }
-    if upload.contains_build.unwrap_or(false) {
-        let binary_urls = queue::get_binary_file_urls(client, self_link).await?;
-        urls.extend(binary_urls);
-    }
-    // If neither flag was set (e.g. a copy), try both endpoints.
-    if urls.is_empty() {
-        let source_urls = queue::get_source_file_urls(client, self_link).await?;
-        urls.extend(source_urls);
-        if urls.is_empty() {
-            let binary_urls = queue::get_binary_file_urls(client, self_link).await?;
-            urls.extend(binary_urls);
+    let mut blocks = vec![Block::Heading("Authentication".into())];
+    match (credentials, &account) {
+        (StatusCredentials::HardwareToken, Some(account)) => {
+            blocks.push(Block::Status(
+                Level::Ok,
+                vec![
+                    Span::Text("Hardware-bound grant stored for ".into()),
+                    Span::Name(format!("~{account}")),
+                ],
+            ));
+            blocks.push(Block::Note(vec![Span::Text(
+                "Not verified with Launchpad, which would need a touch of your security key."
+                    .into(),
+            )]));
         }
-    }
-
-    if urls.is_empty() {
-        println!(
-            "{} No files found for '{}' [arch={}] in the queue for {}.",
-            "ℹ".cyan().bold(),
-            name.bold(),
-            arch,
-            archive.target_label(&distro, &series_name),
-        );
-        return Ok(());
-    }
-
-    let output_dir = std::path::Path::new(&output);
-    println!(
-        "{} Downloading {} file(s) for {} ({}) …",
-        "↓".green().bold(),
-        urls.len(),
-        name.bold(),
-        upload.package_version.as_deref().unwrap_or("?"),
-    );
-
-    let results = download_public_files(&urls, output_dir).await?;
-
-    let mut success_count = 0u32;
-    let mut fail_count = 0u32;
-    for outcome in &results {
-        match outcome {
-            download::DownloadOutcome::Success(_) => {
-                success_count += 1;
-            }
-            download::DownloadOutcome::Failed { filename, error } => {
-                eprintln!("  {} {} — {}", "✗".red().bold(), filename.bold(), error);
-                fail_count += 1;
-            }
-        }
-    }
-
-    if fail_count > 0 {
-        println!(
-            "\n{} {} file(s) downloaded from {}, {} failed.",
-            "●".yellow().bold(),
-            success_count,
-            archive.target_label(&distro, &series_name),
-            fail_count,
-        );
-    } else {
-        println!(
-            "\n{} Downloaded {} file(s) from {} to '{}'.",
-            "●".green().bold(),
-            success_count,
-            archive.target_label(&distro, &series_name),
-            output_dir.display(),
-        );
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Queue accept handler
-// ---------------------------------------------------------------------------
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_queue_accept(
-    client: &LaunchpadClient,
-    name: String,
-    version: Option<String>,
-    status: String,
-    arch: QueueArch,
-    archive: &QueueArchive,
-    distro: String,
-    series: Option<String>,
-) -> lpcli::error::Result<()> {
-    // Resolve the series (default: current development series).
-    let series_name = match series {
-        Some(s) => canonical_series(&distro, &s).to_string(),
-        None => queue::get_devel_series_name(client, &distro).await?,
-    };
-
-    // Search for the package in the queue.
-    let params = QueueSearchParams {
-        archive: Some(&archive.api_url),
-        status: Some(&status),
-        name: Some(&name),
-        version: version.as_deref(),
-        exact_match: true,
-        limit: Some(30),
-        ..Default::default()
-    };
-
-    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params)
-        .await
-        .map_err(|err| queue_read_permission_error(err, archive, &distro, &series_name))?;
-
-    // Find uploads whose display_arches field contains the requested architecture.
-    let matching: Vec<_> = uploads
-        .iter()
-        .filter(|u| {
-            u.display_arches
-                .as_deref()
-                .unwrap_or("")
-                .split(',')
-                .any(|a| a.trim().eq_ignore_ascii_case(arch.as_str()))
-        })
-        .collect();
-
-    // Only a single package may be accepted at a time. If multiple results
-    // match, require the user to disambiguate with --version.
-    if matching.len() > 1 && version.is_none() {
-        let versions: Vec<String> = matching
-            .iter()
-            .filter_map(|u| u.package_version.clone())
-            .collect();
-        return Err(lpcli::error::LpError::Other(format!(
-            "Multiple uploads match '{}' [arch={}] with status '{}' in {}: {}. \
-             Use --version to select exactly one.",
-            name,
-            arch,
-            status,
-            archive.target_label(&distro, &series_name),
-            versions.join(", "),
-        )));
-    }
-
-    let upload = matching.first().ok_or_else(|| {
-        lpcli::error::LpError::NotFound(format!(
-            "No package '{}'{} [arch={}] found in queue with status '{}' for {}.",
-            name,
-            version
-                .as_ref()
-                .map(|v| format!(" ({v})"))
-                .unwrap_or_default(),
-            arch,
-            status,
-            archive.target_label(&distro, &series_name),
-        ))
-    })?;
-
-    let self_link = upload.self_link.as_deref().ok_or_else(|| {
-        lpcli::error::LpError::Other("Package upload has no self_link.".to_string())
-    })?;
-
-    // Call acceptFromQueue.
-    queue::accept_from_queue(client, self_link)
-        .await
-        .map_err(|err| {
-            queue_mutation_permission_error(err, "accept", archive, &distro, &series_name)
-        })?;
-
-    println!(
-        "{} Accepted {} ({}) [{}] in {}.",
-        "✓".green().bold(),
-        upload.package_name.as_deref().unwrap_or("?").bold(),
-        upload.package_version.as_deref().unwrap_or("?"),
-        upload.display_arches.as_deref().unwrap_or("?"),
-        archive.target_label(&distro, &series_name),
-    );
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Queue reject handler
-// ---------------------------------------------------------------------------
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_queue_reject(
-    client: &LaunchpadClient,
-    name: String,
-    version: Option<String>,
-    status: String,
-    arch: QueueArch,
-    archive: &QueueArchive,
-    comment: Option<String>,
-    distro: String,
-    series: Option<String>,
-) -> lpcli::error::Result<()> {
-    // Resolve the series (default: current development series).
-    let series_name = match series {
-        Some(s) => canonical_series(&distro, &s).to_string(),
-        None => queue::get_devel_series_name(client, &distro).await?,
-    };
-
-    // Search for the package in the queue.
-    let params = QueueSearchParams {
-        archive: Some(&archive.api_url),
-        status: Some(&status),
-        name: Some(&name),
-        version: version.as_deref(),
-        exact_match: true,
-        limit: Some(30),
-        ..Default::default()
-    };
-
-    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params)
-        .await
-        .map_err(|err| queue_read_permission_error(err, archive, &distro, &series_name))?;
-
-    // Find uploads whose display_arches field contains the requested architecture.
-    let matching: Vec<_> = uploads
-        .iter()
-        .filter(|u| {
-            u.display_arches
-                .as_deref()
-                .unwrap_or("")
-                .split(',')
-                .any(|a| a.trim().eq_ignore_ascii_case(arch.as_str()))
-        })
-        .collect();
-
-    // Only a single package may be rejected at a time. If multiple results
-    // match, require the user to disambiguate with --version.
-    if matching.len() > 1 && version.is_none() {
-        let versions: Vec<String> = matching
-            .iter()
-            .filter_map(|u| u.package_version.clone())
-            .collect();
-        return Err(lpcli::error::LpError::Other(format!(
-            "Multiple uploads match '{}' [arch={}] with status '{}' in {}: {}. \
-             Use --version to select exactly one.",
-            name,
-            arch,
-            status,
-            archive.target_label(&distro, &series_name),
-            versions.join(", "),
-        )));
-    }
-
-    let upload = matching.first().ok_or_else(|| {
-        lpcli::error::LpError::NotFound(format!(
-            "No package '{}'{} [arch={}] found in queue with status '{}' for {}.",
-            name,
-            version
-                .as_ref()
-                .map(|v| format!(" ({v})"))
-                .unwrap_or_default(),
-            arch,
-            status,
-            archive.target_label(&distro, &series_name),
-        ))
-    })?;
-
-    let self_link = upload.self_link.as_deref().ok_or_else(|| {
-        lpcli::error::LpError::Other("Package upload has no self_link.".to_string())
-    })?;
-
-    // Call rejectFromQueue.
-    queue::reject_from_queue(client, self_link, comment.as_deref())
-        .await
-        .map_err(|err| {
-            queue_mutation_permission_error(err, "reject", archive, &distro, &series_name)
-        })?;
-
-    println!(
-        "{} Rejected {} ({}) [{}] in {}.",
-        "✗".red().bold(),
-        upload.package_name.as_deref().unwrap_or("?").bold(),
-        upload.package_version.as_deref().unwrap_or("?"),
-        upload.display_arches.as_deref().unwrap_or("?"),
-        archive.target_label(&distro, &series_name),
-    );
-    if let Some(ref c) = comment {
-        println!("  Comment: {c}");
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Queue info handler
-// ---------------------------------------------------------------------------
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_queue_info(
-    display: &Display,
-    client: &LaunchpadClient,
-    name: String,
-    version: Option<String>,
-    status: String,
-    arch: QueueArch,
-    archive: &QueueArchive,
-    distro: String,
-    series: Option<String>,
-) -> lpcli::error::Result<()> {
-    // Resolve the series (default: current development series).
-    let series_name = match series {
-        Some(s) => canonical_series(&distro, &s).to_string(),
-        None => queue::get_devel_series_name(client, &distro).await?,
-    };
-
-    // Search for the package in the queue.
-    let params = QueueSearchParams {
-        archive: Some(&archive.api_url),
-        status: Some(&status),
-        name: Some(&name),
-        version: version.as_deref(),
-        exact_match: true,
-        limit: Some(30),
-        ..Default::default()
-    };
-
-    let uploads = queue::get_package_uploads(client, &distro, &series_name, &params)
-        .await
-        .map_err(|err| queue_read_permission_error(err, archive, &distro, &series_name))?;
-
-    // Find the first upload whose display_arches field contains the
-    // requested architecture.
-    let upload = uploads.iter().find(|u| {
-        u.display_arches
-            .as_deref()
-            .unwrap_or("")
-            .split(',')
-            .any(|a| a.trim().eq_ignore_ascii_case(arch.as_str()))
-    });
-
-    let upload = upload.ok_or_else(|| {
-        lpcli::error::LpError::NotFound(format!(
-            "No package '{}'{} [arch={}] found in queue with status '{}' for {}.",
-            name,
-            version
-                .as_ref()
-                .map(|v| format!(" ({v})"))
-                .unwrap_or_default(),
-            arch,
-            status,
-            archive.target_label(&distro, &series_name),
-        ))
-    })?;
-
-    let self_link = upload.self_link.as_deref().ok_or_else(|| {
-        lpcli::error::LpError::Other("Package upload has no self_link.".to_string())
-    })?;
-
-    // Display header info about the upload.
-    println!(
-        "{} {} ({}) — {} [{}]",
-        "●".cyan().bold(),
-        upload.package_name.as_deref().unwrap_or("?").bold(),
-        upload.package_version.as_deref().unwrap_or("?"),
-        upload.status.as_deref().unwrap_or("?"),
-        upload.display_arches.as_deref().unwrap_or("?"),
-    );
-    if !archive.label.eq_ignore_ascii_case(&distro) {
-        println!("  Archive:   {}", archive.label);
-    }
-    if let Some(component) = &upload.component_name {
-        println!("  Component: {component}");
-    }
-    if let Some(pocket) = &upload.pocket {
-        println!("  Pocket:    {pocket}");
-    }
-    if let Some(date) = &upload.date_created {
-        println!("  Created:   {}", date.format("%Y-%m-%d %H:%M UTC"));
-    }
-
-    // If the package is rejected, show the rejection reason from the logs.
-    if upload.status.as_deref() == Some("Rejected")
-        && let Some(logs_url) = &upload.logs_collection_link
-        && let Ok(logs) = queue::get_upload_logs(client, logs_url).await
-    {
-        // Find the log entry where new_status is "Rejected".
-        let rejection = logs
-            .iter()
-            .find(|log| log.new_status.as_deref() == Some("Rejected"));
-        if let Some(log) = rejection {
-            if let Some(comment) = &log.comment
-                && !comment.is_empty()
-            {
-                println!("  {} {}", "Reason:".red().bold(), comment);
-            }
-            if let Some(date) = &log.date_created {
-                println!("  Rejected:  {}", date.format("%Y-%m-%d %H:%M UTC"));
-            }
-        }
-    }
-
-    // Fetch binary properties (the .deb/.ddeb package details).
-    let binaries = queue::get_binary_properties(client, self_link).await?;
-
-    if binaries.is_empty() {
-        println!(
-            "\n{} No binary packages (.deb/.ddeb) found for this upload.",
-            "ℹ".cyan().bold(),
-        );
-        return Ok(());
-    }
-
-    // Separate .deb and .ddeb packages.
-    let debs: Vec<_> = binaries.iter().filter(|b| !b.is_debug_package()).collect();
-    let ddebs: Vec<_> = binaries.iter().filter(|b| b.is_debug_package()).collect();
-
-    // Display .deb packages in a table.
-    if !debs.is_empty() {
-        println!(
-            "\n{} Binary packages ({} .deb):",
-            "▸".green().bold(),
-            debs.len(),
-        );
-        let mut table = build_table(
-            display,
+        (StatusCredentials::OAuth, Some(account)) => blocks.push(Block::Status(
+            Level::Ok,
             vec![
-                "Package",
-                "Version",
-                "Architecture",
-                "Component",
-                "Section",
-                "Priority",
+                Span::Text("Logged in as ".into()),
+                Span::Name(format!("~{account}")),
             ],
-        );
-        for b in &debs {
-            table.add_row(vec![
-                b.name.as_deref().unwrap_or("?"),
-                b.version.as_deref().unwrap_or("?"),
-                b.architecture.as_deref().unwrap_or("?"),
-                b.component.as_deref().unwrap_or("?"),
-                b.section.as_deref().unwrap_or("?"),
-                b.priority.as_deref().unwrap_or("?"),
-            ]);
+        )),
+        (StatusCredentials::OAuth, None) | (StatusCredentials::HardwareToken, None) => {
+            blocks.push(Block::Status(
+                Level::Warning,
+                vec![Span::Text(
+                    "Credentials found (could not verify with server)".into(),
+                )],
+            ));
         }
-        println!("{table}");
-    }
-
-    // Display .ddeb packages in a table.
-    if !ddebs.is_empty() {
-        println!(
-            "\n{} Debug symbol packages ({} .ddeb):",
-            "▸".yellow().bold(),
-            ddebs.len(),
-        );
-        let mut table = build_table(
-            display,
+        (StatusCredentials::None, _) => blocks.push(Block::Status(
+            Level::Error,
             vec![
-                "Package",
-                "Version",
-                "Architecture",
-                "Component",
-                "Section",
-                "Priority",
+                Span::Text("Not logged in. Run ".into()),
+                Span::Command("lpcli login".into()),
+                Span::Text(" to authenticate.".into()),
             ],
-        );
-        for b in &ddebs {
-            table.add_row(vec![
-                b.name.as_deref().unwrap_or("?"),
-                b.version.as_deref().unwrap_or("?"),
-                b.architecture.as_deref().unwrap_or("?"),
-                b.component.as_deref().unwrap_or("?"),
-                b.section.as_deref().unwrap_or("?"),
-                b.priority.as_deref().unwrap_or("?"),
-            ]);
+        )),
+    }
+
+    blocks.push(Block::Break);
+    blocks.push(Block::Heading("Launchpad API Server".into()));
+    if server.reachable {
+        blocks.push(Block::Status(Level::Ok, vec![Span::Text("Online".into())]));
+        if let Some(link) = &server.resource_type_link {
+            blocks.push(Block::Field("Endpoint", link.clone()));
         }
-        println!("{table}");
-    }
-
-    println!(
-        "\n{} Total: {} binary package(s) ({} .deb, {} .ddeb)",
-        "●".green().bold(),
-        binaries.len(),
-        debs.len(),
-        ddebs.len(),
-    );
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Package download handler
-// ---------------------------------------------------------------------------
-
-async fn handle_package_download(
-    client: &LaunchpadClient,
-    name: String,
-    version: Option<String>,
-    series: String,
-    distro: String,
-    output: String,
-) -> lpcli::error::Result<()> {
-    // Search for the published source package (exact match to avoid
-    // substring hits like "libtest-valgrind-perl" when searching for "valgrind").
-    let params = SourceSearchParams {
-        source_name: Some(&name),
-        version: version.as_deref(),
-        status: Some("Published"),
-        exact_match: true,
-        ..Default::default()
-    };
-
-    let pubs = packages::search_published_sources(client, &distro, &series, &params).await?;
-
-    let publication = pubs.first().ok_or_else(|| {
-        lpcli::error::LpError::NotFound(format!(
-            "No published source package '{}'{} found in {}/{}.",
-            name,
-            version
-                .as_ref()
-                .map(|v| format!(" ({v})"))
-                .unwrap_or_default(),
-            distro,
-            series,
-        ))
-    })?;
-
-    let self_link = publication.self_link.as_deref().ok_or_else(|| {
-        lpcli::error::LpError::Other("Source package publication has no self_link.".to_string())
-    })?;
-
-    // Get source file URLs from the publication record.
-    let urls = packages::get_source_file_urls(client, self_link).await?;
-
-    if urls.is_empty() {
-        println!(
-            "{} No source files found for '{}' in {}/{}.",
-            "ℹ".cyan().bold(),
-            name.bold(),
-            distro,
-            series,
-        );
-        return Ok(());
-    }
-
-    let output_dir = std::path::Path::new(&output);
-    println!(
-        "{} Downloading {} file(s) for {} ({}) …",
-        "↓".green().bold(),
-        urls.len(),
-        name.bold(),
-        publication.source_package_version.as_deref().unwrap_or("?"),
-    );
-
-    let results = download_public_files(&urls, output_dir).await?;
-
-    let mut success_count = 0u32;
-    let mut fail_count = 0u32;
-    for outcome in &results {
-        match outcome {
-            download::DownloadOutcome::Success(_) => {
-                success_count += 1;
-            }
-            download::DownloadOutcome::Failed { filename, error } => {
-                eprintln!("  {} {} — {}", "✗".red().bold(), filename.bold(), error);
-                fail_count += 1;
-            }
-        }
-    }
-
-    if fail_count > 0 {
-        println!(
-            "\n{} {} file(s) downloaded, {} failed.",
-            "●".yellow().bold(),
-            success_count,
-            fail_count,
-        );
     } else {
-        println!(
-            "\n{} Downloaded {} file(s) to '{}'.",
-            "●".green().bold(),
-            success_count,
-            output_dir.display(),
-        );
+        blocks.push(Block::Status(
+            Level::Error,
+            vec![Span::Text("Unreachable".into())],
+        ));
+        if let Some(code) = server.http_status {
+            blocks.push(Block::Field("HTTP status", code.to_string()));
+        }
+        if let Some(error) = &server.error {
+            blocks.push(Block::Field("Reason", error.clone()));
+        }
     }
-    Ok(())
-}
 
-/// Format a byte size in a human-friendly way using binary prefixes.
-#[allow(dead_code)]
-fn format_size(bytes: u64) -> String {
-    match unit_prefix::NumberPrefix::binary(bytes as f64) {
-        unit_prefix::NumberPrefix::Standalone(bytes) => format!("{bytes} B"),
-        unit_prefix::NumberPrefix::Prefixed(prefix, n) => format!("{n:.1} {prefix}B"),
+    let json = serde_json::json!({
+        "lpcli": {
+            "authentication": {
+                "credentials": credentials.key(),
+                "account": account,
+                "verified": verified,
+            },
+            "server": {
+                "reachable": server.reachable,
+                "http_status": server.http_status,
+                "resource_type_link": server.resource_type_link,
+                "error": server.error,
+            },
+        }
+    });
+    let column = |key| Column { label: key, key };
+    let records = Records {
+        columns: [
+            "credentials",
+            "account",
+            "verified",
+            "reachable",
+            "http_status",
+            "resource_type_link",
+            "error",
+        ]
+        .into_iter()
+        .map(column)
+        .collect(),
+        rows: vec![vec![
+            Some(credentials.key().to_string()),
+            account,
+            Some(verified.to_string()),
+            Some(server.reachable.to_string()),
+            server.http_status.map(|code| code.to_string()),
+            server.resource_type_link.clone(),
+            server.error.clone(),
+        ]],
+    };
+    Report {
+        blocks,
+        json,
+        records,
     }
 }
 
@@ -6470,9 +2955,12 @@ fn classic_authenticated_client() -> lpcli::error::Result<LaunchpadClient> {
     Ok(LaunchpadClient::new(Some(creds)))
 }
 
-/// The USB security key, prompting on the terminal.
+/// The USB security key, prompting on the terminal unless `--no-input` is in
+/// effect. Touch notices are written to stderr either way.
 fn usb_authenticator() -> Arc<dyn Authenticator> {
-    Arc::new(UsbAuthenticator::default())
+    Arc::new(UsbAuthenticator::new(security_key_interaction(
+        prompts_disabled(),
+    )))
 }
 
 /// Build a [`comfy_table::Table`] with headers and the resolved display width.
@@ -6484,17 +2972,247 @@ fn build_table(display: &Display, headers: Vec<&str>) -> display::DisplayTable {
 // Bug watch and remote bug tracker display helpers
 // ---------------------------------------------------------------------------
 
-/// Serialize remote bug trackers as a pure JSON array for `--json` output.
+// ---------------------------------------------------------------------------
+// Output-layer reports
+// ---------------------------------------------------------------------------
+
+/// Commands whose results support the requested structured output mode.
+fn supports_output_mode(command: &Command, mode: OutputMode) -> bool {
+    match mode {
+        OutputMode::Rich | OutputMode::Plain => true,
+        OutputMode::Json => supports_json_output(command),
+        OutputMode::Tsv => supports_tsv_output(command),
+    }
+}
+
+/// Commands with JSON output. Domain ports extend this list.
+fn supports_json_output(command: &Command) -> bool {
+    match command {
+        Command::Status | Command::Schema => true,
+        Command::Bug(command) => bug_supports_json(command),
+        Command::Person(_)
+        | Command::Package(_)
+        | Command::Project(_)
+        | Command::Cve(_)
+        | Command::Spec(_)
+        | Command::Question(_)
+        | Command::Translation(_) => read_domain_supports_json(command),
+        Command::Git(command) => git_supports_json(command),
+        Command::Queue(command) => queue_supports_json(command),
+        Command::Webhook(_) | Command::Snap(_) | Command::AccessToken(_) => {
+            webhook_snap_token_supports_json(command)
+        }
+        Command::Login(_) | Command::Logout(_) | Command::HardwareToken(_) => {
+            identity_supports_json(command)
+        }
+        Command::Skills => false,
+    }
+}
+
+/// Commands with one-record-per-line TSV output. Domain ports extend this list.
+fn supports_tsv_output(command: &Command) -> bool {
+    match command {
+        Command::Status => true,
+        Command::Bug(command) => bug_supports_tsv(command),
+        Command::Person(_)
+        | Command::Package(_)
+        | Command::Project(_)
+        | Command::Cve(_)
+        | Command::Spec(_)
+        | Command::Question(_)
+        | Command::Translation(_) => read_domain_supports_tsv(command),
+        Command::Git(command) => git_supports_tsv(command),
+        Command::Queue(command) => queue_supports_tsv(command),
+        Command::Webhook(_) | Command::Snap(_) | Command::AccessToken(_) => {
+            webhook_snap_token_supports_tsv(command)
+        }
+        Command::Login(_) | Command::Logout(_) | Command::HardwareToken(_) => {
+            identity_supports_tsv(command)
+        }
+        Command::Schema | Command::Skills => false,
+    }
+}
+
+fn is_mutation(command: &Command) -> bool {
+    !supports_public_reads(command)
+        && !matches!(
+            command,
+            Command::Status
+                | Command::Schema
+                | Command::Skills
+                | Command::Login(_)
+                | Command::Logout(_)
+                | Command::HardwareToken(
+                    HardwareTokenCommand::Keys
+                        | HardwareTokenCommand::Show
+                        | HardwareTokenCommand::ClearCache
+                )
+                | Command::Webhook(WebhookCommand::List { .. } | WebhookCommand::Deliveries { .. })
+                | Command::AccessToken(
+                    AccessTokenCommand::List { .. } | AccessTokenCommand::ListGit { .. }
+                )
+        )
+}
+
+fn requires_prompt(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Login(LoginArgs {
+            hardware_token: false,
+            ..
+        }) | Command::HardwareToken(HardwareTokenCommand::Register { .. })
+    )
+}
+
+const JSON_CONTRACT_VERSION: u32 = 1;
+
+fn schema_report() -> Report {
+    Report {
+        blocks: vec![
+            Block::Field("JSON contract version", JSON_CONTRACT_VERSION.to_string()),
+            Block::Field(
+                "Documentation",
+                "https://github.com/canonical/lpcli/blob/main/docs/json-output.md".into(),
+            ),
+        ],
+        json: serde_json::json!({"lpcli": {
+            "json_contract_version": JSON_CONTRACT_VERSION,
+            "documentation": "https://github.com/canonical/lpcli/blob/main/docs/json-output.md",
+        }}),
+        records: Records {
+            columns: Vec::new(),
+            rows: Vec::new(),
+        },
+    }
+}
+
+/// Build the `bug search` report. The JSON is the Launchpad result page,
+/// unmodified, including `next_collection_link` when `--limit` cut the
+/// results short and `total_size_link` when Launchpad sends one.
+fn bug_search_report(page: &Raw<Collection<bugs::BugTask>>) -> Report {
+    let rows = page
+        .value
+        .entries
+        .iter()
+        .map(|task| {
+            vec![
+                // The bug number is the last path segment of bug_link, e.g.
+                // "https://api.launchpad.net/devel/bugs/12345" -> "12345".
+                task.bug_link
+                    .as_deref()
+                    .and_then(|url| url.rsplit('/').next())
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string),
+                task.title.clone(),
+                task.status.clone(),
+                task.bug_target_display_name.clone(),
+            ]
+        })
+        .collect();
+    Report {
+        blocks: vec![Block::List {
+            noun: Noun {
+                singular: "bug",
+                plural: "bugs",
+            },
+            empty: "No bugs found.".into(),
+            hint: None,
+        }],
+        json: page.raw.clone(),
+        records: Records {
+            columns: vec![
+                Column {
+                    label: "ID",
+                    key: "id",
+                },
+                Column {
+                    label: "Title",
+                    key: "title",
+                },
+                Column {
+                    label: "Status",
+                    key: "status",
+                },
+                Column {
+                    label: "Target",
+                    key: "bug_target_display_name",
+                },
+            ],
+            rows,
+        },
+    }
+}
+
+/// Build the `bug remote-bug-trackers` report.
 ///
-/// The [`bugs::BugTracker`] fields serialize in declaration order with stable
-/// keys (absent fields serialize as null), and the array is sorted by tracker
-/// name so the output is deterministic across runs. Sorting borrows the
-/// trackers instead of cloning them. The result must be printed verbatim:
-/// callers must not add table or summary prose around it.
-fn trackers_to_json(trackers: &[bugs::BugTracker]) -> lpcli::error::Result<String> {
-    let mut sorted: Vec<&bugs::BugTracker> = trackers.iter().collect();
-    sorted.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(serde_json::to_string_pretty(&sorted)?)
+/// The JSON uses Launchpad's collection shape with every tracker exactly as
+/// Launchpad returned it, in Launchpad's order. The search runs locally, so
+/// no Launchpad link can continue the filtered list: `next_collection_link`
+/// is never included, and `total_size` (the number of matches) only when
+/// every page was scanned.
+fn remote_bug_trackers_report(found: &bugs::BugTrackerSearch, searched: bool) -> Report {
+    let entries: Vec<serde_json::Value> = found
+        .trackers
+        .iter()
+        .map(|tracker| tracker.raw.clone())
+        .collect();
+    let mut json = serde_json::Map::new();
+    if found.complete {
+        json.insert("total_size".into(), entries.len().into());
+    }
+    json.insert("start".into(), 0.into());
+    json.insert("entries".into(), entries.into());
+
+    let rows = found
+        .trackers
+        .iter()
+        .map(|tracker| {
+            let tracker = &tracker.value;
+            vec![
+                tracker.name.clone(),
+                tracker.title.clone(),
+                tracker.bug_tracker_type.clone(),
+                tracker.base_url.clone(),
+            ]
+        })
+        .collect();
+    let empty = if searched {
+        "No remote bug trackers matched the search."
+    } else {
+        "No remote bug trackers found."
+    };
+    Report {
+        blocks: vec![Block::List {
+            noun: Noun {
+                singular: "remote bug tracker",
+                plural: "remote bug trackers",
+            },
+            empty: empty.into(),
+            hint: Some("Use the Name value with --bug-tracker.".into()),
+        }],
+        json: json.into(),
+        records: Records {
+            columns: vec![
+                Column {
+                    label: "Name",
+                    key: "name",
+                },
+                Column {
+                    label: "Title",
+                    key: "title",
+                },
+                Column {
+                    label: "Type",
+                    key: "bug_tracker_type",
+                },
+                Column {
+                    label: "Base URL",
+                    key: "base_url",
+                },
+            ],
+            rows,
+        },
+    }
 }
 
 /// Best-effort display name for a bug task in watch-link listings.
@@ -6552,508 +3270,6 @@ fn watch_linked_tasks_cell(
                 .join(", ")
         })
         .unwrap_or_else(|| "orphan".to_string())
-}
-
-// ---------------------------------------------------------------------------
-// Target / series filter types and task collection helper
-// ---------------------------------------------------------------------------
-
-/// Split a comma-separated string into a trimmed, non-empty list of strings.
-fn parse_comma_separated(s: &str) -> Vec<String> {
-    s.split(',')
-        .map(|p| p.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-/// Which targets to apply a bug-task operation to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TargetFilter {
-    /// Exactly one named target.
-    One(String),
-    /// An explicit set of named targets (OR logic within the set).
-    Many(Vec<String>),
-    /// Every target that already has a task on this bug.
-    All,
-}
-
-impl TargetFilter {
-    fn from_args(target: Option<String>, many_targets: Option<String>, all_targets: bool) -> Self {
-        match (all_targets, many_targets, target) {
-            (true, _, _) => TargetFilter::All,
-            (false, Some(many), _) => TargetFilter::Many(parse_comma_separated(&many)),
-            (false, None, Some(t)) => TargetFilter::One(t),
-            // Clap's required ArgGroup prevents this branch; defensive fallback.
-            (false, None, None) => TargetFilter::All,
-        }
-    }
-}
-
-/// Which Ubuntu series to apply a bug-task operation to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SeriesFilter {
-    /// Exactly one named series.
-    One(String),
-    /// An explicit set of named series (OR logic within the set).
-    Many(Vec<String>),
-    /// Every series that already has a task on this bug.
-    All,
-    /// Only series-less tasks (no Ubuntu series component in the target link).
-    NoSeries,
-}
-
-impl SeriesFilter {
-    fn from_args(
-        series: Option<String>,
-        many_series: Option<String>,
-        all_series: bool,
-        no_series: bool,
-    ) -> Self {
-        match (all_series, no_series, many_series, series) {
-            (true, _, _, _) => SeriesFilter::All,
-            (_, true, _, _) => SeriesFilter::NoSeries,
-            (false, false, Some(many), _) => SeriesFilter::Many(parse_comma_separated(&many)),
-            (false, false, None, Some(s)) => SeriesFilter::One(s),
-            // Clap's required ArgGroup prevents this branch; defensive fallback.
-            (false, false, None, None) => SeriesFilter::All,
-        }
-    }
-}
-
-/// Return all bug tasks that match `target_filter` AND `series_filter`.
-///
-/// Every explicitly named target and series is validated against what is
-/// actually present on the bug before filtering, so callers receive an
-/// actionable error message instead of a silent empty result.
-///
-/// When `SeriesFilter::All` is used, both series-specific tasks
-/// (e.g. `/ubuntu/noble/+source/pkg`) and series-less tasks
-/// (e.g. the distribution-level `/ubuntu/+source/pkg` row or an upstream
-/// project task) are included.  `SeriesFilter::NoSeries` matches only
-/// series-less tasks.
-fn collect_matching_tasks<'a>(
-    tasks: &'a [bugs::BugTask],
-    bug_id: u64,
-    target_filter: &TargetFilter,
-    series_filter: &SeriesFilter,
-) -> std::result::Result<Vec<&'a bugs::BugTask>, lpcli::error::LpError> {
-    // Parse every task's target link once.
-    let parsed: Vec<(&bugs::BugTask, String, Option<String>)> = tasks
-        .iter()
-        .map(|t| {
-            let (tgt, ser) = bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
-            (t, tgt, ser)
-        })
-        .collect();
-
-    // Sorted, de-duplicated lists of targets and series present on this bug —
-    // used to produce helpful "did you mean…?" error messages.
-    let available_targets: Vec<String> = parsed
-        .iter()
-        .filter(|(_, t, _)| !t.is_empty())
-        .map(|(_, t, _)| t.clone())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-
-    let available_series: Vec<String> = parsed
-        .iter()
-        .filter_map(|(_, _, ser)| ser.clone())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-
-    // Validate every explicitly named target.
-    match target_filter {
-        TargetFilter::One(t) => {
-            if !available_targets.iter().any(|a| a.eq_ignore_ascii_case(t)) {
-                return Err(lpcli::error::LpError::NotFound(format!(
-                    "Target '{t}' not found on bug #{bug_id}. \
-                     Available targets: {}.",
-                    available_targets.join(", ")
-                )));
-            }
-        }
-        TargetFilter::Many(ts) => {
-            let missing: Vec<&str> = ts
-                .iter()
-                .filter(|t| !available_targets.iter().any(|a| a.eq_ignore_ascii_case(t)))
-                .map(String::as_str)
-                .collect();
-            if !missing.is_empty() {
-                return Err(lpcli::error::LpError::NotFound(format!(
-                    "Targets not found on bug #{bug_id}: {}. \
-                     Available targets: {}.",
-                    missing.join(", "),
-                    available_targets.join(", ")
-                )));
-            }
-        }
-        TargetFilter::All => {}
-    }
-
-    // Validate every explicitly named series.
-    match series_filter {
-        SeriesFilter::One(s) => {
-            if !available_series.iter().any(|a| a.eq_ignore_ascii_case(s)) {
-                return Err(lpcli::error::LpError::NotFound(format!(
-                    "Series '{s}' not found on bug #{bug_id}. \
-                     Available series: {}.",
-                    available_series.join(", ")
-                )));
-            }
-        }
-        SeriesFilter::Many(ss) => {
-            let missing: Vec<&str> = ss
-                .iter()
-                .filter(|s| !available_series.iter().any(|a| a.eq_ignore_ascii_case(s)))
-                .map(String::as_str)
-                .collect();
-            if !missing.is_empty() {
-                return Err(lpcli::error::LpError::NotFound(format!(
-                    "Series not found on bug #{bug_id}: {}. \
-                     Available series: {}.",
-                    missing.join(", "),
-                    available_series.join(", ")
-                )));
-            }
-        }
-        SeriesFilter::All => {}
-        SeriesFilter::NoSeries => {}
-    }
-
-    // Apply the combined filter (target AND series must both match).
-    let matched: Vec<&bugs::BugTask> = parsed
-        .iter()
-        .filter(|(_, task_tgt, task_ser)| {
-            let target_ok = match target_filter {
-                TargetFilter::One(t) => task_tgt.eq_ignore_ascii_case(t),
-                TargetFilter::Many(ts) => ts.iter().any(|t| task_tgt.eq_ignore_ascii_case(t)),
-                TargetFilter::All => true,
-            };
-            let series_ok = match series_filter {
-                SeriesFilter::One(s) => task_ser
-                    .as_deref()
-                    .map(|ts| ts.eq_ignore_ascii_case(s))
-                    .unwrap_or(false),
-                SeriesFilter::Many(ss) => task_ser
-                    .as_deref()
-                    .map(|ts| ss.iter().any(|s| ts.eq_ignore_ascii_case(s)))
-                    .unwrap_or(false),
-                SeriesFilter::All => true,
-                SeriesFilter::NoSeries => task_ser.is_none(),
-            };
-            target_ok && series_ok
-        })
-        .map(|(t, _, _)| *t)
-        .collect();
-
-    if matched.is_empty() {
-        return Err(lpcli::error::LpError::NotFound(format!(
-            "No tasks found matching the given target and series filters on bug #{bug_id}."
-        )));
-    }
-
-    Ok(matched)
-}
-
-/// Find a single bug task from a list of tasks matching the given criteria.
-///
-/// If `task_url` is provided, matches directly by `self_link`.
-/// Otherwise, filters by `target` (matching package name, distro in URL, or display name),
-/// `package`, and `series`.
-///
-/// Without any selector, the bug must have exactly one task: a mutation is
-/// never applied to a task chosen among several (for example a series-less
-/// Debian task over an Ubuntu release task). When `target` or `package`
-/// narrows the candidates and `series` was not specified, a single
-/// series-less task (e.g. distribution-level or upstream) is preferred.
-fn find_task_to_link<'a>(
-    tasks: &'a [bugs::BugTask],
-    bug_id: u64,
-    selector: &TaskLinkSelector,
-) -> lpcli::error::Result<&'a bugs::BugTask> {
-    if tasks.is_empty() {
-        return Err(lpcli::error::LpError::NotFound(format!(
-            "Bug #{bug_id} has no bug tasks."
-        )));
-    }
-
-    if let Some(url) = selector.task_url.as_deref() {
-        return tasks
-            .iter()
-            .find(|t| t.self_link.as_deref() == Some(url))
-            .ok_or_else(|| {
-                lpcli::error::LpError::NotFound(format!(
-                    "No task with self_link '{url}' found on bug #{bug_id}."
-                ))
-            });
-    }
-
-    let has_selector =
-        selector.target.is_some() || selector.package.is_some() || selector.series.is_some();
-    if !has_selector && tasks.len() > 1 {
-        let names: Vec<&str> = tasks
-            .iter()
-            .filter_map(|t| {
-                t.bug_target_display_name
-                    .as_deref()
-                    .or(t.target_link.as_deref())
-            })
-            .collect();
-        return Err(lpcli::error::LpError::Other(format!(
-            "Multiple matching tasks on bug #{bug_id}: {}. No task was selected or \
-             modified; specify --target, --package, --series, or --task-url.",
-            names.join(", ")
-        )));
-    }
-
-    // Filter tasks based on target, package, and series.
-    let mut candidates: Vec<&bugs::BugTask> = tasks
-        .iter()
-        .filter(|t| {
-            let target_link = t.target_link.as_deref().unwrap_or("");
-            let (task_target, task_series) = bugs::parse_target_link(target_link);
-            let display_name = t.bug_target_display_name.as_deref().unwrap_or("");
-
-            // Series check
-            if let Some(ser) = selector.series.as_deref() {
-                let matches_series = task_series
-                    .as_deref()
-                    .map(|ts| ts.eq_ignore_ascii_case(ser))
-                    .unwrap_or(false);
-                if !matches_series {
-                    return false;
-                }
-            }
-
-            // Package check
-            if let Some(pkg) = selector.package.as_deref() {
-                let matches_pkg = task_target.eq_ignore_ascii_case(pkg)
-                    || target_link
-                        .to_ascii_lowercase()
-                        .contains(&format!("/+source/{}", pkg.to_ascii_lowercase()));
-                if !matches_pkg {
-                    return false;
-                }
-            }
-
-            // Target check: matches target name, distro in target_link, or substring in display_name.
-            if let Some(tgt) = selector.target.as_deref() {
-                let tgt_lower = tgt.to_ascii_lowercase();
-                let matches_target = task_target.eq_ignore_ascii_case(tgt)
-                    || target_link
-                        .to_ascii_lowercase()
-                        .starts_with(&format!("https://api.launchpad.net/devel/{tgt_lower}"))
-                    || target_link
-                        .to_ascii_lowercase()
-                        .starts_with(&format!("/{tgt_lower}"))
-                    || target_link
-                        .to_ascii_lowercase()
-                        .contains(&format!("/{tgt_lower}/"))
-                    || display_name.to_ascii_lowercase().contains(&tgt_lower);
-                if !matches_target {
-                    return false;
-                }
-            }
-
-            true
-        })
-        .collect();
-
-    if candidates.is_empty() {
-        let available: Vec<String> = tasks
-            .iter()
-            .filter_map(|t| {
-                t.bug_target_display_name
-                    .as_deref()
-                    .or(t.target_link.as_deref())
-            })
-            .map(|s| s.to_string())
-            .collect();
-        return Err(lpcli::error::LpError::NotFound(format!(
-            "No task matching criteria on bug #{bug_id}. Available tasks: {}.",
-            if available.is_empty() {
-                "none".to_string()
-            } else {
-                available.join(", ")
-            }
-        )));
-    }
-
-    // If no series was specified and multiple candidates matched, prefer series-less tasks
-    // (e.g. the distro-level /debian/+source/pkg or upstream task).
-    if selector.series.is_none() && candidates.len() > 1 {
-        let series_less: Vec<&bugs::BugTask> = candidates
-            .iter()
-            .copied()
-            .filter(|t| {
-                let (_, s) = bugs::parse_target_link(t.target_link.as_deref().unwrap_or(""));
-                s.is_none()
-            })
-            .collect();
-        if series_less.len() == 1 {
-            return Ok(series_less[0]);
-        } else if !series_less.is_empty() {
-            candidates = series_less;
-        }
-    }
-
-    if candidates.len() == 1 {
-        Ok(candidates[0])
-    } else {
-        let names: Vec<String> = candidates
-            .iter()
-            .filter_map(|t| {
-                t.bug_target_display_name
-                    .as_deref()
-                    .or(t.target_link.as_deref())
-            })
-            .map(|s| s.to_string())
-            .collect();
-        Err(lpcli::error::LpError::Other(format!(
-            "Multiple matching tasks on bug #{bug_id}: {}. Please specify --target, --package, or --series to disambiguate.",
-            names.join(", ")
-        )))
-    }
-}
-
-fn remote_link_failure(series: &str, tracker: &str, remote_bug: &str, reason: &str) -> String {
-    format!("series '{series}', tracker '{tracker}', remote bug '{remote_bug}': {reason}")
-}
-
-fn remote_link_failure_error(bug_id: u64, failures: &[String]) -> Option<lpcli::error::LpError> {
-    if failures.is_empty() {
-        return None;
-    }
-
-    Some(lpcli::error::LpError::Other(format!(
-        "Failed to link remote bugs for one or more tasks on bug #{bug_id}; \
-         task creation may already have succeeded: {}",
-        failures.join("; ")
-    )))
-}
-
-/// Parse a list of tags from a `Vec<String>` where each element may contain
-/// comma-separated values (e.g. `"homestar,"` or `"homestar, cheat, strongbad"`).
-///
-/// This handles all three user-facing input forms:
-/// * Space-separated on the command line: `--add-many-tags homestar cheat strongbad`
-///   → each word is a separate element already, just needs trailing comma stripping.
-/// * Quoted comma-separated: `--add-many-tags "homestar, cheat, strongbad"`
-///   → a single element containing commas that must be split.
-/// * Shell-split with trailing commas: `--add-many-tags homestar, cheat, strongbad`
-///   → elements like `"homestar,"` that need trimming.
-fn parse_tags_from_vec(args: &[String]) -> Vec<String> {
-    args.iter()
-        .flat_map(|s| s.split(','))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-/// Resolve the new bug description from `--description` or
-/// `--description-file`.
-///
-/// Exactly one of the two must be supplied (enforced by clap). The resolved
-/// text is rejected when it is empty or whitespace-only: Launchpad does not
-/// accept an empty bug description, and an empty pipe or file silently
-/// wiping the current description would be an easy mistake to make.
-fn resolve_new_description(
-    description: Option<String>,
-    description_file: Option<&str>,
-) -> lpcli::error::Result<String> {
-    let text = match (description, description_file) {
-        (Some(text), _) => text,
-        (None, Some(path)) => read_description_file(path)?,
-        (None, None) => unreachable!("clap requires --description or --description-file"),
-    };
-    if text.trim().is_empty() {
-        return Err(lpcli::error::LpError::Other(
-            "the new bug description must not be empty".into(),
-        ));
-    }
-    Ok(text)
-}
-
-/// Read the new bug description from the file given by `--description-file`.
-///
-/// A path of `-` reads the description from standard input, mirroring
-/// `gh issue edit --body-file -`.
-fn read_description_file(path: &str) -> lpcli::error::Result<String> {
-    if path == "-" {
-        read_description_from_reader(std::io::stdin()).map_err(|e| {
-            lpcli::error::LpError::Io(std::io::Error::new(
-                e.kind(),
-                format!("Failed to read description from standard input: {e}"),
-            ))
-        })
-    } else {
-        std::fs::read_to_string(path).map_err(|e| {
-            lpcli::error::LpError::Io(std::io::Error::new(
-                e.kind(),
-                format!("Failed to read description file '{}': {e}", path),
-            ))
-        })
-    }
-}
-
-/// Read description text from an arbitrary reader.
-///
-/// Separated from [`read_description_file`] so the stdin path can be unit
-/// tested with a [`std::io::Cursor`] stand-in.
-fn read_description_from_reader<R: std::io::Read>(mut reader: R) -> std::io::Result<String> {
-    let mut buf = String::new();
-    reader.read_to_string(&mut buf)?;
-    Ok(buf)
-}
-
-/// Remove tags from `current_tags` according to the supplied remove flags.
-///
-/// `remove_all_tags` takes precedence: when `true`, the result is always empty.
-/// Otherwise, `remove_tag` (single) or `remove_many_tags` (multiple) specify
-/// which tags to drop (case-insensitive comparison).
-fn apply_tag_removals(
-    current_tags: Vec<String>,
-    remove_tag: Option<String>,
-    remove_many_tags: Option<Vec<String>>,
-    remove_all_tags: bool,
-) -> Vec<String> {
-    if remove_all_tags {
-        return Vec::new();
-    }
-    let to_remove: Vec<String> = match (remove_tag, remove_many_tags) {
-        (Some(t), _) => vec![t],
-        (None, Some(many)) => parse_tags_from_vec(&many),
-        (None, None) => return current_tags,
-    };
-    current_tags
-        .into_iter()
-        .filter(|t| !to_remove.iter().any(|r| r.eq_ignore_ascii_case(t)))
-        .collect()
-}
-
-/// Add tags to `current_tags` according to the supplied add flags.
-///
-/// `add_tag` (single) or `add_many_tags` (multiple) specify which tags to add.
-/// Tags that already exist in `current_tags` (case-insensitive) are not
-/// duplicated.
-fn apply_tag_additions(
-    mut current_tags: Vec<String>,
-    add_tag: Option<String>,
-    add_many_tags: Option<Vec<String>>,
-) -> Vec<String> {
-    let to_add: Vec<String> = match (add_tag, add_many_tags) {
-        (Some(t), _) => vec![t],
-        (None, Some(many)) => parse_tags_from_vec(&many),
-        (None, None) => return current_tags,
-    };
-    for tag in to_add {
-        if !tag.is_empty() && !current_tags.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
-            current_tags.push(tag);
-        }
-    }
-    current_tags
 }
 
 // ---------------------------------------------------------------------------

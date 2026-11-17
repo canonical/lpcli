@@ -1,0 +1,5 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: "json.replace(&base, \"[server]\")"
+---
+{"error":{"hint":"Check which changes were applied before retrying.","http_status":null,"kind":"partial","message":"Registering the security key succeeded, but reading the result from [server]/~example-owner/+authenticator/42 failed: Launchpad API error 503: Service unavailable. The security key 'Backup key' may already be registered; check `lpcli hardware-token keys` before registering it again."}}

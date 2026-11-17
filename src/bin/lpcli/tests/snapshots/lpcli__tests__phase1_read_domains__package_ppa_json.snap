@@ -1,0 +1,14 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "description": "Test PPA",
+  "enabled": true,
+  "http_etag": "\"etag-1234\"",
+  "name": "ppa",
+  "private": false,
+  "resource_type_link": "https://api.launchpad.net/devel/#archive",
+  "self_link": "https://api.launchpad.net/devel/~jdoe/+archive/ubuntu/ppa",
+  "web_link": "https://launchpad.net/~jdoe/+archive/ubuntu/ppa"
+}

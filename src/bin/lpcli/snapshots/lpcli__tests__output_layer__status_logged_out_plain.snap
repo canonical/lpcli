@@ -1,0 +1,11 @@
+---
+source: src/bin/lpcli/tests.rs
+expression: rendered
+---
+Authentication
+Error: Not logged in. Run "lpcli login" to authenticate.
+
+Launchpad API Server
+Error: Unreachable
+HTTP status: 503
+Reason: HTTP 503: Service Unavailable

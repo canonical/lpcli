@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_text(&rendered, base)"
+---
+name	store_name	private
+my-snap	my-snap	false
+private-snap		true

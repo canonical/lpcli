@@ -141,13 +141,13 @@ async fn get_bug_tracker_by_name_not_found_returns_error() {
     let result = bugs::get_bug_tracker_by_name(&client, "unknown").await;
 
     match result {
-        Err(LpError::NotFound(msg)) => {
+        Err(LpError::LocalNotFound(msg)) => {
             assert!(
                 msg.contains("unknown"),
                 "Expected message to mention tracker name: {msg}"
             );
         }
-        other => panic!("Expected LpError::NotFound, got {other:?}"),
+        other => panic!("Expected LpError::LocalNotFound, got {other:?}"),
     }
 
     mock.assert_async().await;
@@ -259,6 +259,75 @@ async fn search_bug_trackers_filters_across_pages_and_stops_at_limit() {
     assert_eq!(trackers[1].name.as_deref(), Some("github-two"));
     first_page_mock.assert_async().await;
     second_page_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn tracker_search_zero_limit_is_rejected_without_requests() {
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("GET", "/bugs/bugtrackers")
+        .match_query(mockito::Matcher::Any)
+        .expect(0)
+        .create_async()
+        .await;
+    let client = LaunchpadClient::new(None).with_base_url(server.url());
+    for search in [None, Some("no matches")] {
+        let error = bugs::search_bug_trackers_raw(&client, search, Some(0))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("limit must be positive"));
+        let error = bugs::search_bug_trackers(&client, search, Some(0))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("limit must be positive"));
+    }
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn search_bug_trackers_raw_keeps_launchpad_json_and_reports_completeness() {
+    let mut server = Server::new_async().await;
+    let mut first: serde_json::Value =
+        serde_json::from_str(&bug_tracker_json(&server.url(), "github-one", "GitHub")).unwrap();
+    // Fields lpcli does not model must survive untouched.
+    first["http_etag"] = "\"etag-1\"".into();
+    first["contact_details"] = serde_json::Value::Null;
+    let second: serde_json::Value =
+        serde_json::from_str(&bug_tracker_json(&server.url(), "github-two", "GitHub")).unwrap();
+    let page = serde_json::json!({"total_size": 2, "start": 0, "entries": [first, second]});
+    let mock = server
+        .mock("GET", "/bugs/bugtrackers")
+        .match_query(mockito::Matcher::UrlEncoded("ws.size".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(page.to_string())
+        .expect(3)
+        .create_async()
+        .await;
+
+    let client = LaunchpadClient::new(None).with_base_url(server.url());
+    // Every page scanned: complete, with raw entries in Launchpad order.
+    let found = bugs::search_bug_trackers_raw(&client, Some("github"), None)
+        .await
+        .unwrap();
+    assert!(found.complete);
+    assert_eq!(found.trackers.len(), 2);
+    assert_eq!(found.trackers[0].raw, first);
+    assert_eq!(found.trackers[0].value.name.as_deref(), Some("github-one"));
+
+    // The limit is reached on the last entry of the last page: still complete.
+    let found = bugs::search_bug_trackers_raw(&client, None, Some(2))
+        .await
+        .unwrap();
+    assert!(found.complete);
+
+    // The limit stops the scan with entries left: the total is unknown.
+    let found = bugs::search_bug_trackers_raw(&client, None, Some(1))
+        .await
+        .unwrap();
+    assert!(!found.complete);
+    assert_eq!(found.trackers.len(), 1);
+    mock.assert_async().await;
 }
 
 #[tokio::test]

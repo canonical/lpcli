@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+✓ Logged in to Launchpad and stored the OAuth credentials.
+~ A hardware-bound grant is also stored and takes precedence; run `lpcli logout --hardware-token` to use these credentials instead.

@@ -1,0 +1,9 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+{
+  "entries": [],
+  "start": 0,
+  "total_size": 0
+}

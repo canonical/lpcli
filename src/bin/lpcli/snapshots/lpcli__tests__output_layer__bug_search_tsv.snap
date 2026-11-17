@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests.rs
+expression: rendered
+---
+id	title	status	bug_target_display_name
+2000001	curl crashes on\nmultiline "titles"	New	curl (Ubuntu)
+2000002	Fix released	Fix Released	curl (Ubuntu)

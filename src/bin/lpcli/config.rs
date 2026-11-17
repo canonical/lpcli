@@ -10,6 +10,8 @@ use serde::Deserialize;
 
 use lpcli::error::{LpError, Result};
 
+use crate::output::OutputMode;
+
 /// Top-level configuration for the `lpcli` command-line tool.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -46,6 +48,13 @@ pub struct DisplayConfig {
     ///
     /// `None` means "auto-detect" (the default).
     pub width: Option<u16>,
+    /// Default output mode: `rich`, `plain`, `json`, or `tsv`.
+    ///
+    /// `--format` and `LPCLI_FORMAT` take precedence. `None` selects the
+    /// mode automatically.
+    pub format: Option<OutputMode>,
+    /// Prefer accessible `plain` output when no format is chosen explicitly.
+    pub accessible: bool,
 }
 
 /// Returns the path to the lpcli configuration file.
@@ -311,6 +320,40 @@ mod tests {
         let err = load_from(&path).unwrap_err();
         assert!(matches!(err, LpError::Config(_)));
         assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn display_format_and_accessible_load() {
+        for (name, mode) in [
+            ("rich", OutputMode::Rich),
+            ("plain", OutputMode::Plain),
+            ("json", OutputMode::Json),
+            ("tsv", OutputMode::Tsv),
+        ] {
+            let (_dir, path) = write_config(&format!(
+                "[display]\nformat = \"{name}\"\naccessible = true\n"
+            ));
+            let display = load_from(&path).unwrap().display;
+            assert_eq!(display.format, Some(mode));
+            assert!(display.accessible);
+        }
+        let defaults = AppConfig::default().display;
+        assert_eq!((defaults.format, defaults.accessible), (None, false));
+    }
+
+    #[test]
+    fn invalid_display_format_and_accessible_are_config_errors() {
+        for contents in [
+            "[display]\nformat = \"xml\"\n",
+            "[display]\nformat = \"JSON\"\n",
+            "[display]\nformat = 1\n",
+            "[display]\naccessible = \"yes\"\n",
+        ] {
+            let (_dir, path) = write_config(contents);
+            let err = load_from(&path).unwrap_err();
+            assert!(matches!(err, LpError::Config(_)), "{contents}");
+            assert!(err.to_string().contains(&path.display().to_string()));
+        }
     }
 
     #[test]

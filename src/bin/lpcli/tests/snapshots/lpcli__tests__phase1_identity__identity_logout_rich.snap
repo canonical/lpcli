@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+✓ Removed any stored classic OAuth credentials.
+✓ Removed any stored hardware-bound grant.

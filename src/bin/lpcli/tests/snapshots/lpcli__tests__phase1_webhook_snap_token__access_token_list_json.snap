@@ -1,0 +1,46 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_json(&parsed, base)"
+---
+{
+  "entries": [
+    {
+      "date_created": "[timestamp]",
+      "date_expires": null,
+      "date_last_used": "[timestamp]",
+      "description": "CI token 1",
+      "http_etag": "\"etag-token\"",
+      "is_expired": false,
+      "owner_link": "https://api.launchpad.net/devel/~jdoe",
+      "resource_type_link": "https://api.launchpad.net/devel/#access_token",
+      "revoked_by_link": null,
+      "scopes": [
+        "repository:build_status",
+        "repository:push"
+      ],
+      "self_link": "https://api.launchpad.net/devel/launchpad/+access-token/1",
+      "target_link": "https://api.launchpad.net/devel/launchpad",
+      "web_link": null
+    },
+    {
+      "date_created": "[timestamp]",
+      "date_expires": null,
+      "date_last_used": null,
+      "description": "CI token 2",
+      "http_etag": "\"etag-token\"",
+      "is_expired": false,
+      "owner_link": "https://api.launchpad.net/devel/~jdoe",
+      "resource_type_link": "https://api.launchpad.net/devel/#access_token",
+      "revoked_by_link": null,
+      "scopes": [
+        "repository:build_status",
+        "repository:push"
+      ],
+      "self_link": "https://api.launchpad.net/devel/launchpad/+access-token/2",
+      "target_link": "https://api.launchpad.net/devel/launchpad",
+      "web_link": null
+    }
+  ],
+  "start": 0,
+  "total_size": 2
+}

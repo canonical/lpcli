@@ -1,0 +1,11 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_text(&rendered, base)"
+---
+1 access token found. Use the Token URL value with --token-url.
+
+Description: CI token 4
+Scopes: repository:build_status, repository:push
+Created: 2026-01-02
+Last Used: none
+Token URL: https://api.launchpad.net/devel/~jdoe/launchpad/+git/repo/+access-token/4

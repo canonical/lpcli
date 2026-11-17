@@ -1,0 +1,106 @@
+---
+source: src/bin/lpcli/tests/phase1_bug.rs
+expression: value
+---
+{
+  "bug_tasks": {
+    "entries": [
+      {
+        "assignee_link": null,
+        "bug_link": "[server]/bugs/42",
+        "bug_target_display_name": "curl (Ubuntu)",
+        "bug_target_name": "curl (Ubuntu)",
+        "bug_watch_link": "https://api.launchpad.net/beta/bugs/42/+watch/7",
+        "date_created": "[timestamp]",
+        "date_fix_released": null,
+        "http_etag": "\"task-etag\"",
+        "importance": "Medium",
+        "is_complete": false,
+        "milestone_link": null,
+        "resource_type_link": "[server]/#bug_task",
+        "self_link": "[server]/ubuntu/+source/curl/+bug/42",
+        "status": "Confirmed",
+        "target_link": "https://api.launchpad.net/devel/ubuntu/+source/curl",
+        "title": "Bug #42 in curl: \"crash\"",
+        "web_link": "https://bugs.launchpad.net/ubuntu/+source/curl/+bug/42"
+      },
+      {
+        "assignee_link": null,
+        "bug_link": "[server]/bugs/42",
+        "bug_target_display_name": "curl (Ubuntu noble)",
+        "bug_target_name": "curl (Ubuntu noble)",
+        "bug_watch_link": null,
+        "date_created": "[timestamp]",
+        "date_fix_released": null,
+        "http_etag": "\"task-etag\"",
+        "importance": "Medium",
+        "is_complete": false,
+        "milestone_link": null,
+        "resource_type_link": "[server]/#bug_task",
+        "self_link": "[server]/ubuntu/noble/+source/curl/+bug/42",
+        "status": "New",
+        "target_link": "https://api.launchpad.net/devel/ubuntu/noble/+source/curl",
+        "title": "Bug #42 in curl: \"crash\"",
+        "web_link": "https://bugs.launchpad.net/ubuntu/noble/+source/curl/+bug/42"
+      }
+    ],
+    "start": 0,
+    "total_size": 2
+  },
+  "bug_watches": {
+    "entries": [
+      {
+        "bug_link": "[server]/bugs/42",
+        "bug_tracker_link": "[server]/bugs/bugtrackers/debbugs",
+        "date_created": "[timestamp]",
+        "date_last_changed": null,
+        "date_last_checked": null,
+        "http_etag": "\"watch-etag\"",
+        "last_error_type": null,
+        "owner_link": "[server]/~reporter",
+        "remote_bug": "1150409",
+        "remote_importance": null,
+        "remote_status": "open",
+        "resource_type_link": "[server]/#bug_watch",
+        "self_link": "[server]/bugs/42/+watch/7",
+        "title": "Debian Bug tracker #1150409",
+        "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1150409",
+        "web_link": "https://bugs.launchpad.net/bugs/42/+watch/7"
+      },
+      {
+        "bug_link": "[server]/bugs/42",
+        "bug_tracker_link": "[server]/bugs/bugtrackers/debbugs",
+        "date_created": "[timestamp]",
+        "date_last_changed": null,
+        "date_last_checked": null,
+        "http_etag": "\"watch-etag\"",
+        "last_error_type": null,
+        "owner_link": "[server]/~reporter",
+        "remote_bug": "1150410",
+        "remote_importance": null,
+        "remote_status": "open",
+        "resource_type_link": "[server]/#bug_watch",
+        "self_link": "[server]/bugs/42/+watch/8",
+        "title": "Debian Bug tracker #1150410",
+        "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1150410",
+        "web_link": "https://bugs.launchpad.net/bugs/42/+watch/8"
+      }
+    ],
+    "start": 0,
+    "total_size": 2
+  },
+  "lpcli": {
+    "linked_bug_tasks": [
+      {
+        "bug_task_links": [
+          "[server]/ubuntu/+source/curl/+bug/42"
+        ],
+        "bug_watch_link": "[server]/bugs/42/+watch/7"
+      },
+      {
+        "bug_task_links": [],
+        "bug_watch_link": "[server]/bugs/42/+watch/8"
+      }
+    ]
+  }
+}

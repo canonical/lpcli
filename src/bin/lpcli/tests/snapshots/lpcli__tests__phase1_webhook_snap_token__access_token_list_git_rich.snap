@@ -1,0 +1,12 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_text(&rendered, base)"
+---
+┌─────────────┬──────────────────────────┬────────────┬───────────┬────────────────────────────────┐
+│ Description ┆ Scopes                   ┆ Created    ┆ Last Used ┆ Token URL                      │
+╞═════════════╪══════════════════════════╪════════════╪═══════════╪════════════════════════════════╡
+│ CI token 4  ┆ repository:build_status, ┆ 2026-01-02 ┆ —         ┆ https://api.launchpad.net/deve │
+│             ┆ repository:push          ┆            ┆           ┆ l/~jdoe/launchpad/+git/repo/+a │
+│             ┆                          ┆            ┆           ┆ ccess-token/4                  │
+└─────────────┴──────────────────────────┴────────────┴───────────┴────────────────────────────────┘
+1 access token found. Use the Token URL value with --token-url.

@@ -26,29 +26,40 @@ Use this skill whenever the user asks about **Launchpad** data, including:
 
 | User intent | lpcli command |
 |-------------|---------------|
-| Count/list bugs for a **source package** | `lpcli bug search --target ubuntu --package <name>` |
-| Count/list bugs for a **project** | `lpcli bug search --target <project>` |
+| Count/list bugs for a **source package** | `lpcli bug search --target ubuntu --package curl` (use the package name) |
+| Count/list bugs for a **project** | `lpcli bug search --target launchpad` (use the project name) |
 | Filter bugs by status | Add `--status "New"` (or Confirmed, Triaged, In Progress, Fix Committed, Fix Released, etc.) |
 | Filter bugs by importance | Add `--importance "Critical"` (or High, Medium, Low, Wishlist, Undecided) |
 | Filter bugs by tag | Add `--tag <tag>` |
 | Search bugs by keyword | Add `--keyword "<text>"` |
 | Limit results | Add `--limit <n>` |
 
-**Counting bugs**: `lpcli bug search` returns matching bugs. To count them,
-pipe through `wc -l` or count the output entries. When the user asks "how many",
-run the search and report the count.
+**Counting bugs**: `lpcli bug search` returns one page of matching bugs, up
+to `--limit` (default 25). Never count output lines (for example with
+`wc -l`); table borders, headings, and wrapped rows make that wrong. Use
+`--format json` and read Launchpad's `total_size` (the count of all matches),
+or count `entries` for the returned page. When the user asks "how many",
+report `total_size`. If Launchpad sent `total_size_link` instead, the total is
+not in the output; say so rather than reporting the page size as the total.
+
+```bash
+lpcli --format json --fields title bug search --target ubuntu --package rustc-1.97 --limit 1
+```
 
 ## Prerequisites
 
 - `lpcli` must be on `$PATH` (install via `cargo install --path .` from the
   [lpcli repo](https://github.com/canonical/lpcli)).
-- Run `lpcli login` first. Many commands, including common reads such as
-  `bug show` and `bug search`, require authentication — do not assume any
-  command works anonymously.
-- If the user logged in with a **hardware-bound token** (`lpcli hardware-token
-  issue` or `lpcli login --hardware-token`), each `lpcli` invocation needs a
-  touch of their USB security key (and possibly its PIN). Tell the user before
-  running commands. `lpcli status` shows which login is in use.
+- The user must run `lpcli login` first, in their own terminal: it waits for
+  them to authorize lpcli in a browser and press Enter, so it fails (exit
+  code 2) when stdin is not a terminal. Many commands, including common reads
+  such as `bug show` and `bug search`, require authentication — do not assume
+  any command works anonymously. Exit code 3 means the user is not logged in.
+- If the user logged in with a **hardware-bound token** (through the
+  `hardware-token issue` command or `lpcli login --hardware-token`), each
+  `lpcli` invocation needs a touch of their USB security key (and possibly its
+  PIN). Tell the user before running commands. `lpcli status` shows which
+  login is in use.
 
 ## CLI Reference
 
@@ -58,7 +69,60 @@ General syntax:
 lpcli <COMMAND> [SUBCOMMAND] [OPTIONS]
 ```
 
-Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
+Run `lpcli --help`, or `--help` after any command (for example
+`lpcli bug --help`), for full option details.
+
+### Output formats
+
+The global options go before or after the command, for example
+`lpcli --format json bug show --bug-id 123456`.
+
+**Agents should use `--format json`.** It works with every command except
+`skills`. stdout then contains only data; prompts, notices, and warnings go
+to stderr. Set `LPCLI_FORMAT=json` to make it the default for a session.
+
+- JSON is Launchpad's own representation. A single object is printed as the
+  Launchpad entry. Lists use Launchpad's collection shape,
+  `{"total_size", "start", "entries"}`, so read `.entries[]`.
+- Commands that combine several requests print named members, for example
+  `bug show` prints `{"bug", "bug_tasks", "attachments", "lpcli"}`. Values
+  lpcli computes itself are under `lpcli`.
+- **Save tokens with `--fields`**: `--fields name,title,web_link` keeps only
+  those Launchpad attributes in each entry. It requires JSON output.
+- `--format tsv` prints a header row and exactly one line per record. It
+  works with list commands, `status`, and `hardware-token keys`.
+- `--quiet` makes a mutation print only the resulting `self_link`, one per
+  line. It is rejected on reads.
+- `--no-input` makes prompts fail instead of waiting, and is automatic when
+  stdin is not a terminal. `lpcli login` and `hardware-token register` need
+  the user's terminal; ask the user to run them. Security-key touches still
+  need the user.
+- `lpcli --format json schema` reports the JSON contract version
+  (currently 1).
+- `--json` is **no longer accepted**; it fails with an "unexpected argument"
+  error. Use `--format json`, and read `.entries[]` instead of `.[]`.
+
+### Exit codes and errors
+
+Check the exit code instead of parsing messages:
+
+| Code | Meaning | What to do |
+|---:|---|---|
+| 0 | Success | |
+| 1 | General error | Read the message |
+| 2 | Usage or validation error | Fix the command; check `--help` |
+| 3 | Not authenticated | Ask the user to run `lpcli login`, or use `--public` for public data |
+| 4 | Not found | Check the name, ID, or series |
+| 5 | Permission denied | The account lacks the required Launchpad permission |
+| 6 | Network failure, timeout, or rate limiting | Retry later |
+| 7 | Partial success | Part of the change was applied; read stdout before retrying |
+
+In JSON mode, errors are one JSON object on stderr:
+`{"error": {"kind": "not_found", "message": "...", "hint": null, "http_status": 404}}`.
+Command-line usage errors (exit code 2) are plain text from the argument
+parser. After exit code 7, stdout lists what succeeded, with failures under
+`lpcli` (for example `lpcli.failures` for bug changes to several tasks), so
+retry only the parts that failed.
 
 ### Bugs
 
@@ -71,7 +135,7 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 | Search bugs by keyword | `lpcli bug search --target ubuntu --keyword "kernel panic" --limit 20` |
 | Search bugs by tag | `lpcli bug search --target ubuntu --tag "regression-update" --limit 10` |
 | Search bugs by importance | `lpcli bug search --target ubuntu --importance "Critical" --limit 10` |
-| Add a comment | `lpcli bug comment --bug-id 123456 --message "Reproduced on noble."` |
+| Add a comment | `lpcli bug add-comment --bug-id 123456 --message "Reproduced on noble."` |
 | List comments | `lpcli bug comments --bug-id 123456` |
 | File a new bug | `lpcli bug create --target ubuntu --package curl --title "title" --description "desc"` |
 | Edit a bug description | `lpcli bug set-description --bug-id 123456 --description "new text"` or `--description-file ./desc.txt` (`-` reads stdin) |
@@ -95,7 +159,7 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 | Unlink remote bug watch from task | `lpcli bug unlink-remote --bug-id 123456 --target debian` |
 | List bug watches (Linked Tasks column shows task links) | `lpcli bug watches --bug-id 123456` |
 | Find a remote bug tracker | `lpcli bug remote-bug-trackers --search "canonical/apport" --limit 20` |
-| Find remote bug trackers as JSON | `lpcli bug remote-bug-trackers --search "github" --json` |
+| Find remote bug trackers as JSON | `lpcli bug remote-bug-trackers --search "github" --format json --fields name,base_url` |
 | Register a bug tracker | `lpcli bug tracker create --base-url https://github.com/OWNER/REPO/issues --type github` |
 | Delete a bug task | `lpcli bug delete-task --bug-id 123456 --target ubuntu --package curl --series noble` |
 | Add a tag | `lpcli bug tag --bug-id 123456 --add-tag regression` |
@@ -244,20 +308,22 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 
 ```bash
 # "How many bugs are opened against rustc-1.97 in Launchpad?"
-lpcli bug search --target ubuntu --package rustc-1.97
-# To count: pipe output through wc -l or count the returned entries
+# Report total_size from the JSON; entries holds at most --limit bugs.
+lpcli --format json --fields title bug search --target ubuntu --package rustc-1.97 --limit 1
+# To list the bugs themselves:
+lpcli --format json --fields title,status,web_link bug search --target ubuntu --package rustc-1.97
 ```
 
 ### Triage a bug
 
 ```bash
-lpcli bug show --bug-id 123456
-lpcli bug tasks --bug-id 123456
-lpcli bug set-status --bug-id 123456 --target curl \
+lpcli --format json bug show --bug-id 123456
+lpcli --format json --fields bug_target_name,status,importance,self_link bug tasks --bug-id 123456
+lpcli --format json --quiet bug set-status --bug-id 123456 --target curl \
     --series noble --status triaged
 lpcli bug set-importance --bug-id 123456 --target curl \
     --series noble --importance high
-lpcli bug comment --bug-id 123456 --message "Triaged as High for Noble."
+lpcli bug add-comment --bug-id 123456 --message "Triaged as High for Noble."
 ```
 
 ### Forward a bug to Debian or upstream
@@ -380,16 +446,24 @@ lpcli person ppas --name my-username
    commands; no browser or web scraping needed. The one known exception is
    deleting a bug watch, which is web-UI-only (see the GitHub linking
    workflow above).
-2. **Log in first** — run `lpcli login` before using `lpcli`; many commands
-   (bug searches, package lookups, etc.) require authentication.
+2. **Log in first** — ask the user to run `lpcli login` in their terminal;
+   many commands (bug searches, package lookups, etc.) require
+   authentication. `lpcli --format json status` shows whether they are
+   logged in.
 3. **Use `--help`** — every subcommand supports `--help` for full option details
    (e.g. `lpcli bug search --help`).
-4. **Counting results** — `lpcli` outputs human-readable tables. To count bugs,
-   pipe through `grep -c` or `wc -l` on the relevant output lines.
-5. **Source package names in Launchpad** may differ from upstream project names
+4. **Use `--format json`** — it works with every command except `skills`.
+   Add `--fields` to keep only the attributes you need, and `--quiet` on
+   mutations to get just the resulting `self_link`.
+5. **Counting results** — read `total_size` (or count `entries`) from
+   `--format json`. Never count output lines with `wc -l`.
+6. **Check exit codes** — 3 means log in, 4 not found, 5 permission denied,
+   6 retry later, and 7 means the change was only partly applied; read stdout
+   before retrying.
+7. **Source package names in Launchpad** may differ from upstream project names
    (e.g. `rustc-1.97` not `rust`). Use the exact source package name the user
    provides.
-6. **Self-contained documentation** — `lpcli skills` (alias `lpcli skill`)
+8. **Self-contained documentation** — `lpcli skills` (alias `lpcli skill`)
    prints this entire document straight from the binary, byte for byte, with
    no authentication or network access; redirect it into a skill directory if
    your agent tooling expects one.

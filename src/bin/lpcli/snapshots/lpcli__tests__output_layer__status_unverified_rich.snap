@@ -1,0 +1,13 @@
+---
+source: src/bin/lpcli/tests.rs
+expression: rendered
+---
+Authentication
+────────────────────────────────────────
+~ Credentials found (could not verify with server)
+
+Launchpad API Server
+────────────────────────────────────────
+✗ Unreachable
+  HTTP status: 503
+  Reason: HTTP 503: Service Unavailable

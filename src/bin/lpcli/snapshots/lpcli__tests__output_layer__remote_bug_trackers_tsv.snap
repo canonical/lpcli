@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests.rs
+expression: rendered
+---
+name	title	bug_tracker_type	base_url
+debbugs	Debian Bug tracker	Debbugs	https://debbugs.example.org/
+auto-github-canonical-apport	GitHub canonical/apport\tissues	GitHub Issues	https://auto-github-canonical-apport.example.org/

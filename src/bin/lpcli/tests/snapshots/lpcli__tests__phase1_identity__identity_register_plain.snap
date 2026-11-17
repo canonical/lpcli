@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+OK: Registered security key 'Backup key' (ID 42).
+Issue a grant bound to it with "lpcli hardware-token issue --key 42".

@@ -36,12 +36,31 @@
 //! | [`parse_github_bug_ref`] | Parse `owner/repo#N` or a GitHub URL into a [`GitHubBugRef`] |
 //! | [`validate_github_watch_url`] | Validate a watch URL shape for a [`GitHubBugRef`] |
 //! | [`link_github_bug_task`] | Ensure tracker + watch, validate URL, and link the task |
+//!
+//! # Exact Launchpad JSON
+//!
+//! Reads and mutations that produce Launchpad entries have `_raw`
+//! counterparts (for example [`get_bug_raw`], [`get_bug_tasks_raw`],
+//! [`create_bug_raw`], [`set_bug_status_raw`] and
+//! [`link_bug_task_remote_raw`]) that return [`Raw`] values: the typed value
+//! together with the JSON exactly as Launchpad returned it. Lists use
+//! Launchpad's collection shape with every page fetched.
+//!
+//! A raw mutation that Launchpad has already applied, but whose result cannot
+//! be confirmed (a missing or untrusted `Location`, a failed read-back, an
+//! unreadable response, or a failed later step), returns
+//! [`LpError::Partial`] with recovery guidance, and invalid caller input is
+//! reported as [`LpError::Usage`]. The typed counterparts keep their
+//! historical error variants, except that [`delete_bug_comment`] reports a
+//! partially applied deletion as [`LpError::Partial`] and a zero
+//! [`search_bug_trackers`] limit is an [`LpError::Usage`].
 
-use chrono::{DateTime, Utc};
 use futures_util::future::try_join_all;
+use jiff::Timestamp;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::client::{Collection, LaunchpadClient};
+use crate::client::{Collection, LaunchpadClient, Raw};
 use crate::error::{LpError, Result};
 
 // ---------------------------------------------------------------------------
@@ -60,9 +79,9 @@ pub struct Bug {
     /// Tags attached to this bug.
     pub tags: Vec<String>,
     /// When the bug was filed.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// When the bug was last updated.
-    pub date_last_updated: Option<DateTime<Utc>>,
+    pub date_last_updated: Option<Timestamp>,
     /// API self-link for this bug.
     pub self_link: Option<String>,
     /// URL of the bug in the Launchpad web UI.
@@ -157,7 +176,7 @@ pub struct BugTask {
     /// API link to the assignee, if any.
     pub assignee_link: Option<String>,
     /// Date this task was created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// Target name (project or source package).
     pub bug_target_display_name: Option<String>,
     /// Target API link.
@@ -216,11 +235,11 @@ pub struct BugWatch {
     /// Importance on the remote bug tracker.
     pub remote_importance: Option<String>,
     /// Date this watch was created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// Date this watch was last checked by Launchpad.
-    pub date_last_checked: Option<DateTime<Utc>>,
+    pub date_last_checked: Option<Timestamp>,
     /// Date this watch was last changed on the remote tracker.
-    pub date_last_changed: Option<DateTime<Utc>>,
+    pub date_last_changed: Option<Timestamp>,
     /// API link to the owner who created this watch.
     pub owner_link: Option<String>,
     /// Last error encountered when checking the remote bug, if any.
@@ -244,9 +263,9 @@ pub struct BugComment {
     /// Comment text.
     pub content: Option<String>,
     /// When the comment was posted.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// When the comment was deleted (if deleted).
-    pub date_deleted: Option<DateTime<Utc>>,
+    pub date_deleted: Option<Timestamp>,
     /// API link to the author.
     pub owner_link: Option<String>,
     /// Sequence number within the bug.
@@ -306,10 +325,25 @@ pub async fn get_bug(client: &LaunchpadClient, bug_id: u64) -> Result<Bug> {
     client.get(&format!("/bugs/{bug_id}")).await
 }
 
+/// Like [`get_bug()`], but keep the exact JSON Launchpad returned.
+pub async fn get_bug_raw(client: &LaunchpadClient, bug_id: u64) -> Result<Raw<Bug>> {
+    client.get_raw(&format!("/bugs/{bug_id}")).await
+}
+
 /// Fetch all bug tasks associated with a bug.
 pub async fn get_bug_tasks(client: &LaunchpadClient, bug_id: u64) -> Result<Vec<BugTask>> {
-    let url = client.url(&format!("/bugs/{bug_id}/bug_tasks"));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all(client, &bug_collection_url(client, bug_id, "bug_tasks")).await
+}
+
+/// Like [`get_bug_tasks()`], but return Launchpad's collection shape with
+/// every entry unmodified.
+pub async fn get_bug_tasks_raw(client: &LaunchpadClient, bug_id: u64) -> Result<Raw<Vec<BugTask>>> {
+    Collection::fetch_all_raw(client, &bug_collection_url(client, bug_id, "bug_tasks")).await
+}
+
+/// API URL of a collection linked from a bug (e.g. `bug_tasks`).
+fn bug_collection_url(client: &LaunchpadClient, bug_id: u64, collection: &str) -> String {
+    client.url(&format!("/bugs/{bug_id}/{collection}"))
 }
 
 /// Search bug tasks on a Launchpad project, distribution, or source package.
@@ -327,6 +361,33 @@ pub async fn search_bugs(
     target: &str,
     params: &BugSearchParams<'_>,
 ) -> Result<Vec<BugTask>> {
+    // ws.size sets the Launchpad page size, not a total cap.  fetch_page
+    // requests exactly one page so the user-supplied limit is honoured.
+    Collection::fetch_page(client, &search_tasks_url(client, target, params)).await
+}
+
+/// Like [`search_bugs()`], but return the whole result page together with
+/// the exact JSON Launchpad returned for it.
+///
+/// The raw page keeps Launchpad's collection shape (`total_size` or
+/// `total_size_link`, `start`, `entries`, and `next_collection_link` when
+/// [`BugSearchParams::limit`] cut the results short), with every entry
+/// unmodified.
+pub async fn search_bugs_raw(
+    client: &LaunchpadClient,
+    target: &str,
+    params: &BugSearchParams<'_>,
+) -> Result<Raw<Collection<BugTask>>> {
+    Collection::fetch_page_raw(client, &search_tasks_url(client, target, params)).await
+}
+
+/// Build the `searchTasks` URL shared by [`search_bugs()`] and
+/// [`search_bugs_raw()`].
+fn search_tasks_url(
+    client: &LaunchpadClient,
+    target: &str,
+    params: &BugSearchParams<'_>,
+) -> String {
     // Build the base path.  When a package name is provided we target the
     // distribution source package (`/{distro}/+source/{pkg}`); otherwise we
     // search the project / distribution directly.
@@ -363,10 +424,7 @@ pub async fn search_bugs(
     if let Some(limit) = params.limit {
         query.push_str(&format!("&ws.size={limit}"));
     }
-    let url = client.url(&query);
-    // ws.size sets the Launchpad page size, not a total cap.  fetch_page
-    // requests exactly one page so the user-supplied limit is honoured.
-    Collection::fetch_page(client, &url).await
+    client.url(&query)
 }
 
 /// File a new bug on a Launchpad project.
@@ -376,6 +434,39 @@ pub async fn create_bug(
     title: &str,
     description: &str,
 ) -> Result<Bug> {
+    let location = create_bug_location(client, target, title, description).await?;
+    client.get_url(&location).await
+}
+
+/// Like [`create_bug()`], but return the created bug's exact Launchpad JSON.
+///
+/// # Errors
+///
+/// If Launchpad accepts the bug but its location cannot be trusted or the
+/// bug cannot be read back, returns [`LpError::Partial`]: the bug may
+/// already exist, so check before retrying to avoid filing a duplicate.
+pub async fn create_bug_raw(
+    client: &LaunchpadClient,
+    target: &str,
+    title: &str,
+    description: &str,
+) -> Result<Raw<Bug>> {
+    let guidance = format!(
+        "A bug titled \"{title}\" may have been filed on '{target}'; check Launchpad \
+         for it before retrying, to avoid filing a duplicate."
+    );
+    let location = create_bug_location(client, target, title, description)
+        .await
+        .map_err(|error| created_location_failure(error, &guidance))?;
+    read_created_raw(client, &location, "Filing the bug", &guidance).await
+}
+
+async fn create_bug_location(
+    client: &LaunchpadClient,
+    target: &str,
+    title: &str,
+    description: &str,
+) -> Result<String> {
     use std::collections::HashMap;
     let target_url = client.url(&format!("/{target}"));
     let mut params = HashMap::new();
@@ -383,8 +474,7 @@ pub async fn create_bug(
     params.insert("title", title);
     params.insert("description", description);
     params.insert("target", target_url.as_str());
-    let location = client.post_created_location("/bugs", &params).await?;
-    client.get_url(&location).await
+    client.post_created_location("/bugs", &params).await
 }
 
 /// Add a new bug task to an existing bug.
@@ -398,14 +488,44 @@ pub async fn add_bug_task(
     bug_id: u64,
     target_url: &str,
 ) -> Result<BugTask> {
+    let location = add_bug_task_location(client, bug_id, target_url).await?;
+    client.get_url(&location).await
+}
+
+/// Like [`add_bug_task()`], but return the created task's exact Launchpad
+/// JSON.
+///
+/// # Errors
+///
+/// If Launchpad accepts the task but it cannot be confirmed, returns
+/// [`LpError::Partial`].
+pub async fn add_bug_task_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    target_url: &str,
+) -> Result<Raw<BugTask>> {
+    let guidance = format!(
+        "The task for '{target_url}' may have been added to bug #{bug_id}; check \
+         `lpcli bug tasks -b {bug_id}` before retrying."
+    );
+    let location = add_bug_task_location(client, bug_id, target_url)
+        .await
+        .map_err(|error| created_location_failure(error, &guidance))?;
+    read_created_raw(client, &location, "Adding the bug task", &guidance).await
+}
+
+async fn add_bug_task_location(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    target_url: &str,
+) -> Result<String> {
     use std::collections::HashMap;
     let mut params = HashMap::new();
     params.insert("ws.op", "addTask");
     params.insert("target", target_url);
-    let location = client
+    client
         .post_created_location(&format!("/bugs/{bug_id}"), &params)
-        .await?;
-    client.get_url(&location).await
+        .await
 }
 
 /// Delete a bug task identified by its API self-link.
@@ -433,6 +553,22 @@ pub async fn set_bug_status(
     client.patch_url(task_url, &params).await
 }
 
+/// Like [`set_bug_status()`], but return the updated task's exact Launchpad
+/// JSON.
+///
+/// # Errors
+///
+/// If Launchpad accepts the change but its response cannot be read,
+/// returns [`LpError::Partial`].
+pub async fn set_bug_status_raw(
+    client: &LaunchpadClient,
+    task_url: &str,
+    status: &BugTaskStatus,
+) -> Result<Raw<BugTask>> {
+    let body = serde_json::json!({ "status": status.to_string() });
+    patch_task_raw(client, task_url, &body, "Setting the bug task status").await
+}
+
 /// Update the importance of a bug task identified by its API self-link.
 pub async fn set_bug_importance(
     client: &LaunchpadClient,
@@ -444,6 +580,22 @@ pub async fn set_bug_importance(
     let mut params = HashMap::new();
     params.insert("importance", importance_str.as_str());
     client.patch_url(task_url, &params).await
+}
+
+/// Like [`set_bug_importance()`], but return the updated task's exact
+/// Launchpad JSON.
+///
+/// # Errors
+///
+/// If Launchpad accepts the change but its response cannot be read,
+/// returns [`LpError::Partial`].
+pub async fn set_bug_importance_raw(
+    client: &LaunchpadClient,
+    task_url: &str,
+    importance: &BugImportance,
+) -> Result<Raw<BugTask>> {
+    let body = serde_json::json!({ "importance": importance.to_string() });
+    patch_task_raw(client, task_url, &body, "Setting the bug task importance").await
 }
 
 /// Update the assignee of a bug task identified by its API self-link.
@@ -467,6 +619,34 @@ pub async fn set_bug_assignee(
     client.patch_url(task_url, &params).await
 }
 
+/// Like [`set_bug_assignee()`], but return the updated task's exact
+/// Launchpad JSON.
+///
+/// # Errors
+///
+/// If Launchpad accepts the change but its response cannot be read,
+/// returns [`LpError::Partial`].
+pub async fn set_bug_assignee_raw(
+    client: &LaunchpadClient,
+    task_url: &str,
+    assignee_url: &str,
+) -> Result<Raw<BugTask>> {
+    let body = serde_json::json!({ "assignee_link": assignee_url });
+    patch_task_raw(client, task_url, &body, "Setting the bug task assignee").await
+}
+
+/// PATCH a bug task and keep the exact entry Launchpad returned.
+async fn patch_task_raw(
+    client: &LaunchpadClient,
+    task_url: &str,
+    body: &serde_json::Value,
+    description: &str,
+) -> Result<Raw<BugTask>> {
+    let guidance =
+        format!("Check the task with `lpcli bug tasks` (API URL: {task_url}) before retrying.");
+    patch_entry_raw(client, task_url, body, description, &guidance).await
+}
+
 /// Add a comment to a bug.
 ///
 /// The Launchpad `newMessage` operation returns `201 Created` with an empty
@@ -480,10 +660,46 @@ pub async fn add_bug_comment(client: &LaunchpadClient, bug_id: u64, comment: &st
     client.post_ok(&format!("/bugs/{bug_id}"), &params).await
 }
 
+/// Like [`add_bug_comment()`], but follow the `Location` Launchpad reports
+/// for the new message and return its exact Launchpad JSON.
+///
+/// # Errors
+///
+/// If Launchpad accepts the comment but it cannot be confirmed (no trusted
+/// `Location`, or a failed read-back), returns [`LpError::Partial`]: the
+/// comment may already be posted, so check before retrying.
+pub async fn add_bug_comment_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    comment: &str,
+) -> Result<Raw<BugComment>> {
+    use std::collections::HashMap;
+    let guidance = format!(
+        "The comment may have been posted on bug #{bug_id}; check \
+         `lpcli bug comments -b {bug_id}` before retrying, to avoid a duplicate."
+    );
+    let mut params = HashMap::new();
+    params.insert("ws.op", "newMessage");
+    params.insert("content", comment);
+    let location = client
+        .post_created_location(&format!("/bugs/{bug_id}"), &params)
+        .await
+        .map_err(|error| created_location_failure(error, &guidance))?;
+    read_created_raw(client, &location, "Posting the comment", &guidance).await
+}
+
 /// Fetch comments for a bug.
 pub async fn get_bug_comments(client: &LaunchpadClient, bug_id: u64) -> Result<Vec<BugComment>> {
-    let url = client.url(&format!("/bugs/{bug_id}/messages"));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all(client, &bug_collection_url(client, bug_id, "messages")).await
+}
+
+/// Like [`get_bug_comments()`], but return Launchpad's collection shape with
+/// every entry unmodified.
+pub async fn get_bug_comments_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+) -> Result<Raw<Vec<BugComment>>> {
+    Collection::fetch_all_raw(client, &bug_collection_url(client, bug_id, "messages")).await
 }
 
 /// Delete the content of a comment from a bug, including any attachments.
@@ -499,7 +715,8 @@ pub async fn get_bug_comments(client: &LaunchpadClient, bug_id: u64) -> Result<V
 ///
 /// Returns [`crate::error::LpError::NotFound`] if the comment index does not
 /// exist, or [`crate::error::LpError::Unauthorized`] if the user is not
-/// permitted to delete the comment.
+/// permitted to delete the comment. If some attachments were already removed
+/// when a later step fails, returns [`LpError::Partial`] naming them.
 pub async fn delete_bug_comment(
     client: &LaunchpadClient,
     bug_id: u64,
@@ -518,7 +735,7 @@ pub async fn delete_bug_comment(
         .find(|(i, comment)| comment.index.unwrap_or(*i as u64) == comment_index)
         .map(|(_, comment)| comment)
         .ok_or_else(|| {
-            crate::error::LpError::NotFound(format!(
+            crate::error::LpError::LocalNotFound(format!(
                 "Comment #{comment_index} does not exist on bug #{bug_id}."
             ))
         })?;
@@ -534,17 +751,40 @@ pub async fn delete_bug_comment(
         .filter(|a| a.message_link.as_deref() == Some(comment_url) && a.self_link.is_some())
         .collect();
 
+    // Once an attachment is removed, a later failure leaves the comment
+    // partially deleted, so report what was already applied.
+    let mut removed: Vec<&str> = Vec::new();
+    let partial = |removed: &[&str], error: LpError| {
+        if removed.is_empty() {
+            error
+        } else {
+            LpError::Partial(format!(
+                "Removed attachment(s) {} from comment #{comment_index} on bug #{bug_id}, \
+                 but a later step failed: {error}. The comment text was not deleted; \
+                 check `lpcli bug comments -b {bug_id}` and \
+                 `lpcli bug attachments -b {bug_id}` before retrying.",
+                removed.join(", ")
+            ))
+        }
+    };
     for attachment in &comment_attachments {
         let attachment_url = attachment.self_link.as_deref().unwrap();
         let mut params = HashMap::new();
         params.insert("ws.op", "removeFromBug");
-        client.post_url_ok(attachment_url, &params).await?;
+        client
+            .post_url_ok(attachment_url, &params)
+            .await
+            .map_err(|error| partial(&removed, error))?;
+        removed.push(attachment_url);
     }
 
     // Delete the comment text.
     let mut params = HashMap::new();
     params.insert("ws.op", "deleteContent");
-    client.post_url_ok(comment_url, &params).await
+    client
+        .post_url_ok(comment_url, &params)
+        .await
+        .map_err(|error| partial(&removed, error))
 }
 
 /// Parameters for adding a bug attachment.
@@ -574,6 +814,44 @@ pub async fn add_bug_attachment(
     bug_id: u64,
     params: &AddAttachmentParams<'_>,
 ) -> Result<String> {
+    let form = attachment_form(params).await?;
+    client
+        .post_multipart_created_location(&format!("/bugs/{bug_id}"), form)
+        .await
+}
+
+/// Like [`add_bug_attachment()`], but follow the reported location and
+/// return the created attachment's exact Launchpad JSON.
+///
+/// # Errors
+///
+/// Returns [`LpError::Usage`] before any request unless exactly one of
+/// `params.file_path` and `params.url` is given. If Launchpad accepts the
+/// attachment but it cannot be confirmed, returns [`LpError::Partial`].
+pub async fn add_bug_attachment_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    params: &AddAttachmentParams<'_>,
+) -> Result<Raw<BugAttachment>> {
+    if params.file_path.is_some() == params.url.is_some() {
+        return Err(LpError::Usage(
+            "Give exactly one of an attachment file or an attachment URL.".into(),
+        ));
+    }
+    let guidance = format!(
+        "The attachment may have been added to bug #{bug_id}; check \
+         `lpcli bug attachments -b {bug_id}` before retrying, to avoid a duplicate."
+    );
+    let form = attachment_form(params).await?;
+    let location = client
+        .post_multipart_created_location(&format!("/bugs/{bug_id}"), form)
+        .await
+        .map_err(|error| created_location_failure(error, &guidance))?;
+    read_created_raw(client, &location, "Adding the attachment", &guidance).await
+}
+
+/// Build the `addAttachment` multipart form, reading any local file.
+async fn attachment_form(params: &AddAttachmentParams<'_>) -> Result<reqwest::multipart::Form> {
     use reqwest::multipart::{Form, Part};
 
     let mut form = Form::new()
@@ -623,10 +901,7 @@ pub async fn add_bug_attachment(
             form = form.text("filename", name.to_string_lossy().into_owned());
         }
     }
-
-    client
-        .post_multipart_created_location(&format!("/bugs/{bug_id}"), form)
-        .await
+    Ok(form)
 }
 
 /// Fetch all attachments for a bug.
@@ -634,8 +909,16 @@ pub async fn get_bug_attachments(
     client: &LaunchpadClient,
     bug_id: u64,
 ) -> Result<Vec<BugAttachment>> {
-    let url = client.url(&format!("/bugs/{bug_id}/attachments"));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all(client, &bug_collection_url(client, bug_id, "attachments")).await
+}
+
+/// Like [`get_bug_attachments()`], but return Launchpad's collection shape
+/// with every entry unmodified.
+pub async fn get_bug_attachments_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+) -> Result<Raw<Vec<BugAttachment>>> {
+    Collection::fetch_all_raw(client, &bug_collection_url(client, bug_id, "attachments")).await
 }
 
 /// Replace the description of a bug.
@@ -666,6 +949,22 @@ pub async fn set_bug_description(
     client.patch_url_with_value(&url, &body).await
 }
 
+/// Like [`set_bug_description()`], but return the updated bug's exact
+/// Launchpad JSON.
+///
+/// # Errors
+///
+/// If Launchpad accepts the change but its response cannot be read,
+/// returns [`LpError::Partial`].
+pub async fn set_bug_description_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    description: &str,
+) -> Result<Raw<Bug>> {
+    let body = serde_json::json!({ "description": description });
+    patch_bug_raw(client, bug_id, &body, "Setting the bug description").await
+}
+
 /// Replace the complete tag list on a bug.
 ///
 /// The supplied `tags` slice becomes the new and only set of tags on the bug.
@@ -677,6 +976,34 @@ pub async fn set_bug_tags(client: &LaunchpadClient, bug_id: u64, tags: &[String]
     let url = client.url(&format!("/bugs/{bug_id}"));
     let body = serde_json::json!({ "tags": tags });
     client.patch_url_with_value(&url, &body).await
+}
+
+/// Like [`set_bug_tags()`], but return the updated bug's exact Launchpad
+/// JSON.
+///
+/// # Errors
+///
+/// If Launchpad accepts the change but its response cannot be read,
+/// returns [`LpError::Partial`].
+pub async fn set_bug_tags_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    tags: &[String],
+) -> Result<Raw<Bug>> {
+    let body = serde_json::json!({ "tags": tags });
+    patch_bug_raw(client, bug_id, &body, "Setting the bug tags").await
+}
+
+/// PATCH a bug and keep the exact entry Launchpad returned.
+async fn patch_bug_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    body: &serde_json::Value,
+    description: &str,
+) -> Result<Raw<Bug>> {
+    let url = client.url(&format!("/bugs/{bug_id}"));
+    let guidance = format!("Check `lpcli bug show -b {bug_id}` before retrying.");
+    patch_entry_raw(client, &url, body, description, &guidance).await
 }
 
 // ---------------------------------------------------------------------------
@@ -693,7 +1020,7 @@ pub struct BugSubscription {
     /// API link to the bug.
     pub bug_link: Option<String>,
     /// When the subscription was created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// API link to the person who created the subscription.
     pub subscribed_by_link: Option<String>,
 }
@@ -718,6 +1045,31 @@ pub async fn subscribe_to_bug(
     client.post_url(&url, &params).await
 }
 
+/// Like [`subscribe_to_bug()`], but return the subscription's exact
+/// Launchpad JSON.
+///
+/// # Errors
+///
+/// If Launchpad accepts the subscription but its response cannot be read,
+/// returns [`LpError::Partial`].
+pub async fn subscribe_to_bug_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    person_url: &str,
+) -> Result<Raw<BugSubscription>> {
+    use std::collections::HashMap;
+    let url = client.url(&format!("/bugs/{bug_id}"));
+    let mut params: HashMap<&str, &str> = HashMap::new();
+    params.insert("ws.op", "subscribe");
+    params.insert("person", person_url);
+    let guidance = format!(
+        "'{person_url}' may be subscribed to bug #{bug_id}; check \
+         `lpcli bug subscriptions -b {bug_id}`."
+    );
+    let response = client.post_url(&url, &params).await;
+    applied_response(response, "Subscribing to the bug", &guidance)
+}
+
 /// Unsubscribe a person from a bug.
 ///
 /// `person_url` must be the full Launchpad API URL for the person.
@@ -738,8 +1090,16 @@ pub async fn get_bug_subscriptions(
     client: &LaunchpadClient,
     bug_id: u64,
 ) -> Result<Vec<BugSubscription>> {
-    let url = client.url(&format!("/bugs/{bug_id}/subscriptions"));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all(client, &bug_collection_url(client, bug_id, "subscriptions")).await
+}
+
+/// Like [`get_bug_subscriptions()`], but return Launchpad's collection shape
+/// with every entry unmodified.
+pub async fn get_bug_subscriptions_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+) -> Result<Raw<Vec<BugSubscription>>> {
+    Collection::fetch_all_raw(client, &bug_collection_url(client, bug_id, "subscriptions")).await
 }
 
 /// Fetch a bug tracker by its unique name (e.g. `"debbugs"`).
@@ -748,14 +1108,40 @@ pub async fn get_bug_subscriptions(
 ///
 /// # Errors
 ///
-/// Returns [`crate::error::LpError::NotFound`] if the tracker does not exist.
+/// Returns [`crate::error::LpError::NotFound`] for an HTTP 404, or
+/// [`crate::error::LpError::LocalNotFound`] when Launchpad reports no tracker
+/// with a successful `null` response.
 pub async fn get_bug_tracker_by_name(client: &LaunchpadClient, name: &str) -> Result<BugTracker> {
+    get_bug_tracker_by_name_raw(client, name)
+        .await
+        .map(|tracker| tracker.value)
+}
+
+/// Like [`get_bug_tracker_by_name()`], but keep the exact JSON Launchpad
+/// returned.
+pub async fn get_bug_tracker_by_name_raw(
+    client: &LaunchpadClient,
+    name: &str,
+) -> Result<Raw<BugTracker>> {
     let url = client.url(&format!(
         "/bugs/bugtrackers?ws.op=getByName&name={}",
         urlenc(name.trim())
     ));
-    let tracker: Option<BugTracker> = client.get_url(&url).await?;
-    tracker.ok_or_else(|| LpError::NotFound(format!("Bug tracker '{name}' not found.")))
+    get_optional_raw(client, &url)
+        .await?
+        .ok_or_else(|| LpError::LocalNotFound(format!("Bug tracker '{name}' not found.")))
+}
+
+/// GET a named-operation result that Launchpad answers with an entry or a
+/// JSON `null`.
+async fn get_optional_raw<T: DeserializeOwned>(
+    client: &LaunchpadClient,
+    url: &str,
+) -> Result<Option<Raw<T>>> {
+    match client.get_url::<serde_json::Value>(url).await? {
+        serde_json::Value::Null => Ok(None),
+        value => Raw::from_value(value).map(Some),
+    }
 }
 
 /// List all remote bug trackers registered in Launchpad.
@@ -809,48 +1195,111 @@ pub async fn search_bug_trackers(
     search: Option<&str>,
     limit: Option<usize>,
 ) -> Result<Vec<BugTracker>> {
+    let found = search_bug_trackers_raw(client, search, limit).await?;
+    Ok(found
+        .trackers
+        .into_iter()
+        .map(|tracker| tracker.value)
+        .collect())
+}
+
+/// Remote bug trackers found by [`search_bug_trackers_raw()`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct BugTrackerSearch {
+    /// Matching trackers, in the order Launchpad returned them, each with the
+    /// exact JSON Launchpad returned for it.
+    pub trackers: Vec<Raw<BugTracker>>,
+    /// `true` when every page was scanned, so `trackers` holds every match.
+    /// `false` when the limit stopped the scan while more trackers might
+    /// still match.
+    pub complete: bool,
+}
+
+/// Like [`search_bug_trackers()`], but keep the exact JSON of each tracker
+/// and report whether every page was scanned.
+///
+/// The search runs locally over Launchpad's pages, so no Launchpad link can
+/// continue a filtered list; [`BugTrackerSearch::complete`] tells callers
+/// whether the number of matches is the true total.
+///
+/// # Errors
+///
+/// A zero limit is rejected before making any HTTP request.
+pub async fn search_bug_trackers_raw(
+    client: &LaunchpadClient,
+    search: Option<&str>,
+    limit: Option<usize>,
+) -> Result<BugTrackerSearch> {
     const PAGE_SIZE: usize = 100;
+
+    if limit == Some(0) {
+        return Err(LpError::Usage(
+            "Bug tracker search limit must be positive.".into(),
+        ));
+    }
 
     let mut page_url = client.url(&format!("/bugs/bugtrackers?ws.size={PAGE_SIZE}"));
     let search = search.map(str::to_lowercase);
     let mut matches = Vec::new();
 
     loop {
-        let page: Collection<BugTracker> = client.get_url(&page_url).await?;
-        for tracker in page.entries {
-            let matches_search = search.as_deref().is_none_or(|search| {
-                [
-                    tracker.name.as_deref(),
-                    tracker.title.as_deref(),
-                    tracker.summary.as_deref(),
-                    tracker.bug_tracker_type.as_deref(),
-                    tracker.base_url.as_deref(),
-                    tracker.self_link.as_deref(),
-                    tracker.web_link.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
-                .any(|field| field.to_lowercase().contains(search))
-            });
-
-            if matches_search {
+        let page: Collection<serde_json::Value> = client.get_url(&page_url).await?;
+        let mut entries = page.entries.into_iter().peekable();
+        while let Some(entry) = entries.next() {
+            let tracker = Raw::<BugTracker>::from_value(entry)?;
+            if tracker_matches(&tracker.value, search.as_deref()) {
                 matches.push(tracker);
                 if limit.is_some_and(|limit| matches.len() >= limit) {
-                    return Ok(matches);
+                    // The total is only known if nothing is left to scan.
+                    let complete = entries.peek().is_none() && page.next_collection_link.is_none();
+                    return Ok(BugTrackerSearch {
+                        trackers: matches,
+                        complete,
+                    });
                 }
             }
         }
 
         let Some(next_url) = page.next_collection_link else {
-            return Ok(matches);
+            return Ok(BugTrackerSearch {
+                trackers: matches,
+                complete: true,
+            });
         };
         page_url = next_url;
     }
 }
 
+/// Case-insensitive substring match over tracker metadata; `search` must
+/// already be lower case.
+fn tracker_matches(tracker: &BugTracker, search: Option<&str>) -> bool {
+    search.is_none_or(|search| {
+        [
+            tracker.name.as_deref(),
+            tracker.title.as_deref(),
+            tracker.summary.as_deref(),
+            tracker.bug_tracker_type.as_deref(),
+            tracker.base_url.as_deref(),
+            tracker.self_link.as_deref(),
+            tracker.web_link.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|field| field.to_lowercase().contains(search))
+    })
+}
+
 /// Fetch a bug tracker by its API self-link URL.
 pub async fn get_bug_tracker(client: &LaunchpadClient, tracker_url: &str) -> Result<BugTracker> {
     client.get_url(tracker_url).await
+}
+
+/// Like [`get_bug_tracker()`], but keep the exact JSON Launchpad returned.
+pub async fn get_bug_tracker_raw(
+    client: &LaunchpadClient,
+    tracker_url: &str,
+) -> Result<Raw<BugTracker>> {
+    client.get_url_raw(tracker_url).await
 }
 
 /// Create a new bug watch on a bug for the given remote bug tracker and remote bug ID.
@@ -878,6 +1327,49 @@ pub async fn add_bug_watch(
     bug_tracker_url: &str,
     remote_bug: &str,
 ) -> Result<BugWatch> {
+    add_bug_watch_inner(
+        client,
+        bug_id,
+        bug_tracker_url,
+        remote_bug,
+        ErrorStyle::Legacy,
+    )
+    .await
+    .map(|watch| watch.value)
+}
+
+/// Like [`add_bug_watch()`], but return the created watch's exact Launchpad
+/// JSON.
+///
+/// # Errors
+///
+/// Failures after Launchpad accepted the POST (an untrusted or missing
+/// `Location`, or a failed or malformed read-back) are reported as
+/// [`LpError::Partial`] with the same recovery guidance as
+/// [`add_bug_watch()`].
+pub async fn add_bug_watch_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    bug_tracker_url: &str,
+    remote_bug: &str,
+) -> Result<Raw<BugWatch>> {
+    add_bug_watch_inner(
+        client,
+        bug_id,
+        bug_tracker_url,
+        remote_bug,
+        ErrorStyle::Partial,
+    )
+    .await
+}
+
+async fn add_bug_watch_inner(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    bug_tracker_url: &str,
+    remote_bug: &str,
+    style: ErrorStyle,
+) -> Result<Raw<BugWatch>> {
     use std::collections::HashMap;
     let clean_remote = remote_bug.trim().trim_start_matches('#');
     let mut params = HashMap::new();
@@ -890,27 +1382,32 @@ pub async fn add_bug_watch(
         .map_err(|error| match error {
             // `LpError::Other` is only produced here after the POST succeeded
             // (a missing or untrusted `Location`), so the watch may exist.
-            LpError::Other(message) => LpError::Other(format!(
+            LpError::Other(message) | LpError::Partial(message) => style.applied(format!(
                 "{message} The bug watch may have been created on bug #{bug_id}; check \
                  `lpcli bug watches -b {bug_id}` before retrying."
             )),
             other => other,
         })?;
     client
-        .get_url(&location)
+        .get_url_raw(&location)
         .await
-        .map_err(|error| created_watch_read_failure(bug_id, &location, error))
+        .map_err(|error| created_watch_read_failure(bug_id, &location, error, style))
 }
 
 /// Build the error for a bug watch that Launchpad created but that could not
 /// be read back: the watch exists and can only be deleted in the web UI, so
 /// the error names it while preserving the original failure.
-fn created_watch_read_failure(bug_id: u64, location: &str, error: LpError) -> LpError {
+fn created_watch_read_failure(
+    bug_id: u64,
+    location: &str,
+    error: LpError,
+    style: ErrorStyle,
+) -> LpError {
     let watch = BugWatch {
         self_link: Some(location.to_string()),
         ..Default::default()
     };
-    LpError::Other(format!(
+    style.applied(format!(
         "Launchpad created a bug watch at '{location}', but it could not be read \
          back: {error}. {}",
         watch_cleanup_guidance(bug_id, &watch)
@@ -919,13 +1416,26 @@ fn created_watch_read_failure(bug_id: u64, location: &str, error: LpError) -> Lp
 
 /// Fetch all bug watches associated with a bug.
 pub async fn get_bug_watches(client: &LaunchpadClient, bug_id: u64) -> Result<Vec<BugWatch>> {
-    let url = client.url(&format!("/bugs/{bug_id}/bug_watches"));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all(client, &bug_collection_url(client, bug_id, "bug_watches")).await
+}
+
+/// Like [`get_bug_watches()`], but return Launchpad's collection shape with
+/// every entry unmodified.
+pub async fn get_bug_watches_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+) -> Result<Raw<Vec<BugWatch>>> {
+    Collection::fetch_all_raw(client, &bug_collection_url(client, bug_id, "bug_watches")).await
 }
 
 /// Fetch a single bug watch by its API URL.
 pub async fn get_bug_watch(client: &LaunchpadClient, watch_url: &str) -> Result<BugWatch> {
     client.get_url(watch_url).await
+}
+
+/// Like [`get_bug_watch()`], but keep the exact JSON Launchpad returned.
+pub async fn get_bug_watch_raw(client: &LaunchpadClient, watch_url: &str) -> Result<Raw<BugWatch>> {
+    client.get_url_raw(watch_url).await
 }
 
 /// Link a bug task to a bug watch identified by its API self-link.
@@ -947,6 +1457,22 @@ pub async fn set_bug_watch(
     client.patch_url(task_url, &params).await
 }
 
+/// Like [`set_bug_watch()`], but return the updated task's exact Launchpad
+/// JSON.
+///
+/// # Errors
+///
+/// If Launchpad accepts the change but its response cannot be read,
+/// returns [`LpError::Partial`].
+pub async fn set_bug_watch_raw(
+    client: &LaunchpadClient,
+    task_url: &str,
+    watch_url: &str,
+) -> Result<Raw<BugTask>> {
+    let body = serde_json::json!({ "bug_watch_link": watch_url });
+    patch_task_raw(client, task_url, &body, "Linking the bug task").await
+}
+
 /// Unlink a bug watch from a bug task.
 ///
 /// `task_url` must be the API self-link of the bug task.
@@ -955,6 +1481,18 @@ pub async fn set_bug_watch(
 pub async fn unset_bug_watch(client: &LaunchpadClient, task_url: &str) -> Result<BugTask> {
     let body = serde_json::json!({ "bug_watch_link": null });
     client.patch_url_with_value(task_url, &body).await
+}
+
+/// Like [`unset_bug_watch()`], but return the updated task's exact Launchpad
+/// JSON.
+///
+/// # Errors
+///
+/// If Launchpad accepts the change but its response cannot be read,
+/// returns [`LpError::Partial`].
+pub async fn unset_bug_watch_raw(client: &LaunchpadClient, task_url: &str) -> Result<Raw<BugTask>> {
+    let body = serde_json::json!({ "bug_watch_link": null });
+    patch_task_raw(client, task_url, &body, "Unlinking the bug task").await
 }
 
 /// Link a bug task to a remote bug on an external bug tracker.
@@ -1010,16 +1548,66 @@ pub async fn link_bug_task_remote(
     bug_tracker: &str,
     remote_bug: &str,
 ) -> Result<(BugTask, BugWatch)> {
+    let (task, watch) = link_bug_task_remote_inner(
+        client,
+        bug_id,
+        task_url,
+        bug_tracker,
+        remote_bug,
+        ErrorStyle::Legacy,
+    )
+    .await?;
+    Ok((task.value, watch.value))
+}
+
+/// Like [`link_bug_task_remote()`], but return the updated task and the
+/// watch with their exact Launchpad JSON.
+///
+/// # Errors
+///
+/// Invalid caller input detected before any mutation — a task or tracker
+/// URL that is not on the configured API origin, a task that belongs to a
+/// different bug, or a non-numeric GitHub issue number — is reported as
+/// [`LpError::Usage`]. When a watch was created and a later step fails, or
+/// the linked task cannot be read back, returns [`LpError::Partial`] with the
+/// same cleanup guidance as [`link_bug_task_remote()`].
+pub async fn link_bug_task_remote_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    task_url: &str,
+    bug_tracker: &str,
+    remote_bug: &str,
+) -> Result<(Raw<BugTask>, Raw<BugWatch>)> {
+    link_bug_task_remote_inner(
+        client,
+        bug_id,
+        task_url,
+        bug_tracker,
+        remote_bug,
+        ErrorStyle::Partial,
+    )
+    .await
+}
+
+async fn link_bug_task_remote_inner(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    task_url: &str,
+    bug_tracker: &str,
+    remote_bug: &str,
+    style: ErrorStyle,
+) -> Result<(Raw<BugTask>, Raw<BugWatch>)> {
     let clean_remote_bug = remote_bug.trim().trim_start_matches('#');
 
     // Preflight: fail before creating anything if the task is unusable.
-    preflight_bug_task(client, bug_id, task_url).await?;
+    preflight_bug_task(client, bug_id, task_url, style).await?;
 
     let tracker = if bug_tracker.starts_with("http://") || bug_tracker.starts_with("https://") {
         // An explicit tracker URL is fetched directly, so it must be on the
         // configured API origin too (tracker names go through the API as
         // query parameters and need no check).
-        ensure_same_api_origin(client, bug_tracker, "Bug tracker URL")?;
+        ensure_same_api_origin(client, bug_tracker, "Bug tracker URL")
+            .map_err(|error| style.usage_error(error))?;
         get_bug_tracker(client, bug_tracker).await?
     } else {
         get_bug_tracker_by_name(client, bug_tracker).await?
@@ -1036,7 +1624,7 @@ pub async fn link_bug_task_remote(
         .as_deref()
         .is_some_and(|base_url| base_url_host_is(base_url, "github.com"));
     let github_ref = if github_typed || github_host {
-        Some(github_ref_from_tracker(&tracker, clean_remote_bug)?)
+        Some(github_ref_from_tracker(&tracker, clean_remote_bug, style)?)
     } else {
         None
     };
@@ -1055,6 +1643,7 @@ pub async fn link_bug_task_remote(
         &tracker,
         &remote_bug_id,
         github_ref.as_ref(),
+        style,
     )
     .await
 }
@@ -1283,11 +1872,22 @@ pub async fn find_bug_tracker_by_base_url(
     client: &LaunchpadClient,
     base_url: &str,
 ) -> Result<Option<BugTracker>> {
+    find_bug_tracker_by_base_url_raw(client, base_url)
+        .await
+        .map(|tracker| tracker.map(|tracker| tracker.value))
+}
+
+/// Like [`find_bug_tracker_by_base_url()`], but keep the exact JSON
+/// Launchpad returned.
+pub async fn find_bug_tracker_by_base_url_raw(
+    client: &LaunchpadClient,
+    base_url: &str,
+) -> Result<Option<Raw<BugTracker>>> {
     let url = client.url(&format!(
         "/bugs/bugtrackers?ws.op=queryByBaseURL&base_url={}",
         urlenc(base_url.trim())
     ));
-    match client.get_url::<Option<BugTracker>>(&url).await {
+    match get_optional_raw(client, &url).await {
         Ok(tracker) => Ok(tracker),
         // Launchpad answers "no tracker for this base URL" with a JSON null
         // body; tolerate a 404-style answer too.
@@ -1333,6 +1933,17 @@ pub struct EnsureBugTrackerOutcome {
     pub created: bool,
 }
 
+/// The tracker found or created by [`ensure_bug_tracker_raw`], with its
+/// exact Launchpad JSON.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnsureBugTrackerRawOutcome {
+    /// The tracker registered for the base URL, as Launchpad returned it.
+    pub tracker: Raw<BugTracker>,
+    /// Whether this call issued the creation request; see
+    /// [`EnsureBugTrackerOutcome::created`].
+    pub created: bool,
+}
+
 /// Register a remote bug tracker if it does not exist yet, wrapping
 /// Launchpad's idempotent `ensureBugTracker` operation.
 ///
@@ -1369,24 +1980,54 @@ pub async fn ensure_bug_tracker(
     client: &LaunchpadClient,
     params: &EnsureBugTrackerParams<'_>,
 ) -> Result<EnsureBugTrackerOutcome> {
+    let outcome = ensure_bug_tracker_inner(client, params, ErrorStyle::Legacy).await?;
+    Ok(EnsureBugTrackerOutcome {
+        tracker: outcome.tracker.value,
+        created: outcome.created,
+    })
+}
+
+/// Like [`ensure_bug_tracker()`], but keep the tracker's exact Launchpad
+/// JSON.
+///
+/// # Errors
+///
+/// An empty `base_url`, a non-canonical GitHub base URL, or an explicit
+/// `name` already used by another tracker is reported as [`LpError::Usage`]
+/// before any mutation. Failures after Launchpad accepted the registration
+/// (an untrusted or missing `Location`, a failed read-back, or a created
+/// tracker that does not match the request) are reported as
+/// [`LpError::Partial`] with the same guidance as [`ensure_bug_tracker()`].
+pub async fn ensure_bug_tracker_raw(
+    client: &LaunchpadClient,
+    params: &EnsureBugTrackerParams<'_>,
+) -> Result<EnsureBugTrackerRawOutcome> {
+    ensure_bug_tracker_inner(client, params, ErrorStyle::Partial).await
+}
+
+async fn ensure_bug_tracker_inner(
+    client: &LaunchpadClient,
+    params: &EnsureBugTrackerParams<'_>,
+    style: ErrorStyle,
+) -> Result<EnsureBugTrackerRawOutcome> {
     let base_url = params.base_url.trim();
     if base_url.is_empty() {
-        return Err(LpError::Other(
+        return Err(style.usage_error(LpError::Other(
             "Bug tracker base_url must not be empty.".to_string(),
-        ));
+        )));
     }
     // A GitHub request must carry the strict canonical issues base URL so
     // the library never registers a junk tracker of its own (the CLI value
     // parser enforces the same invariant earlier).
     if params.bug_tracker_type == BUG_TRACKER_TYPE_GITHUB {
-        parse_github_issues_base_url(base_url)?;
+        parse_github_issues_base_url(base_url).map_err(|error| style.usage_error(error))?;
     }
 
     // Preflight: if a tracker for this base URL exists, `ensureBugTracker`
     // would return it unchanged, so answer without a mutation-capable POST.
-    if let Some(existing) = find_bug_tracker_by_base_url(client, base_url).await? {
-        validate_ensure_tracker_result(&existing, params)?;
-        return Ok(EnsureBugTrackerOutcome {
+    if let Some(existing) = find_bug_tracker_by_base_url_raw(client, base_url).await? {
+        validate_ensure_tracker_result(&existing.value, params)?;
+        return Ok(EnsureBugTrackerRawOutcome {
             tracker: existing,
             created: false,
         });
@@ -1396,24 +2037,25 @@ pub async fn ensure_bug_tracker(
     // different base URL would fail server-side with an opaque integrity
     // error; fail cleanly instead.
     if let Some(name) = params.name.map(str::trim).filter(|n| !n.is_empty()) {
-        match get_bug_tracker_by_name(client, name).await {
+        match get_bug_tracker_by_name_raw(client, name).await {
             Ok(existing) => {
-                if base_urls_equivalent(existing.base_url.as_deref().unwrap_or(""), base_url) {
+                let existing_base = existing.value.base_url.as_deref();
+                if base_urls_equivalent(existing_base.unwrap_or(""), base_url) {
                     // Same tracker under a different lookup path.
-                    validate_ensure_tracker_result(&existing, params)?;
-                    return Ok(EnsureBugTrackerOutcome {
+                    validate_ensure_tracker_result(&existing.value, params)?;
+                    return Ok(EnsureBugTrackerRawOutcome {
                         tracker: existing,
                         created: false,
                     });
                 }
-                return Err(LpError::Other(format!(
+                return Err(style.usage_error(LpError::Other(format!(
                     "Bug tracker name '{name}' is already used by a tracker with \
                      base_url '{}'; pick a different name. No tracker was created \
                      or modified.",
-                    existing.base_url.as_deref().unwrap_or("<unknown>")
-                )));
+                    existing_base.unwrap_or("<unknown>")
+                ))));
             }
-            Err(LpError::NotFound(_)) => {}
+            Err(LpError::NotFound(_) | LpError::LocalNotFound(_)) => {}
             Err(e) => return Err(e),
         }
     }
@@ -1439,21 +2081,26 @@ pub async fn ensure_bug_tracker(
         .map_err(|error| match error {
             // `LpError::Other` is only produced here after the POST succeeded
             // (a missing or untrusted `Location`), so the tracker may exist.
-            LpError::Other(message) => LpError::Other(format!(
+            LpError::Other(message) | LpError::Partial(message) => style.applied(format!(
                 "{message} {}",
                 unconfirmed_tracker_guidance(base_url)
             )),
             other => other,
         })?;
-    let tracker: BugTracker = client.get_url(&location).await.map_err(|error| {
-        LpError::Other(format!(
+    let tracker: Raw<BugTracker> = client.get_url_raw(&location).await.map_err(|error| {
+        style.applied(format!(
             "Launchpad accepted the bug tracker registration and reported it at \
              '{location}', but it could not be read back: {error}. {}",
             unconfirmed_tracker_guidance(base_url)
         ))
     })?;
-    validate_ensure_tracker_result(&tracker, params)?;
-    Ok(EnsureBugTrackerOutcome {
+    // The registration was accepted, so a mismatching result is a change
+    // Launchpad already made.
+    validate_ensure_tracker_result(&tracker.value, params).map_err(|error| match error {
+        LpError::Other(message) => style.applied(message),
+        other => other,
+    })?;
+    Ok(EnsureBugTrackerRawOutcome {
         tracker,
         created: true,
     })
@@ -1539,6 +2186,27 @@ pub async fn ensure_github_bug_tracker(
     client: &LaunchpadClient,
     github_ref: &GitHubBugRef,
 ) -> Result<EnsureBugTrackerOutcome> {
+    let outcome = ensure_github_bug_tracker_inner(client, github_ref, ErrorStyle::Legacy).await?;
+    Ok(EnsureBugTrackerOutcome {
+        tracker: outcome.tracker.value,
+        created: outcome.created,
+    })
+}
+
+/// Like [`ensure_github_bug_tracker()`], but keep the tracker's exact
+/// Launchpad JSON. Errors are classified as for [`ensure_bug_tracker_raw()`].
+pub async fn ensure_github_bug_tracker_raw(
+    client: &LaunchpadClient,
+    github_ref: &GitHubBugRef,
+) -> Result<EnsureBugTrackerRawOutcome> {
+    ensure_github_bug_tracker_inner(client, github_ref, ErrorStyle::Partial).await
+}
+
+async fn ensure_github_bug_tracker_inner(
+    client: &LaunchpadClient,
+    github_ref: &GitHubBugRef,
+    style: ErrorStyle,
+) -> Result<EnsureBugTrackerRawOutcome> {
     let base_url = github_ref.base_url();
     let summary = format!(
         "Bug tracker for the {}/{} GitHub repository issues/PRs.",
@@ -1552,7 +2220,7 @@ pub async fn ensure_github_bug_tracker(
         title: None,
         summary: Some(&summary),
     };
-    ensure_bug_tracker(client, &params).await
+    ensure_bug_tracker_inner(client, &params, style).await
 }
 
 /// Link a Launchpad bug task to a GitHub issue/PR in one library call (the
@@ -1594,24 +2262,70 @@ pub async fn link_github_bug_task(
     task_url: &str,
     github_ref: &GitHubBugRef,
 ) -> Result<(BugTask, BugWatch)> {
+    let (task, watch) =
+        link_github_bug_task_inner(client, bug_id, task_url, github_ref, ErrorStyle::Legacy)
+            .await?;
+    Ok((task.value, watch.value))
+}
+
+/// Like [`link_github_bug_task()`], but return the updated task and the
+/// watch with their exact Launchpad JSON.
+///
+/// # Errors
+///
+/// Invalid caller input detected before any mutation (see
+/// [`link_bug_task_remote_raw()`]) is reported as [`LpError::Usage`]. When
+/// this call registered a tracker or created a watch and a later step fails,
+/// or the linked task cannot be read back, returns [`LpError::Partial`] with
+/// recovery guidance.
+pub async fn link_github_bug_task_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    task_url: &str,
+    github_ref: &GitHubBugRef,
+) -> Result<(Raw<BugTask>, Raw<BugWatch>)> {
+    link_github_bug_task_inner(client, bug_id, task_url, github_ref, ErrorStyle::Partial).await
+}
+
+async fn link_github_bug_task_inner(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    task_url: &str,
+    github_ref: &GitHubBugRef,
+    style: ErrorStyle,
+) -> Result<(Raw<BugTask>, Raw<BugWatch>)> {
     // 1. Task eligibility before any mutation, including tracker registration.
-    preflight_bug_task(client, bug_id, task_url).await?;
+    preflight_bug_task(client, bug_id, task_url, style).await?;
 
     // 2. Tracker (find-or-register, validated against the reference).
-    let outcome = ensure_github_bug_tracker(client, github_ref).await?;
+    let outcome = ensure_github_bug_tracker_inner(client, github_ref, style).await?;
 
     // 3. Reuse or create the watch, validate its URL, and link the task —
     //    passing the original reference so the final watch URL is validated
     //    against the intended repository before the task is patched.
-    link_task_to_watch(
+    let linked = link_task_to_watch(
         client,
         bug_id,
         task_url,
-        &outcome.tracker,
+        &outcome.tracker.value,
         &github_ref.number().to_string(),
         Some(github_ref),
+        style,
     )
-    .await
+    .await;
+    match linked {
+        // A tracker registered by this call stays registered; a retry
+        // reuses it, but the failure is still a partial change.
+        Err(error) if style == ErrorStyle::Partial && outcome.created => match error {
+            LpError::Partial(_) => Err(error),
+            error => Err(LpError::Partial(format!(
+                "Registered bug tracker for '{}', but linking the bug task failed: \
+                 {error}. A retry reuses the registered tracker.",
+                github_ref.base_url()
+            ))),
+        },
+        other => other,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1620,6 +2334,101 @@ pub async fn link_github_bug_task(
 
 fn urlenc(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+/// How multi-step operations classify their failures.
+///
+/// The typed functions keep their historical [`LpError::Other`] messages;
+/// the `_raw` functions report already-applied changes as
+/// [`LpError::Partial`] and invalid caller input as [`LpError::Usage`],
+/// with the same message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorStyle {
+    Legacy,
+    Partial,
+}
+
+impl ErrorStyle {
+    /// An error for a change Launchpad has (or may have) already applied.
+    fn applied(self, message: String) -> LpError {
+        match self {
+            Self::Legacy => LpError::Other(message),
+            Self::Partial => LpError::Partial(message),
+        }
+    }
+
+    /// Reclassify a validation failure of caller-supplied input.
+    fn usage_error(self, error: LpError) -> LpError {
+        match (self, error) {
+            (Self::Partial, LpError::Other(message)) => LpError::Usage(message),
+            (_, error) => error,
+        }
+    }
+}
+
+/// Classify a failure of a `Location`-returning POST for a `_raw` function.
+///
+/// `post_*_created_location` returns [`LpError::Partial`] after Launchpad
+/// accepted the request but a missing or untrusted `Location` prevents read-back, so
+/// the change may exist: that becomes [`LpError::Partial`]. Other errors
+/// mean the request failed and propagate unchanged.
+fn created_location_failure(error: LpError, guidance: &str) -> LpError {
+    match error {
+        LpError::Other(message) | LpError::Partial(message) => {
+            LpError::Partial(format!("{message} {guidance}"))
+        }
+        other => other,
+    }
+}
+
+/// Read back an entry created by a successful POST, appending `guidance` to
+/// the [`LpError::Partial`] reported when that fails.
+async fn read_created_raw<T: DeserializeOwned>(
+    client: &LaunchpadClient,
+    location: &str,
+    description: &str,
+    guidance: &str,
+) -> Result<Raw<T>> {
+    client
+        .get_created_raw(location, description)
+        .await
+        .map_err(|error| match error {
+            LpError::Partial(message) => LpError::Partial(format!("{message}. {guidance}")),
+            other => other,
+        })
+}
+
+/// PATCH an entry and keep the exact entry Launchpad returned.
+async fn patch_entry_raw<T: DeserializeOwned>(
+    client: &LaunchpadClient,
+    url: &str,
+    body: &serde_json::Value,
+    description: &str,
+    guidance: &str,
+) -> Result<Raw<T>> {
+    let response = client.patch_url_with_value(url, body).await;
+    applied_response(response, description, guidance)
+}
+
+/// Decode the JSON returned by a successful mutation.
+///
+/// A JSON error means Launchpad answered with a success status, so the change
+/// was applied even though its result cannot be shown: that is reported as
+/// [`LpError::Partial`]. HTTP and API errors propagate unchanged.
+fn applied_response<T: DeserializeOwned>(
+    response: Result<serde_json::Value>,
+    description: &str,
+    guidance: &str,
+) -> Result<Raw<T>> {
+    response
+        .and_then(Raw::from_value)
+        .map_err(|error| match error {
+            LpError::Json(error) => LpError::Partial(format!(
+                "{description} succeeded, but Launchpad's response could not be read: \
+             {error}. {guidance}"
+            )),
+            other => other,
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -1673,13 +2482,22 @@ fn ensure_same_api_origin(client: &LaunchpadClient, url_text: &str, what: &str) 
 /// `target_link` (e.g. a bug-watch URL passed as `--task-url`, which
 /// deserializes into the same all-Option entry shape) is rejected as well:
 /// only real tasks carry a target.
+///
+/// With [`ErrorStyle::Partial`], these rejections of the caller's task URL
+/// are reported as [`LpError::Usage`].
 async fn preflight_bug_task(
     client: &LaunchpadClient,
     bug_id: u64,
     task_url: &str,
-) -> Result<BugTask> {
-    ensure_same_api_origin(client, task_url, "Bug task URL")?;
+    style: ErrorStyle,
+) -> Result<()> {
+    ensure_same_api_origin(client, task_url, "Bug task URL")
+        .map_err(|error| style.usage_error(error))?;
     let task: BugTask = client.get_url(task_url).await?;
+    validate_preflight_task(&task, bug_id, task_url).map_err(|error| style.usage_error(error))
+}
+
+fn validate_preflight_task(task: &BugTask, bug_id: u64, task_url: &str) -> Result<()> {
     // Fail closed: without a bug_link the task's ownership cannot be
     // verified, and an entry-shaped response that deserialises to all-None
     // fields must not be treated as linkable.
@@ -1711,7 +2529,7 @@ async fn preflight_bug_task(
              bug watch URL?). The task was NOT modified."
         )));
     }
-    Ok(task)
+    Ok(())
 }
 
 /// Shared tail of [`link_bug_task_remote`] and [`link_github_bug_task`]:
@@ -1727,6 +2545,11 @@ async fn preflight_bug_task(
 /// is validated before the task is patched; if a watch had to be created and
 /// its URL turns out to be invalid, the error names the watch and its
 /// web-UI deletion URL.
+///
+/// With [`ErrorStyle::Partial`], failures after this call created a watch,
+/// and a successful link whose response cannot be read, are reported as
+/// [`LpError::Partial`]; failures involving only a reused watch keep their
+/// original classification because nothing was changed.
 async fn link_task_to_watch(
     client: &LaunchpadClient,
     bug_id: u64,
@@ -1734,16 +2557,25 @@ async fn link_task_to_watch(
     tracker: &BugTracker,
     remote_bug: &str,
     github_ref: Option<&GitHubBugRef>,
-) -> Result<(BugTask, BugWatch)> {
+    style: ErrorStyle,
+) -> Result<(Raw<BugTask>, Raw<BugWatch>)> {
     let tracker_url = tracker.self_link.as_deref().ok_or_else(|| {
-        LpError::NotFound(format!(
+        LpError::LocalNotFound(format!(
             "Bug tracker '{}' has no self_link.",
             tracker.name.as_deref().unwrap_or("<unknown>")
         ))
     })?;
     let tracker_identity = api_resource_identity(tracker_url);
-    let existing_watches = get_bug_watches(client, bug_id).await?;
-    let (watch, watch_created) = match existing_watches.into_iter().find(|w| {
+    let existing_watches = Collection::<serde_json::Value>::fetch_all(
+        client,
+        &bug_collection_url(client, bug_id, "bug_watches"),
+    )
+    .await?
+    .into_iter()
+    .map(Raw::<BugWatch>::from_value)
+    .collect::<Result<Vec<_>>>()?;
+    let (raw_watch, watch_created) = match existing_watches.into_iter().find(|raw| {
+        let w = &raw.value;
         let matches_tracker = w
             .bug_tracker_link
             .as_deref()
@@ -1763,9 +2595,16 @@ async fn link_task_to_watch(
     }) {
         Some(found) => (found, false),
         None => (
-            add_bug_watch(client, bug_id, tracker_url, remote_bug).await?,
+            add_bug_watch_inner(client, bug_id, tracker_url, remote_bug, style).await?,
             true,
         ),
+    };
+    let watch = &raw_watch.value;
+    // Only a watch created by this call is a change made by this call.
+    let created_style = if watch_created {
+        style
+    } else {
+        ErrorStyle::Legacy
     };
 
     // Validate the actual watch URL before patching the task. The URL is
@@ -1773,8 +2612,8 @@ async fn link_task_to_watch(
     // point where a mis-configured tracker becomes observable.
     match github_ref {
         Some(reference) => {
-            validate_github_watch_url(&watch, reference)
-                .map_err(|error| watch_link_failure(bug_id, &watch, error))?;
+            validate_github_watch_url(watch, reference)
+                .map_err(|error| watch_link_failure(bug_id, watch, error, created_style))?;
         }
         None => {
             if let Some(url) = watch.url.as_deref()
@@ -1782,8 +2621,9 @@ async fn link_task_to_watch(
             {
                 return Err(watch_link_failure(
                     bug_id,
-                    &watch,
+                    watch,
                     LpError::Other(format!("Bug watch URL '{url}' is not a valid URL: {e}")),
+                    created_style,
                 ));
             }
         }
@@ -1791,19 +2631,30 @@ async fn link_task_to_watch(
 
     let watch_api_url = watch.self_link.as_deref().ok_or_else(|| {
         if watch_created {
-            LpError::Other(format!(
+            style.applied(format!(
                 "Bug watch response has no self_link; the bug task was NOT linked. {}",
-                watch_cleanup_guidance(bug_id, &watch)
+                watch_cleanup_guidance(bug_id, watch)
             ))
         } else {
-            LpError::NotFound("Bug watch has no self_link.".to_string())
+            LpError::LocalNotFound("Bug watch has no self_link.".to_string())
         }
     })?;
 
-    let updated_task = set_bug_watch(client, task_url, watch_api_url)
+    let body = serde_json::json!({ "bug_watch_link": watch_api_url });
+    let response = client
+        .patch_url_with_value::<serde_json::Value>(task_url, &body)
         .await
-        .map_err(|error| task_link_failure(bug_id, &watch, watch_created, error))?;
-    Ok((updated_task, watch))
+        .and_then(Raw::<BugTask>::from_value);
+    let updated_task = response.map_err(|error| match (style, error) {
+        // A success status with an unreadable body: the task is linked.
+        (ErrorStyle::Partial, LpError::Json(error)) => LpError::Partial(format!(
+            "Linking the bug task succeeded, but Launchpad's response could not be \
+             read: {error}. Check `lpcli bug watches -b {bug_id}` and the task \
+             ({task_url}) before retrying."
+        )),
+        (_, error) => task_link_failure(bug_id, watch, watch_created, error, style),
+    })?;
+    Ok((updated_task, raw_watch))
 }
 
 /// Whether `base_url` is an absolute URL with the given host (`url::Url`
@@ -1960,7 +2811,14 @@ pub fn parse_github_issues_base_url(base_url: &str) -> Result<(String, String)> 
 ///   including lookalike hosts such as `github.com.evil.com` — is rejected
 ///   by the strict `https://github.com/{owner}/{repo}/issues` shape check
 ///   (hosts are compared exactly, never by suffix).
-fn github_ref_from_tracker(tracker: &BugTracker, remote_bug: &str) -> Result<GitHubBugRef> {
+///
+/// With [`ErrorStyle::Partial`], a malformed `remote_bug` (caller input) is
+/// reported as [`LpError::Usage`]; tracker configuration problems are not.
+fn github_ref_from_tracker(
+    tracker: &BugTracker,
+    remote_bug: &str,
+    style: ErrorStyle,
+) -> Result<GitHubBugRef> {
     let name = tracker.name.as_deref().unwrap_or("<unnamed>");
     if tracker.bug_tracker_type.as_deref() != Some(BUG_TRACKER_TYPE_GITHUB) {
         return Err(LpError::Other(format!(
@@ -1983,7 +2841,7 @@ fn github_ref_from_tracker(tracker: &BugTracker, remote_bug: &str) -> Result<Git
         )));
     };
     let (owner, repo) = parse_github_issues_base_url(base_url)?;
-    let number = parse_github_number(remote_bug)?;
+    let number = parse_github_number(remote_bug).map_err(|error| style.usage_error(error))?;
     GitHubBugRef::new(&owner, &repo, number)
 }
 
@@ -2093,9 +2951,14 @@ fn watch_cleanup_guidance(bug_id: u64, watch: &BugWatch) -> String {
 /// Build the error for a watch whose derived URL failed validation. The
 /// error names the watch, its derived URL, and its web-UI page, and points
 /// at `bug watches` for verification before retrying or deleting it.
-fn watch_link_failure(bug_id: u64, watch: &BugWatch, detail: LpError) -> LpError {
+fn watch_link_failure(
+    bug_id: u64,
+    watch: &BugWatch,
+    detail: LpError,
+    style: ErrorStyle,
+) -> LpError {
     let url_text = watch.url.as_deref().unwrap_or("<none>");
-    LpError::Other(format!(
+    style.applied(format!(
         "{detail} (watch URL: {url_text}): {}",
         watch_cleanup_guidance(bug_id, watch)
     ))
@@ -2110,9 +2973,10 @@ fn task_link_failure(
     watch: &BugWatch,
     watch_created: bool,
     error: LpError,
+    style: ErrorStyle,
 ) -> LpError {
     if watch_created {
-        LpError::Other(format!(
+        style.applied(format!(
             "{error}: {}",
             watch_cleanup_guidance(bug_id, watch)
         ))

@@ -30,13 +30,11 @@ impl Display {
     }
 
     /// Construct a display with an explicit width.
-    #[cfg(test)]
     pub fn from_width(width: u16) -> Self {
         Self { width }
     }
 
     /// The resolved maximum table width.
-    #[cfg(test)]
     pub fn width(self) -> u16 {
         self.width
     }

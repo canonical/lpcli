@@ -1,0 +1,21 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "entries": [
+    {
+      "date_expires": null,
+      "date_joined": "[timestamp]",
+      "http_etag": "\"etag-1234\"",
+      "member_link": "https://api.launchpad.net/devel/~jdoe",
+      "resource_type_link": "https://api.launchpad.net/devel/#team_membership",
+      "self_link": "https://api.launchpad.net/devel/~ubuntu-dev/+member/jdoe",
+      "status": "Approved",
+      "team_link": "https://api.launchpad.net/devel/~ubuntu-dev",
+      "web_link": "https://launchpad.net/~ubuntu-dev/+member/jdoe"
+    }
+  ],
+  "start": 0,
+  "total_size": 1
+}

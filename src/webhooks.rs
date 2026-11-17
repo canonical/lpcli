@@ -9,11 +9,14 @@
 //! | [`delete_webhook`] | Delete a webhook by URL |
 //! | [`ping_webhook`] | Send a test ping delivery |
 //! | [`list_deliveries`] | List recent deliveries for a webhook |
+//!
+//! Reads and entry-creating mutations also have `*_raw` counterparts that
+//! keep the exact JSON Launchpad returned (see [`Raw`]).
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::client::{Collection, LaunchpadClient};
+use crate::client::{Collection, LaunchpadClient, Raw};
 use crate::error::Result;
 
 // ---------------------------------------------------------------------------
@@ -34,9 +37,9 @@ pub struct Webhook {
     /// API link to the person who created the webhook.
     pub registrant_link: Option<String>,
     /// Date created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// Date last modified.
-    pub date_last_modified: Option<DateTime<Utc>>,
+    pub date_last_modified: Option<Timestamp>,
     /// API self-link.
     pub self_link: Option<String>,
     /// Launchpad web link.
@@ -53,7 +56,7 @@ pub struct WebhookDelivery {
     /// Whether the delivery is still pending.
     pub pending: Option<bool>,
     /// When the delivery was dispatched.
-    pub date_sent: Option<DateTime<Utc>>,
+    pub date_sent: Option<Timestamp>,
     /// API link to the parent webhook.
     pub webhook_link: Option<String>,
     /// API self-link.
@@ -83,6 +86,55 @@ pub async fn create_webhook(
     active: bool,
     secret: Option<&str>,
 ) -> Result<Webhook> {
+    let location = create_webhook_location(
+        client,
+        target_path,
+        delivery_url,
+        event_types,
+        active,
+        secret,
+    )
+    .await?;
+    client.get_url(&location).await
+}
+
+/// Like [`create_webhook()`], but return the created webhook's exact
+/// Launchpad JSON.
+///
+/// # Errors
+///
+/// If Launchpad creates the webhook but reading it back from the reported
+/// location fails, returns [`LpError::Partial`](crate::error::LpError::Partial).
+pub async fn create_webhook_raw(
+    client: &LaunchpadClient,
+    target_path: &str,
+    delivery_url: &str,
+    event_types: &[&str],
+    active: bool,
+    secret: Option<&str>,
+) -> Result<Raw<Webhook>> {
+    let location = create_webhook_location(
+        client,
+        target_path,
+        delivery_url,
+        event_types,
+        active,
+        secret,
+    )
+    .await?;
+    client
+        .get_created_raw(&location, "Creating the webhook")
+        .await
+}
+
+async fn create_webhook_location(
+    client: &LaunchpadClient,
+    target_path: &str,
+    delivery_url: &str,
+    event_types: &[&str],
+    active: bool,
+    secret: Option<&str>,
+) -> Result<String> {
     let mut pairs: Vec<(&str, &str)> = vec![
         ("ws.op", "newWebhook"),
         ("delivery_url", delivery_url),
@@ -95,10 +147,9 @@ pub async fn create_webhook(
         pairs.push(("secret", s));
     }
     let clean = target_path.trim_start_matches('/');
-    let location = client
+    client
         .post_pairs_created_location(&format!("/{clean}"), &pairs)
-        .await?;
-    client.get_url(&location).await
+        .await
 }
 
 /// List webhooks registered on a Launchpad target.
@@ -108,9 +159,26 @@ pub async fn list_target_webhooks(
     client: &LaunchpadClient,
     target_path: &str,
 ) -> Result<Vec<Webhook>> {
+    Collection::fetch_all(client, &target_webhooks_url(client, target_path)).await
+}
+
+/// Like [`list_target_webhooks()`], but return Launchpad's collection shape
+/// with every page's entries unmodified.
+pub async fn list_target_webhooks_raw(
+    client: &LaunchpadClient,
+    target_path: &str,
+) -> Result<Raw<Vec<Webhook>>> {
+    Collection::fetch_all_raw(client, &target_webhooks_url(client, target_path)).await
+}
+
+fn target_webhooks_url(client: &LaunchpadClient, target_path: &str) -> String {
     let clean = target_path.trim_start_matches('/');
-    let url = client.url(&format!("/{clean}/webhooks"));
-    Collection::fetch_all(client, &url).await
+    client.url(&format!("/{clean}/webhooks"))
+}
+
+/// Fetch a webhook by its `self_link`, keeping the exact Launchpad JSON.
+pub async fn get_webhook_raw(client: &LaunchpadClient, webhook_url: &str) -> Result<Raw<Webhook>> {
+    client.get_url_raw(webhook_url).await
 }
 
 /// Delete a webhook.
@@ -130,6 +198,25 @@ pub async fn ping_webhook(client: &LaunchpadClient, webhook_url: &str) -> Result
     client.get_url(&location).await
 }
 
+/// Like [`ping_webhook()`], but return the created delivery's exact
+/// Launchpad JSON.
+///
+/// # Errors
+///
+/// If the ping is sent but reading the delivery back from the reported
+/// location fails, returns [`LpError::Partial`](crate::error::LpError::Partial).
+pub async fn ping_webhook_raw(
+    client: &LaunchpadClient,
+    webhook_url: &str,
+) -> Result<Raw<WebhookDelivery>> {
+    let location = client
+        .post_pairs_url_created_location(webhook_url, &[("ws.op", "ping")])
+        .await?;
+    client
+        .get_created_raw(&location, "Pinging the webhook")
+        .await
+}
+
 /// List recent deliveries for a webhook.
 pub async fn list_deliveries(
     client: &LaunchpadClient,
@@ -137,6 +224,16 @@ pub async fn list_deliveries(
 ) -> Result<Vec<WebhookDelivery>> {
     let url = format!("{webhook_url}/deliveries");
     Collection::fetch_all(client, &url).await
+}
+
+/// Like [`list_deliveries()`], but return Launchpad's collection shape with
+/// every page's entries unmodified.
+pub async fn list_deliveries_raw(
+    client: &LaunchpadClient,
+    webhook_url: &str,
+) -> Result<Raw<Vec<WebhookDelivery>>> {
+    let url = format!("{webhook_url}/deliveries");
+    Collection::fetch_all_raw(client, &url).await
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,42 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_json(&parsed, base)"
+---
+{
+  "entries": [
+    {
+      "arch_tag": "amd64",
+      "buildstate": "Needs building",
+      "date_started": null,
+      "distro_arch_series_link": "https://api.launchpad.net/devel/ubuntu/noble/amd64",
+      "http_etag": "\"etag-build\"",
+      "pocket": "Updates",
+      "requester_link": "https://api.launchpad.net/devel/~jdoe",
+      "resource_type_link": "https://api.launchpad.net/devel/#snap_build",
+      "score": 2510,
+      "self_link": "https://api.launchpad.net/devel/~jdoe/+snap/my-snap/+build/11",
+      "store_upload_status": "Unscheduled",
+      "title": "amd64 build of my-snap snap package in ubuntu noble-updates",
+      "upload_log_url": null,
+      "web_link": "https://launchpad.net/~jdoe/+snap/my-snap/+build/11"
+    },
+    {
+      "arch_tag": "arm64",
+      "buildstate": "Needs building",
+      "date_started": null,
+      "distro_arch_series_link": "https://api.launchpad.net/devel/ubuntu/noble/arm64",
+      "http_etag": "\"etag-build\"",
+      "pocket": "Updates",
+      "requester_link": "https://api.launchpad.net/devel/~jdoe",
+      "resource_type_link": "https://api.launchpad.net/devel/#snap_build",
+      "score": 2505,
+      "self_link": "https://api.launchpad.net/devel/~jdoe/+snap/my-snap/+build/12",
+      "store_upload_status": "Unscheduled",
+      "title": "arm64 build of my-snap snap package in ubuntu noble-updates",
+      "upload_log_url": null,
+      "web_link": "https://launchpad.net/~jdoe/+snap/my-snap/+build/12"
+    }
+  ],
+  "start": 0,
+  "total_size": 2
+}

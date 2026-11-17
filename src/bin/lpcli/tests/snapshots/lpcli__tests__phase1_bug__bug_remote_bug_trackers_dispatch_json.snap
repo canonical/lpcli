@@ -1,0 +1,19 @@
+---
+source: src/bin/lpcli/tests/phase1_bug.rs
+expression: value
+---
+{
+  "entries": [
+    {
+      "active": true,
+      "base_url": "https://bugs.debian.org/",
+      "bug_tracker_type": "Debbugs",
+      "name": "debbugs",
+      "resource_type_link": "[server]/#bug_tracker",
+      "self_link": "[server]/bugs/bugtrackers/debbugs",
+      "title": "Debian Bug tracker"
+    }
+  ],
+  "start": 0,
+  "total_size": 1
+}

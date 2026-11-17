@@ -1,0 +1,32 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "entries": [
+    {
+      "action": "Answer",
+      "content": "Try this.\nThen that.",
+      "date_created": "[timestamp]",
+      "http_etag": "\"etag-1234\"",
+      "index": 1,
+      "owner_link": "https://api.launchpad.net/devel/~helper",
+      "resource_type_link": "https://api.launchpad.net/devel/#question_message",
+      "self_link": "https://api.launchpad.net/devel/ubuntu/+question/7/messages/1",
+      "web_link": "https://launchpad.net/ubuntu/+question/7/messages/1"
+    },
+    {
+      "action": null,
+      "content": "Thanks!",
+      "date_created": "[timestamp]",
+      "http_etag": "\"etag-1234\"",
+      "index": 2,
+      "owner_link": "https://api.launchpad.net/devel/~jdoe",
+      "resource_type_link": "https://api.launchpad.net/devel/#question_message",
+      "self_link": "https://api.launchpad.net/devel/ubuntu/+question/7/messages/2",
+      "web_link": "https://launchpad.net/ubuntu/+question/7/messages/2"
+    }
+  ],
+  "start": 0,
+  "total_size": 2
+}

@@ -1,0 +1,22 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_json(&parsed, base)"
+---
+{
+  "date_created": "[timestamp]",
+  "date_scheduled": null,
+  "date_sent": "[timestamp]",
+  "error_message": null,
+  "event_type": "ping",
+  "http_etag": "\"etag-delivery\"",
+  "payload": {
+    "ping": true
+  },
+  "pending": false,
+  "resource_type_link": "[server url]/#webhook_delivery",
+  "response_status_code": 200,
+  "self_link": "[server url]/launchpad/+webhook/1/+delivery/9",
+  "successful": true,
+  "web_link": "https://launchpad.net/launchpad/+webhook/1/+delivery/9",
+  "webhook_link": "[server url]/launchpad/+webhook/1"
+}

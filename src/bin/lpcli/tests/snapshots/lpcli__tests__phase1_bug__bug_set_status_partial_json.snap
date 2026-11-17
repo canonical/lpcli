@@ -1,0 +1,45 @@
+---
+source: src/bin/lpcli/tests/phase1_bug.rs
+expression: value
+---
+{
+  "bug_tasks": {
+    "entries": [
+      {
+        "assignee_link": null,
+        "bug_link": "[server]/bugs/42",
+        "bug_target_display_name": "curl (Ubuntu)",
+        "bug_target_name": "curl (Ubuntu)",
+        "bug_watch_link": null,
+        "date_created": "[timestamp]",
+        "date_fix_released": null,
+        "http_etag": "\"task-etag\"",
+        "importance": "Medium",
+        "is_complete": false,
+        "milestone_link": null,
+        "resource_type_link": "[server]/#bug_task",
+        "self_link": "[server]/ubuntu/+source/curl/+bug/42",
+        "status": "Triaged",
+        "target_link": "https://api.launchpad.net/devel/ubuntu/+source/curl",
+        "title": "Bug #42 in curl: \"crash\"",
+        "web_link": "https://bugs.launchpad.net/ubuntu/+source/curl/+bug/42"
+      }
+    ],
+    "start": 0,
+    "total_size": 1
+  },
+  "lpcli": {
+    "failures": [
+      {
+        "error": {
+          "http_status": 403,
+          "kind": "permission_denied",
+          "message": "Launchpad API error 403: Permission denied. Verify your Launchpad account has the required permissions. not allowed oauth_token=[redacted]"
+        },
+        "operation": "set_status",
+        "target": "curl (Ubuntu noble)",
+        "task_link": "[server]/ubuntu/noble/+source/curl/+bug/42"
+      }
+    ]
+  }
+}

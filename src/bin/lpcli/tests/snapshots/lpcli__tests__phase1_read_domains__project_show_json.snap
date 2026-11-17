@@ -1,0 +1,21 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "active": true,
+  "brand_new_field": [
+    1,
+    2,
+    3
+  ],
+  "date_created": "[timestamp]",
+  "display_name": "Launchpad",
+  "homepage_url": "https://launchpad.net/",
+  "http_etag": "\"etag-1234\"",
+  "name": "launchpad",
+  "resource_type_link": "https://api.launchpad.net/devel/#project",
+  "self_link": "https://api.launchpad.net/devel/launchpad",
+  "summary": "Launchpad is a software collaboration platform.",
+  "web_link": "https://launchpad.net/launchpad"
+}

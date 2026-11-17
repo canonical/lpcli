@@ -153,11 +153,11 @@ async fn retry_after_future_dates_surface_bounded_metadata_in_all_handlers() {
     let header = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(120));
     // Round-trip the header because HTTP dates have only whole-second precision.
     let target = httpdate::parse_http_date(&header).expect("valid generated HTTP date");
-    let date: chrono::DateTime<chrono::Utc> = target.into();
+    let date = jiff::Timestamp::try_from(target).expect("HTTP date is representable");
     let headers = [
         header,
-        date.format("%A, %d-%b-%y %H:%M:%S GMT").to_string(),
-        date.format("%a %b %e %H:%M:%S %Y").to_string(),
+        date.strftime("%A, %d-%b-%y %H:%M:%S GMT").to_string(),
+        date.strftime("%a %b %e %H:%M:%S %Y").to_string(),
     ];
     let client = LaunchpadClient::new(None)
         .with_base_url(server.url())

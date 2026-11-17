@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_text(&rendered, base)"
+---
+✓ Webhook deleted.
+  Webhook URL: [server url]/launchpad/+webhook/1

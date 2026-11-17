@@ -1,0 +1,15 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_text(&rendered, base)"
+---
+2 pending builds found.
+
+Title: amd64 build of my-snap snap package in ubuntu noble-updates
+Pocket: Updates
+Score: 2510
+Upload Status: Unscheduled
+
+Title: arm64 build of my-snap snap package in ubuntu noble-updates
+Pocket: Updates
+Score: 2505
+Upload Status: Unscheduled

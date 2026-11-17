@@ -1,0 +1,5 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+No security keys are registered. Register one with `lpcli hardware-token register <NAME>`.

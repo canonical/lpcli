@@ -1,0 +1,15 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_text(&rendered, base)"
+---
+┌───────────────────────────┬────────┬────────────────────┬────────────┬───────────────────────────┐
+│ Delivery URL              ┆ Active ┆ Events             ┆ Created    ┆ Webhook URL               │
+╞═══════════════════════════╪════════╪════════════════════╪════════════╪═══════════════════════════╡
+│ https://ci.example.com/ho ┆ true   ┆ git:push:0.1,      ┆ 2026-01-02 ┆ https://api.launchpad.net │
+│ oks/1                     ┆        ┆ merge-proposal:0.1 ┆            ┆ /devel/launchpad/+webhook │
+│                           ┆        ┆                    ┆            ┆ /1                        │
+│ https://ci.example.com/ho ┆ false  ┆ —                  ┆ 2026-01-02 ┆ https://api.launchpad.net │
+│ oks/2                     ┆        ┆                    ┆            ┆ /devel/launchpad/+webhook │
+│                           ┆        ┆                    ┆            ┆ /2                        │
+└───────────────────────────┴────────┴────────────────────┴────────────┴───────────────────────────┘
+2 webhooks found. Use the Webhook URL value with --webhook-url.

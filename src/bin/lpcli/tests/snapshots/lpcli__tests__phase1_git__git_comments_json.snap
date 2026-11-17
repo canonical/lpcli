@@ -1,0 +1,63 @@
+---
+source: src/bin/lpcli/tests/phase1_git.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "all_comments": {
+    "entries": [
+      {
+        "author_link": "https://api.launchpad.net/devel/~reviewer",
+        "content": "Looks good,\nbut see inline.",
+        "date_created": "[timestamp]",
+        "http_etag": "\"etag-comment\"",
+        "id": 5,
+        "message_body": "Looks good,\nbut see inline.",
+        "resource_type_link": "https://api.launchpad.net/devel/#code_review_comment",
+        "self_link": "https://api.launchpad.net/devel/~owner/project/+git/repo/+merge/1/comments/5",
+        "title": "Re: comment 5",
+        "vote": "Approve",
+        "vote_tag": null,
+        "web_link": "https://code.launchpad.net/~owner/project/+git/repo/+merge/1/comments/5"
+      },
+      {
+        "author_link": "https://api.launchpad.net/devel/~reviewer",
+        "content": "Looks good,\nbut see inline.",
+        "date_created": "[timestamp]",
+        "http_etag": "\"etag-comment\"",
+        "id": 6,
+        "message_body": "Looks good,\nbut see inline.",
+        "resource_type_link": "https://api.launchpad.net/devel/#code_review_comment",
+        "self_link": "https://api.launchpad.net/devel/~owner/project/+git/repo/+merge/1/comments/6",
+        "title": "Re: comment 6",
+        "vote": null,
+        "vote_tag": null,
+        "web_link": "https://code.launchpad.net/~owner/project/+git/repo/+merge/1/comments/6"
+      }
+    ],
+    "start": 0,
+    "total_size": 2
+  },
+  "inline_comments": [
+    {
+      "date": "[timestamp]",
+      "line_number": "6",
+      "person": {
+        "name": "reviewer",
+        "self_link": "https://api.launchpad.net/devel/~reviewer"
+      },
+      "text": "Why True?"
+    },
+    {
+      "date": "[timestamp]",
+      "line_number": "99",
+      "person": "https://api.launchpad.net/devel/~other",
+      "text": "Unmapped"
+    }
+  ],
+  "lpcli": {
+    "inline_comment_locations": [
+      null,
+      null
+    ]
+  }
+}

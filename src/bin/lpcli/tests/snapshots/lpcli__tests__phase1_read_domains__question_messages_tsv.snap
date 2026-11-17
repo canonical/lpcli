@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "render(&report, OutputMode::Tsv)"
+---
+index	owner	date_created	action	content
+1	helper	2025-01-01 13:00	Answer	Try this.\nThen that.
+2	jdoe	2025-01-01 14:00		Thanks!

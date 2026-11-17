@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+OK: Revoked the hardware-bound grant on Launchpad.
+Error: Could not remove the stored copy.

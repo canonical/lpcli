@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_text(&rendered, base)"
+---
+date_sent	successful	response_status_code	pending
+2026-01-02 03:04	true	200	false
+2026-01-02 03:04			true

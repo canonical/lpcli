@@ -6,11 +6,15 @@
 //! |----------|-------------|
 //! | [`get_distro_series_import_queue`] | List translation import queue entries for a distro series |
 //! | [`get_distro_series_templates`] | List translation templates for a distro series |
+//!
+//! Each read function has a `_raw` counterpart that also returns Launchpad's
+//! collection JSON: `start`, exact `entries`, and `total_size` or
+//! `total_size_link`.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::client::{Collection, LaunchpadClient};
+use crate::client::{Collection, LaunchpadClient, Raw};
 use crate::error::Result;
 
 // ---------------------------------------------------------------------------
@@ -26,7 +30,7 @@ pub struct TranslationImportQueueEntry {
     /// `"Failed"`, `"Needs Review"`, `"Blocked"`, `"Needs Information"`.
     pub status: Option<String>,
     /// When this entry was created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// API link to the person who uploaded the file.
     pub uploader_link: Option<String>,
     /// API link to the associated source package, if any.
@@ -51,7 +55,7 @@ pub struct TranslationTemplate {
     /// Whether this template is obsolete.
     pub is_obsolete: Option<bool>,
     /// When the template was last updated.
-    pub date_last_updated: Option<DateTime<Utc>>,
+    pub date_last_updated: Option<Timestamp>,
     /// API self-link.
     pub self_link: Option<String>,
     /// Launchpad web link.
@@ -71,12 +75,24 @@ pub async fn get_distro_series_import_queue(
     distro: &str,
     series: &str,
 ) -> Result<Vec<TranslationImportQueueEntry>> {
+    Ok(get_distro_series_import_queue_raw(client, distro, series)
+        .await?
+        .value)
+}
+
+/// Like [`get_distro_series_import_queue()`], but also keep Launchpad's
+/// collection JSON.
+pub async fn get_distro_series_import_queue_raw(
+    client: &LaunchpadClient,
+    distro: &str,
+    series: &str,
+) -> Result<Raw<Vec<TranslationImportQueueEntry>>> {
     let url = client.url(&format!(
         "/{}/{}?ws.op=getTranslationImportQueueEntries",
         urlenc(distro),
         urlenc(series),
     ));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all_raw(client, &url).await
 }
 
 /// List translation templates for an Ubuntu distro series.
@@ -88,12 +104,24 @@ pub async fn get_distro_series_templates(
     distro: &str,
     series: &str,
 ) -> Result<Vec<TranslationTemplate>> {
+    Ok(get_distro_series_templates_raw(client, distro, series)
+        .await?
+        .value)
+}
+
+/// Like [`get_distro_series_templates()`], but also keep Launchpad's
+/// collection JSON.
+pub async fn get_distro_series_templates_raw(
+    client: &LaunchpadClient,
+    distro: &str,
+    series: &str,
+) -> Result<Raw<Vec<TranslationTemplate>>> {
     let url = client.url(&format!(
         "/{}/{}?ws.op=getTranslationTemplates",
         urlenc(distro),
         urlenc(series),
     ));
-    Collection::fetch_all(client, &url).await
+    Collection::fetch_all_raw(client, &url).await
 }
 
 // ---------------------------------------------------------------------------

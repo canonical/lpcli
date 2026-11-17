@@ -1,0 +1,13 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_text(&rendered, base)"
+---
+2 snap recipes found.
+
+Name: my-snap
+Store Name: my-snap
+Private: false
+
+Name: private-snap
+Store Name: none
+Private: true

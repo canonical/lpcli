@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase1_bug.rs
+expression: redacted
+---
+self_link	bug_tracker_link	remote_bug	remote_status	url	linked_tasks
+[server]/bugs/42/+watch/7	[server]/bugs/bugtrackers/debbugs	1150409	open	https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1150409	curl (Ubuntu)
+[server]/bugs/42/+watch/8	[server]/bugs/bugtrackers/debbugs	1150410	open	https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1150410	orphan

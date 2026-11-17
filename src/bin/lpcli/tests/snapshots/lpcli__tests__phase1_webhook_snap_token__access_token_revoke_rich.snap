@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
+expression: "redact_text(&rendered, base)"
+---
+✓ Access token revoked.
+  Token URL: [server url]/launchpad/+access-token/1

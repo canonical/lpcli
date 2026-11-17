@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+✓ Logged in as ~someone with a hardware-bound grant.
+  Grant stored in /tmp/grant.json.

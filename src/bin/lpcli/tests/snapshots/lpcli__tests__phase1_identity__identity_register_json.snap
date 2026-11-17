@@ -1,0 +1,19 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+{
+  "attestation_format": "packed",
+  "date_created": "2026-01-02T03:04:05.123456+00:00",
+  "date_last_used": "2026-02-03T04:05:06+00:00",
+  "date_revoked": null,
+  "http_etag": "\"etag-42\"",
+  "id": 42,
+  "is_revoked": false,
+  "name": "Backup key",
+  "resource_type_link": "https://api.launchpad.net/devel/#webauthn_authenticator",
+  "self_link": "https://api.launchpad.net/devel/~example-owner/+authenticator/42",
+  "transports": [
+    "usb"
+  ]
+}

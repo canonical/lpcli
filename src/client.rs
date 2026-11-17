@@ -212,6 +212,34 @@ impl LaunchpadClient {
         self.get_url(&self.url(path)).await
     }
 
+    /// Like [`Self::get()`], but also keep the exact JSON that Launchpad
+    /// returned.
+    pub async fn get_raw<T: DeserializeOwned>(&self, path: &str) -> Result<Raw<T>> {
+        self.get_url_raw(&self.url(path)).await
+    }
+
+    /// Like [`Self::get_url()`], but also keep the exact JSON that Launchpad
+    /// returned, for output that must reproduce Launchpad's representation.
+    pub async fn get_url_raw<T: DeserializeOwned>(&self, url: &str) -> Result<Raw<T>> {
+        Raw::from_value(self.get_url(url).await?)
+    }
+
+    /// Read back an entry after a mutation has already succeeded.
+    ///
+    /// A failed read-back becomes [`LpError::Partial`], so callers can tell
+    /// users that Launchpad may already contain the change.
+    pub async fn get_created_raw<T: DeserializeOwned>(
+        &self,
+        location: &str,
+        description: &str,
+    ) -> Result<Raw<T>> {
+        self.get_url_raw(location).await.map_err(|error| {
+            LpError::Partial(format!(
+                "{description} succeeded, but reading the result from {location} failed: {error}"
+            ))
+        })
+    }
+
     /// Perform an authenticated GET request against an absolute URL.
     ///
     /// With a hardware-bound session, a request rejected because its access
@@ -408,7 +436,7 @@ impl LaunchpadClient {
     ///
     /// # Errors
     ///
-    /// Besides HTTP status errors, returns [`LpError::Other`] when a
+    /// Besides HTTP status errors, returns [`LpError::Partial`] when a
     /// successful response has no valid `Location` header or reports a
     /// location outside the configured API origin. The request may already
     /// have succeeded in either case.
@@ -832,10 +860,10 @@ impl LaunchpadClient {
     ///
     /// # Errors
     ///
-    /// Besides HTTP status errors, returns [`LpError::Other`] when a
+    /// Besides HTTP status errors, returns [`LpError::Partial`] when a
     /// successful response has no valid `Location` header, or when the
-    /// location is outside the configured API origin. In both cases the
-    /// request itself may already have succeeded.
+    /// location is outside the configured API origin. The mutation may
+    /// already have succeeded.
     pub(crate) async fn handle_created_location(
         &self,
         mut resp: reqwest::Response,
@@ -891,7 +919,7 @@ impl LaunchpadClient {
             .get(LOCATION)
             .and_then(|value| value.to_str().ok())
             .ok_or_else(|| {
-                LpError::Other(
+                LpError::Partial(
                     "Launchpad response did not include a valid Location header. The \
                      request may already have succeeded; verify the result on Launchpad \
                      before retrying."
@@ -914,7 +942,7 @@ impl LaunchpadClient {
             let api_origin = url::Url::parse(&self.base_url)
                 .map(|base| base.origin().ascii_serialization())
                 .unwrap_or_else(|_| self.base_url.clone());
-            LpError::Other(format!(
+            LpError::Partial(format!(
                 "Launchpad reported the created resource at '{location}', which is not \
                  on the configured API origin '{api_origin}'. It was not fetched, \
                  because requests from this client carry Launchpad credentials. The \
@@ -1309,6 +1337,32 @@ fn encode_pairs(params: &[(&str, &str)]) -> String {
 // Pagination helpers
 // ---------------------------------------------------------------------------
 
+/// A typed Launchpad value together with the exact JSON it was decoded from.
+///
+/// The typed `value` keeps only the fields lpcli models, and re-encoding it
+/// could change Launchpad's representation. `raw` is the unmodified JSON
+/// (field names, `null`s, links and values), for output that must match
+/// Launchpad's own representation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Raw<T> {
+    /// The decoded value.
+    pub value: T,
+    /// The JSON exactly as Launchpad returned it.
+    pub raw: serde_json::Value,
+}
+
+impl<T: DeserializeOwned> Raw<T> {
+    /// Decode `raw` into `T`, keeping the original JSON alongside it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LpError::Json`] if `raw` does not match `T`.
+    pub fn from_value(raw: serde_json::Value) -> Result<Self> {
+        let value = T::deserialize(&raw)?;
+        Ok(Self { value, raw })
+    }
+}
+
 /// A generic Launchpad collection response.
 #[derive(Debug, serde::Deserialize)]
 pub struct Collection<T> {
@@ -1350,6 +1404,45 @@ impl<T: DeserializeOwned + std::fmt::Debug> Collection<T> {
     pub async fn fetch_page(client: &LaunchpadClient, url: &str) -> Result<Vec<T>> {
         let page: Collection<T> = client.get_url(url).await?;
         Ok(page.entries)
+    }
+
+    /// Fetch every page and return Launchpad's collection shape with exact
+    /// entries.
+    ///
+    /// The first page's `total_size` or `total_size_link` is passed through.
+    /// `next_collection_link` is omitted because every page was fetched.
+    pub async fn fetch_all_raw(client: &LaunchpadClient, first_url: &str) -> Result<Raw<Vec<T>>> {
+        let first: Raw<Collection<serde_json::Value>> = client.get_url_raw(first_url).await?;
+        let mut raw_entries = first.value.entries;
+        let mut next = first.value.next_collection_link;
+        while let Some(url) = next {
+            let page: Collection<serde_json::Value> = client.get_url(&url).await?;
+            raw_entries.extend(page.entries);
+            next = page.next_collection_link;
+        }
+        let value = raw_entries
+            .iter()
+            .map(T::deserialize)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut raw = serde_json::Map::new();
+        for key in ["total_size", "total_size_link"] {
+            if let Some(field) = first.raw.get(key) {
+                raw.insert(key.into(), field.clone());
+            }
+        }
+        raw.insert("start".into(), 0.into());
+        raw.insert("entries".into(), raw_entries.into());
+        Ok(Raw {
+            value,
+            raw: raw.into(),
+        })
+    }
+
+    /// Like [`Self::fetch_page()`], but return the whole page, together with
+    /// the exact JSON Launchpad returned for it (including `total_size`,
+    /// `total_size_link`, `start` and `next_collection_link`, when present).
+    pub async fn fetch_page_raw(client: &LaunchpadClient, url: &str) -> Result<Raw<Self>> {
+        client.get_url_raw(url).await
     }
 }
 
@@ -1613,6 +1706,74 @@ mod tests {
         assert!(!same_origin("not a url", base));
     }
 
+    #[tokio::test]
+    async fn successful_create_without_location_is_partial() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/bugs")
+            .with_status(201)
+            .create_async()
+            .await;
+        let client = LaunchpadClient::new(None).with_base_url(server.url());
+        let error = client
+            .post_created_location("/bugs", &HashMap::from([("ws.op", "createBug")]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), crate::error::ErrorKind::Partial);
+        assert_eq!(error.exit_code(), 7);
+        assert!(error.to_string().contains("may already have succeeded"));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn successful_create_with_malformed_location_is_partial() {
+        let mut server = mockito::Server::new_async().await;
+        let post = server
+            .mock("POST", "/bugs")
+            .with_status(201)
+            .with_header("location", "http://[invalid")
+            .create_async()
+            .await;
+        let client = LaunchpadClient::new(None).with_base_url(server.url());
+        let error = client
+            .post_created_location("/bugs", &HashMap::from([("ws.op", "createBug")]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.exit_code(), 7);
+        assert!(error.to_string().contains("configured API origin"));
+        post.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn successful_create_with_foreign_location_is_partial_without_fetching_it() {
+        let mut server = mockito::Server::new_async().await;
+        let post = server
+            .mock("POST", "/bugs")
+            .with_status(201)
+            .with_header("location", "https://evil.example/resource")
+            .create_async()
+            .await;
+        let foreign = server
+            .mock("GET", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let client = LaunchpadClient::new(None).with_base_url(server.url());
+        let error = client
+            .post_created_location("/bugs", &HashMap::from([("ws.op", "createBug")]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), crate::error::ErrorKind::Partial);
+        assert_eq!(error.exit_code(), 7);
+        assert!(
+            error
+                .to_string()
+                .contains("not on the configured API origin")
+        );
+        post.assert_async().await;
+        foreign.assert_async().await;
+    }
+
     #[test]
     fn created_locations_are_resolved_and_kept_on_the_api_origin() {
         let client = LaunchpadClient::new(None).with_base_url("https://api.launchpad.net/devel");
@@ -1653,7 +1814,7 @@ mod tests {
             "https://[::1",
         ] {
             match client.trusted_created_location(&response, foreign) {
-                Err(LpError::Other(message)) => assert!(
+                Err(LpError::Partial(message)) => assert!(
                     message.contains("not on the configured API origin")
                         && message.contains("may already have succeeded"),
                     "unexpected message for '{foreign}': {message}"
@@ -1688,7 +1849,7 @@ mod tests {
             .await
             .expect_err("a foreign Location must be rejected");
         assert!(
-            matches!(&error, LpError::Other(message) if message.contains("not on the configured API origin")),
+            matches!(&error, LpError::Partial(message) if message.contains("not on the configured API origin")),
             "unexpected error: {error:?}"
         );
         assert!(!error.to_string().contains("secret"));

@@ -1,0 +1,40 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+{
+  "entries": [
+    {
+      "attestation_format": "packed",
+      "date_created": "2026-01-02T03:04:05.123456+00:00",
+      "date_last_used": "2026-02-03T04:05:06+00:00",
+      "date_revoked": null,
+      "http_etag": "\"etag-7\"",
+      "id": 7,
+      "is_revoked": false,
+      "name": "Primary\tkey",
+      "resource_type_link": "https://api.launchpad.net/devel/#webauthn_authenticator",
+      "self_link": "https://api.launchpad.net/devel/~example-owner/+authenticator/7",
+      "transports": [
+        "usb"
+      ]
+    },
+    {
+      "attestation_format": "packed",
+      "date_created": "2026-01-02T03:04:05.123456+00:00",
+      "date_last_used": null,
+      "date_revoked": "2026-03-01T00:00:00+00:00",
+      "http_etag": "\"etag-8\"",
+      "id": 8,
+      "is_revoked": true,
+      "name": "Old",
+      "resource_type_link": "https://api.launchpad.net/devel/#webauthn_authenticator",
+      "self_link": "https://api.launchpad.net/devel/~example-owner/+authenticator/8",
+      "transports": [
+        "usb"
+      ]
+    }
+  ],
+  "start": 0,
+  "total_size": 2
+}

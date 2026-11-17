@@ -1,0 +1,5 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+No hardware-bound grant is stored.

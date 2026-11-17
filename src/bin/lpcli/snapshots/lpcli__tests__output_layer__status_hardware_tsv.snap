@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests.rs
+expression: rendered
+---
+credentials	account	verified	reachable	http_status	resource_type_link	error
+hardware_token	someone	false	true	200	https://api.launchpad.net/devel/#service-root

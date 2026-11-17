@@ -1,0 +1,46 @@
+---
+source: src/bin/lpcli/tests.rs
+expression: rendered
+---
+{
+  "entries": [
+    {
+      "active": true,
+      "base_url": "https://debbugs.example.org/",
+      "base_url_aliases": [],
+      "bug_tracker_type": "Debbugs",
+      "contact_details": null,
+      "has_lp_plugin": null,
+      "http_etag": "\"a1b2c3-d4e5f6\"",
+      "name": "debbugs",
+      "owner_link": "https://api.launchpad.net/devel/~registry",
+      "registered_by_link": "https://api.launchpad.net/devel/~registry",
+      "resource_type_link": "https://api.launchpad.net/devel/#bug_tracker",
+      "self_link": "https://api.launchpad.net/devel/bugs/bugtrackers/debbugs",
+      "summary": null,
+      "title": "Debian Bug tracker",
+      "watches_collection_link": "https://api.launchpad.net/devel/bugs/bugtrackers/debbugs/watches",
+      "web_link": "https://bugs.launchpad.net/bugs/bugtrackers/debbugs"
+    },
+    {
+      "active": true,
+      "base_url": "https://auto-github-canonical-apport.example.org/",
+      "base_url_aliases": [],
+      "bug_tracker_type": "GitHub Issues",
+      "contact_details": null,
+      "has_lp_plugin": null,
+      "http_etag": "\"a1b2c3-d4e5f6\"",
+      "name": "auto-github-canonical-apport",
+      "owner_link": "https://api.launchpad.net/devel/~registry",
+      "registered_by_link": "https://api.launchpad.net/devel/~registry",
+      "resource_type_link": "https://api.launchpad.net/devel/#bug_tracker",
+      "self_link": "https://api.launchpad.net/devel/bugs/bugtrackers/auto-github-canonical-apport",
+      "summary": null,
+      "title": "GitHub canonical/apport\tissues",
+      "watches_collection_link": "https://api.launchpad.net/devel/bugs/bugtrackers/auto-github-canonical-apport/watches",
+      "web_link": "https://bugs.launchpad.net/bugs/bugtrackers/auto-github-canonical-apport"
+    }
+  ],
+  "start": 0,
+  "total_size": 2
+}

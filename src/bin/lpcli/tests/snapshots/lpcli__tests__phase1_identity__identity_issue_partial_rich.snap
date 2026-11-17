@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase1_identity.rs
+expression: rendered
+---
+✗ Launchpad issued a hardware-bound grant bound to 'Primary' (ID 7), but logging in with it failed.
+  Revoke the unused grant at https://launchpad.net/people/+me/+oauth-tokens.

@@ -1,0 +1,26 @@
+---
+source: src/bin/lpcli/tests/phase1_git.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "date_created": "[timestamp]",
+  "date_last_modified": "[timestamp]",
+  "default_branch": "refs/heads/main",
+  "description": "A test\trepository",
+  "git_https_url": "https://git.launchpad.net/~owner/project/+git/project",
+  "http_etag": "\"etag-repo\"",
+  "information_type": "Public",
+  "loose_object_count": null,
+  "name": "project",
+  "owner_default": false,
+  "owner_link": "https://api.launchpad.net/devel/~owner",
+  "pack_count": null,
+  "private": false,
+  "repository_type": "Hosted",
+  "resource_type_link": "https://api.launchpad.net/devel/#git_repository",
+  "self_link": "https://api.launchpad.net/devel/~owner/project/+git/project",
+  "target_default": true,
+  "target_link": "https://api.launchpad.net/devel/project",
+  "unique_name": "~owner/project/+git/project",
+  "web_link": "https://code.launchpad.net/~owner/project/+git/project"
+}

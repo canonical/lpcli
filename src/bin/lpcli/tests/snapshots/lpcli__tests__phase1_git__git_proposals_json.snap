@@ -1,0 +1,50 @@
+---
+source: src/bin/lpcli/tests/phase1_git.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "entries": [
+    {
+      "all_comments_collection_link": "https://api.launchpad.net/devel/~owner/project/+git/repo/+merge/11/all_comments",
+      "commit_message": null,
+      "date_created": "[timestamp]",
+      "date_last_modified": "[timestamp]",
+      "description": "Fix things",
+      "http_etag": "\"etag-mp\"",
+      "preview_diff_link": "https://api.launchpad.net/devel/~owner/project/+git/repo/+merge/11/+preview-diff/77",
+      "preview_diffs_collection_link": "https://api.launchpad.net/devel/~owner/project/+git/repo/+merge/11/preview_diffs",
+      "queue_status": "Needs review",
+      "registrant_link": "https://api.launchpad.net/devel/~owner",
+      "resource_type_link": "https://api.launchpad.net/devel/#branch_merge_proposal",
+      "reviewed_revid": null,
+      "self_link": "https://api.launchpad.net/devel/~owner/project/+git/repo/+merge/11",
+      "source_git_path": "refs/heads/fix",
+      "source_git_repository_link": "https://api.launchpad.net/devel/~owner/project/+git/repo",
+      "target_git_path": "refs/heads/main",
+      "target_git_repository_link": "https://api.launchpad.net/devel/~owner/project/+git/main",
+      "web_link": "https://code.launchpad.net/~owner/project/+git/repo/+merge/11"
+    },
+    {
+      "all_comments_collection_link": "https://api.launchpad.net/devel/~owner/project/+git/repo/+merge/12/all_comments",
+      "commit_message": null,
+      "date_created": "[timestamp]",
+      "date_last_modified": "[timestamp]",
+      "description": "Fix things",
+      "http_etag": "\"etag-mp\"",
+      "preview_diff_link": "https://api.launchpad.net/devel/~owner/project/+git/repo/+merge/12/+preview-diff/77",
+      "preview_diffs_collection_link": "https://api.launchpad.net/devel/~owner/project/+git/repo/+merge/12/preview_diffs",
+      "queue_status": "Approved",
+      "registrant_link": "https://api.launchpad.net/devel/~owner",
+      "resource_type_link": "https://api.launchpad.net/devel/#branch_merge_proposal",
+      "reviewed_revid": null,
+      "self_link": "https://api.launchpad.net/devel/~owner/project/+git/repo/+merge/12",
+      "source_git_path": "refs/heads/fix",
+      "source_git_repository_link": "https://api.launchpad.net/devel/~owner/project/+git/repo",
+      "target_git_path": "refs/heads/main",
+      "target_git_repository_link": "https://api.launchpad.net/devel/~owner/project/+git/main",
+      "web_link": "https://code.launchpad.net/~owner/project/+git/repo/+merge/12"
+    }
+  ],
+  "start": 0,
+  "total_size": 2
+}

@@ -1,0 +1,34 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "entries": [
+    {
+      "active": true,
+      "date_created": "[timestamp]",
+      "display_name": "noble",
+      "http_etag": "\"etag-1234\"",
+      "name": "noble",
+      "resource_type_link": "https://api.launchpad.net/devel/#distro_series",
+      "self_link": "https://api.launchpad.net/devel/ubuntu/noble",
+      "status": "Supported",
+      "version": "24.04",
+      "web_link": "https://launchpad.net/ubuntu/noble"
+    },
+    {
+      "active": true,
+      "date_created": "[timestamp]",
+      "display_name": "questing",
+      "http_etag": "\"etag-1234\"",
+      "name": "questing",
+      "resource_type_link": "https://api.launchpad.net/devel/#distro_series",
+      "self_link": "https://api.launchpad.net/devel/ubuntu/questing",
+      "status": "Current Stable Release",
+      "version": "25.10",
+      "web_link": "https://launchpad.net/ubuntu/questing"
+    }
+  ],
+  "start": 0,
+  "total_size": 2
+}
