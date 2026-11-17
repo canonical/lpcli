@@ -10,28 +10,44 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 ## [Unreleased]
 
-The following changes are planned for **0.5.0**, a SemVer-incompatible release.
-They are described in
+These changes are for **0.5.0**, a SemVer-incompatible release, and follow
 [`plans/improve_user_interface_2026-11-16.md`](plans/improve_user_interface_2026-11-16.md).
-Entries move to a `0.5.0` section when that release is tagged.
+Entries move to a `0.5.0` section when that release is tagged. Entries marked
+*(planned)* are not implemented yet.
 
 ### Added
 
-- A `--format` option with four output modes: `rich` (the default when nothing
-  else applies), `plain` (accessible, with no color or box drawing), `json`,
-  and `tsv`.
-- JSON output that follows the Launchpad web API's own representation. Lists
-  use Launchpad's collection shape: `total_size`, `start`, and `entries`.
-- A versioned, documented JSON output contract, and a `lpcli schema` command
-  that reports its version.
-- Structured JSON errors on stderr in JSON mode.
-- `--color`, plus support for the `NO_COLOR` and `CLICOLOR_FORCE` environment
-  variables.
-- `--fields`, `--quiet`, and `--no-input` options for scripts and agents.
+- A global `--format` option with four output modes: `rich` (the default),
+  `plain` (accessible labeled records with ASCII punctuation, no color, and
+  no box drawing), `json`, and `tsv` (one record per line).
+- The `LPCLI_FORMAT` environment variable and the `display.format` and
+  `display.accessible` settings in `config.toml`. `display.accessible = true`,
+  or `TERM=dumb`, makes `plain` the default.
+- A global `--color auto|always|never` option. `auto` follows `CLICOLOR_FORCE`,
+  `NO_COLOR`, and `TERM=dumb`, and decides separately for stdout and stderr.
+- JSON and TSV output for `status`, `bug search`, and
+  `bug remote-bug-trackers`. JSON follows the Launchpad web API's own
+  representation, and lists use Launchpad's collection shape: `total_size`,
+  `start`, and `entries`. Other commands reject `--format json|tsv` with a
+  usage error for now.
+- Library: `client::Raw`, `LaunchpadClient::get_url_raw`,
+  `Collection::fetch_page_raw`, `bugs::search_bugs_raw`, and
+  `bugs::search_bug_trackers_raw`, which keep the exact JSON Launchpad
+  returned.
+- *(planned)* JSON output for every read command, a versioned and documented
+  JSON output contract, and a `lpcli schema` command that reports its
+  version.
+- *(planned)* Structured JSON errors on stderr in JSON mode.
+- *(planned)* `--fields`, `--quiet`, and `--no-input` options for scripts and
+  agents.
 
 ### Changed
 
-- **Breaking:** commands exit with a code that identifies the kind of failure,
+- `status`, `bug search`, and `bug remote-bug-trackers` count results in
+  words, such as `2 bugs found.`, instead of `2 bug(s) found.`.
+- Colored output on stdout now also turns off when stdout is not a terminal,
+  `NO_COLOR` is set, or `TERM=dumb`, for every command.
+- **Breaking** *(planned)*: commands exit with a code that identifies the kind of failure,
   instead of always exiting with 1:
 
   | Code | Meaning |
@@ -47,7 +63,7 @@ Entries move to a `0.5.0` section when that release is tagged.
 
   Scripts that check for exit code 1 specifically should check for a non-zero
   exit code instead, or handle the specific codes above.
-- **Breaking:** operations that only partly succeed now exit with code 7
+- **Breaking** *(planned)*: operations that only partly succeed exit with code 7
   instead of 0. This includes downloads where some files fail, and changes to
   several targets or series where only some succeed.
 
@@ -60,14 +76,16 @@ Entries move to a `0.5.0` section when that release is tagged.
   The JSON output has also changed from a bare array, sorted by tracker name,
   to Launchpad's collection shape, in the order Launchpad returns the entries:
 
-  | Before (0.4.x) | After (0.5.0) |
-  |---|---|
-  | `lpcli bug remote-bug-trackers --json` | `lpcli bug remote-bug-trackers --format json` |
-  | `[{"name": "debbugs", ...}]` | `{"total_size": 1, "start": 0, "entries": [{"name": "debbugs", ...}]}` |
-  | `jq '.[].name'` | `jq '.entries[].name'` |
+  | | Before (0.4.x) | After (0.5.0) |
+  |---|---|---|
+  | Option of `bug remote-bug-trackers` | `--json` | `--format json` |
+  | Output | `[{"name": "debbugs", ...}]` | `{"total_size": 1, "start": 0, "entries": [{"name": "debbugs", ...}]}` |
+  | Reading names with `jq` | `jq '.[].name'` | `jq '.entries[].name'` |
 
-  When `--search` is combined with a `--limit` that stops the search early,
-  `total_size` is omitted because the true number of matches is unknown.
+  Entries now carry every field Launchpad returns, not only the seven fields
+  the old output selected. When `--limit` stops a search early, `total_size`
+  is omitted because the true number of matches is unknown. To keep sorting
+  by name, use `jq '.entries | sort_by(.name)'`.
 
 ## [0.4.0] - 2026-11-16
 

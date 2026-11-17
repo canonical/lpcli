@@ -1,0 +1,14 @@
+---
+source: src/bin/lpcli/tests.rs
+expression: rendered
+---
+┌───────────────────────────┬───────────────────────────┬───────────────┬──────────────────────────┐
+│ Name                      ┆ Title                     ┆ Type          ┆ Base URL                 │
+╞═══════════════════════════╪═══════════════════════════╪═══════════════╪══════════════════════════╡
+│ debbugs                   ┆ Debian Bug tracker        ┆ Debbugs       ┆ https://debbugs.example. │
+│                           ┆                           ┆               ┆ org/                     │
+│ auto-github-canonical-app ┆ GitHub canonical/apport   ┆ GitHub Issues ┆ https://auto-github-cano │
+│ ort                       ┆ issues                    ┆               ┆ nical-apport.example.org │
+│                           ┆                           ┆               ┆ /                        │
+└───────────────────────────┴───────────────────────────┴───────────────┴──────────────────────────┘
+2 remote bug trackers found. Use the Name value with --bug-tracker.

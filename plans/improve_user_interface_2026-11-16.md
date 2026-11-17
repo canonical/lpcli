@@ -243,8 +243,7 @@ list. For this kind of collection:
 The existing documentation-example tests parse every `lpcli` example in
 `README.md` and `AGENTS.md`. Mention `--json` only in prose, tables, or
 non-shell code blocks, never as a runnable `lpcli` command in a `bash` or
-`sh` block. Extend the same tests to cover `SKILL.md`, which is not checked
-today.
+`sh` block. Phase 0 extended the same tests to cover `SKILL.md`.
 
 **Timing:** the `README.md` and `SKILL.md` changes ship in the same change
 as `--format json`. Documenting `--format json` earlier would describe an
@@ -320,6 +319,29 @@ fail.
 ## Rollout phases
 
 ### Phase 0: Foundation
+
+**Status: implemented.** The decision record is
+[`decision_0001_preserve_launchpad_json.md`](decision_0001_preserve_launchpad_json.md).
+Decisions made during Phase 0:
+
+- **Unported commands and structured modes.** An explicit `--format json` or
+  `--format tsv` on a command without that output is a usage error from
+  `validate_cli` (exit code 2) that names the supported commands. When `json`
+  or `tsv` comes from `LPCLI_FORMAT` or `display.format`, unported commands
+  print a warning on stderr and use the automatic mode, so a global setting
+  does not break them.
+- **`status` JSON** is an lpcli-defined object under a top-level `lpcli`
+  member, as recorded in the decision record.
+- **Key order.** `serde_json`'s `preserve_order` feature stays off; JSON keys
+  are sorted and tests compare JSON as values.
+- **JSON layout.** Indented when stdout is a terminal, compact otherwise.
+- **TSV escaping.** Backslash, tab, newline, and carriage return in values are
+  written as `\\`, `\t`, `\n`, and `\r`, so each record stays on one line.
+- **Terminal safety.** `rich` and `plain` replace control characters in
+  Launchpad text, so titles cannot inject terminal escape sequences.
+- **Commands not yet ported** still print through `colored`; its process-wide
+  override is set once from the resolved stdout color decision, so `NO_COLOR`
+  and `--color` apply to them too.
 
 1. Write the decision record for preserving the original Launchpad JSON.
 2. Add an output module, `src/bin/lpcli/output.rs`, containing:
@@ -417,8 +439,8 @@ output layer.
 - **`--json` removal:** a parser test confirms that
   `bug remote-bug-trackers --json` is rejected as an unknown argument, and
   documentation-example tests confirm that no runnable example uses `--json`.
-- **Documentation:** the existing documentation-example tests check new
-  options in `README.md` and `AGENTS.md`.
+- **Documentation:** the documentation-example tests check new options in
+  `README.md`, `AGENTS.md`, and `SKILL.md`.
 - **Security:** tests confirm that neither JSON errors nor snapshots contain
   credentials or grant material.
 - **Accessibility:** a manual Orca checklist for each release, and test runs

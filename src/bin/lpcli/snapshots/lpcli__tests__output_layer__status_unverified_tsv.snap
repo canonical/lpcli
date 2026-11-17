@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests.rs
+expression: rendered
+---
+credentials	account	verified	reachable	http_status	resource_type_link	error
+oauth		false	false	503		HTTP 503: Service Unavailable

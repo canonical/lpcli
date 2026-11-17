@@ -41,7 +41,7 @@ use chrono::{DateTime, Utc};
 use futures_util::future::try_join_all;
 use serde::{Deserialize, Serialize};
 
-use crate::client::{Collection, LaunchpadClient};
+use crate::client::{Collection, LaunchpadClient, Raw};
 use crate::error::{LpError, Result};
 
 // ---------------------------------------------------------------------------
@@ -327,6 +327,33 @@ pub async fn search_bugs(
     target: &str,
     params: &BugSearchParams<'_>,
 ) -> Result<Vec<BugTask>> {
+    // ws.size sets the Launchpad page size, not a total cap.  fetch_page
+    // requests exactly one page so the user-supplied limit is honoured.
+    Collection::fetch_page(client, &search_tasks_url(client, target, params)).await
+}
+
+/// Like [`search_bugs()`], but return the whole result page together with
+/// the exact JSON Launchpad returned for it.
+///
+/// The raw page keeps Launchpad's collection shape (`total_size` or
+/// `total_size_link`, `start`, `entries`, and `next_collection_link` when
+/// [`BugSearchParams::limit`] cut the results short), with every entry
+/// unmodified.
+pub async fn search_bugs_raw(
+    client: &LaunchpadClient,
+    target: &str,
+    params: &BugSearchParams<'_>,
+) -> Result<Raw<Collection<BugTask>>> {
+    Collection::fetch_page_raw(client, &search_tasks_url(client, target, params)).await
+}
+
+/// Build the `searchTasks` URL shared by [`search_bugs()`] and
+/// [`search_bugs_raw()`].
+fn search_tasks_url(
+    client: &LaunchpadClient,
+    target: &str,
+    params: &BugSearchParams<'_>,
+) -> String {
     // Build the base path.  When a package name is provided we target the
     // distribution source package (`/{distro}/+source/{pkg}`); otherwise we
     // search the project / distribution directly.
@@ -363,10 +390,7 @@ pub async fn search_bugs(
     if let Some(limit) = params.limit {
         query.push_str(&format!("&ws.size={limit}"));
     }
-    let url = client.url(&query);
-    // ws.size sets the Launchpad page size, not a total cap.  fetch_page
-    // requests exactly one page so the user-supplied limit is honoured.
-    Collection::fetch_page(client, &url).await
+    client.url(&query)
 }
 
 /// File a new bug on a Launchpad project.
@@ -809,6 +833,37 @@ pub async fn search_bug_trackers(
     search: Option<&str>,
     limit: Option<usize>,
 ) -> Result<Vec<BugTracker>> {
+    let found = search_bug_trackers_raw(client, search, limit).await?;
+    Ok(found
+        .trackers
+        .into_iter()
+        .map(|tracker| tracker.value)
+        .collect())
+}
+
+/// Remote bug trackers found by [`search_bug_trackers_raw()`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct BugTrackerSearch {
+    /// Matching trackers, in the order Launchpad returned them, each with the
+    /// exact JSON Launchpad returned for it.
+    pub trackers: Vec<Raw<BugTracker>>,
+    /// `true` when every page was scanned, so `trackers` holds every match.
+    /// `false` when the limit stopped the scan while more trackers might
+    /// still match.
+    pub complete: bool,
+}
+
+/// Like [`search_bug_trackers()`], but keep the exact JSON of each tracker
+/// and report whether every page was scanned.
+///
+/// The search runs locally over Launchpad's pages, so no Launchpad link can
+/// continue a filtered list; [`BugTrackerSearch::complete`] tells callers
+/// whether the number of matches is the true total.
+pub async fn search_bug_trackers_raw(
+    client: &LaunchpadClient,
+    search: Option<&str>,
+    limit: Option<usize>,
+) -> Result<BugTrackerSearch> {
     const PAGE_SIZE: usize = 100;
 
     let mut page_url = client.url(&format!("/bugs/bugtrackers?ws.size={PAGE_SIZE}"));
@@ -816,36 +871,50 @@ pub async fn search_bug_trackers(
     let mut matches = Vec::new();
 
     loop {
-        let page: Collection<BugTracker> = client.get_url(&page_url).await?;
-        for tracker in page.entries {
-            let matches_search = search.as_deref().is_none_or(|search| {
-                [
-                    tracker.name.as_deref(),
-                    tracker.title.as_deref(),
-                    tracker.summary.as_deref(),
-                    tracker.bug_tracker_type.as_deref(),
-                    tracker.base_url.as_deref(),
-                    tracker.self_link.as_deref(),
-                    tracker.web_link.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
-                .any(|field| field.to_lowercase().contains(search))
-            });
-
-            if matches_search {
+        let page: Collection<serde_json::Value> = client.get_url(&page_url).await?;
+        let mut entries = page.entries.into_iter().peekable();
+        while let Some(entry) = entries.next() {
+            let tracker = Raw::<BugTracker>::from_value(entry)?;
+            if tracker_matches(&tracker.value, search.as_deref()) {
                 matches.push(tracker);
                 if limit.is_some_and(|limit| matches.len() >= limit) {
-                    return Ok(matches);
+                    // The total is only known if nothing is left to scan.
+                    let complete = entries.peek().is_none() && page.next_collection_link.is_none();
+                    return Ok(BugTrackerSearch {
+                        trackers: matches,
+                        complete,
+                    });
                 }
             }
         }
 
         let Some(next_url) = page.next_collection_link else {
-            return Ok(matches);
+            return Ok(BugTrackerSearch {
+                trackers: matches,
+                complete: true,
+            });
         };
         page_url = next_url;
     }
+}
+
+/// Case-insensitive substring match over tracker metadata; `search` must
+/// already be lower case.
+fn tracker_matches(tracker: &BugTracker, search: Option<&str>) -> bool {
+    search.is_none_or(|search| {
+        [
+            tracker.name.as_deref(),
+            tracker.title.as_deref(),
+            tracker.summary.as_deref(),
+            tracker.bug_tracker_type.as_deref(),
+            tracker.base_url.as_deref(),
+            tracker.self_link.as_deref(),
+            tracker.web_link.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|field| field.to_lowercase().contains(search))
+    })
 }
 
 /// Fetch a bug tracker by its API self-link URL.

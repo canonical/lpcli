@@ -1,0 +1,15 @@
+---
+source: src/bin/lpcli/tests.rs
+expression: rendered
+---
+2 remote bug trackers found. Use the Name value with --bug-tracker.
+
+Name: debbugs
+Title: Debian Bug tracker
+Type: Debbugs
+Base URL: https://debbugs.example.org/
+
+Name: auto-github-canonical-apport
+Title: GitHub canonical/apport issues
+Type: GitHub Issues
+Base URL: https://auto-github-canonical-apport.example.org/

@@ -57,6 +57,9 @@ jobs:
         run: cargo build --locked --all-targets --all-features
 
       - name: Run test suite (cargo test)
+        # Fail on new or changed insta snapshots instead of writing them.
+        env:
+          INSTA_UPDATE: "no"
         run: cargo test --locked --all-targets --all-features
 
       - name: Security audit dependencies (cargo audit)

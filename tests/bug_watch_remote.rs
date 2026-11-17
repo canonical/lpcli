@@ -262,6 +262,52 @@ async fn search_bug_trackers_filters_across_pages_and_stops_at_limit() {
 }
 
 #[tokio::test]
+async fn search_bug_trackers_raw_keeps_launchpad_json_and_reports_completeness() {
+    let mut server = Server::new_async().await;
+    let mut first: serde_json::Value =
+        serde_json::from_str(&bug_tracker_json(&server.url(), "github-one", "GitHub")).unwrap();
+    // Fields lpcli does not model must survive untouched.
+    first["http_etag"] = "\"etag-1\"".into();
+    first["contact_details"] = serde_json::Value::Null;
+    let second: serde_json::Value =
+        serde_json::from_str(&bug_tracker_json(&server.url(), "github-two", "GitHub")).unwrap();
+    let page = serde_json::json!({"total_size": 2, "start": 0, "entries": [first, second]});
+    let mock = server
+        .mock("GET", "/bugs/bugtrackers")
+        .match_query(mockito::Matcher::UrlEncoded("ws.size".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(page.to_string())
+        .expect(3)
+        .create_async()
+        .await;
+
+    let client = LaunchpadClient::new(None).with_base_url(server.url());
+    // Every page scanned: complete, with raw entries in Launchpad order.
+    let found = bugs::search_bug_trackers_raw(&client, Some("github"), None)
+        .await
+        .unwrap();
+    assert!(found.complete);
+    assert_eq!(found.trackers.len(), 2);
+    assert_eq!(found.trackers[0].raw, first);
+    assert_eq!(found.trackers[0].value.name.as_deref(), Some("github-one"));
+
+    // The limit is reached on the last entry of the last page: still complete.
+    let found = bugs::search_bug_trackers_raw(&client, None, Some(2))
+        .await
+        .unwrap();
+    assert!(found.complete);
+
+    // The limit stops the scan with entries left: the total is unknown.
+    let found = bugs::search_bug_trackers_raw(&client, None, Some(1))
+        .await
+        .unwrap();
+    assert!(!found.complete);
+    assert_eq!(found.trackers.len(), 1);
+    mock.assert_async().await;
+}
+
+#[tokio::test]
 async fn add_bug_watch_creates_watch_and_follows_location() {
     let mut server = Server::new_async().await;
 

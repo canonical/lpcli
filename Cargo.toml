@@ -82,6 +82,8 @@ ubuntu-info-rust = "0.3"
 mime_guess = "2"
 
 # Pretty terminal output
+# Explicit ANSI styles for the output layer (already used by clap)
+anstyle = "1.0.14"
 colored = "3"
 comfy-table = "8"
 indicatif = "0.18"
@@ -112,4 +114,6 @@ dirs = "7"
 tempfile = "3"
 # Parse documented shell examples without executing them
 shlex = "2.0.1"
+# Snapshot tests for the output modes (snapshots live next to their tests)
+insta = { version = "1.49.0", features = ["json", "redactions"] }
 

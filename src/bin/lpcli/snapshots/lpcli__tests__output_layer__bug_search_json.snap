@@ -1,0 +1,49 @@
+---
+source: src/bin/lpcli/tests.rs
+expression: rendered
+---
+{
+  "entries": [
+    {
+      "assignee_link": null,
+      "bug_link": "https://api.launchpad.net/devel/bugs/2000001",
+      "bug_target_display_name": "curl (Ubuntu)",
+      "bug_target_name": "curl (Ubuntu)",
+      "bug_watch_link": null,
+      "date_created": "2026-01-02T03:04:05.678901+00:00",
+      "date_fix_released": null,
+      "http_etag": "\"0123-4567\"",
+      "importance": "Undecided",
+      "is_complete": false,
+      "milestone_link": null,
+      "resource_type_link": "https://api.launchpad.net/devel/#bug_task",
+      "self_link": "https://api.launchpad.net/devel/ubuntu/+source/curl/+bug/2000001",
+      "status": "New",
+      "target_link": "https://api.launchpad.net/devel/ubuntu/+source/curl",
+      "title": "curl crashes on\nmultiline \"titles\"",
+      "web_link": "https://bugs.launchpad.net/ubuntu/+source/curl/+bug/2000001"
+    },
+    {
+      "assignee_link": null,
+      "bug_link": "https://api.launchpad.net/devel/bugs/2000002",
+      "bug_target_display_name": "curl (Ubuntu)",
+      "bug_target_name": "curl (Ubuntu)",
+      "bug_watch_link": null,
+      "date_created": "2026-01-02T03:04:05.678901+00:00",
+      "date_fix_released": null,
+      "http_etag": "\"0123-4567\"",
+      "importance": "Undecided",
+      "is_complete": false,
+      "milestone_link": null,
+      "resource_type_link": "https://api.launchpad.net/devel/#bug_task",
+      "self_link": "https://api.launchpad.net/devel/ubuntu/+source/curl/+bug/2000002",
+      "status": "Fix Released",
+      "target_link": "https://api.launchpad.net/devel/ubuntu/+source/curl",
+      "title": "Fix released",
+      "web_link": "https://bugs.launchpad.net/ubuntu/+source/curl/+bug/2000002"
+    }
+  ],
+  "next_collection_link": "https://api.launchpad.net/devel/ubuntu/+source/curl?ws.op=searchTasks&ws.size=2&memo=2&ws.start=2",
+  "start": 0,
+  "total_size": 3
+}

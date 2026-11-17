@@ -19,9 +19,11 @@ applications can build on the same type-safe API wrappers.
   with a plaintext file fallback when no keyring is available.
 - **Hardware-bound API tokens** — optionally bind your API access to a USB FIDO2
   security key (e.g. a YubiKey), so exchanging a stored grant requires the key.
-- **Rich terminal output** — coloured text and formatted tables via
+- **Output for people and programs** — coloured text and formatted tables via
   [`colored`](https://crates.io/crates/colored) and
-  [`comfy-table`](https://crates.io/crates/comfy-table).
+  [`comfy-table`](https://crates.io/crates/comfy-table), an accessible `plain`
+  mode for screen readers, and Launchpad-compatible JSON and TSV for scripts
+  and agents (see [Output formats](#output-formats)).
 - **Library crate** — all public API operations are exposed as an async Rust library
   that other crates can depend on.
 
@@ -261,6 +263,84 @@ Widths include table borders and padding. Long cell text wraps instead of being
 truncated; extremely narrow outputs use a stacked `Field: value` layout. A
 configured width is not capped to the physical terminal width.
 
+The `[display]` table also sets the default output format; see
+[Output formats](#output-formats):
+
+```toml
+[display]
+format = "plain"   # rich, plain, json, or tsv
+accessible = true  # prefer plain output when no format is chosen
+```
+
+## Output formats
+
+The global `--format` option selects one of four output modes:
+
+| Mode | Output |
+|---|---|
+| `rich` | Color, Unicode tables, and headings. The default. |
+| `plain` | For screen readers and braille displays: each record as `Field: value` lines with a blank line between records, the count first (for example `2 bugs found.`), ASCII punctuation, no color or box drawing, words such as `OK:`, `Warning:`, and `Error:` instead of symbols, and `none` for missing values. |
+| `json` | Launchpad's own JSON representation, on stdout only. |
+| `tsv` | A header row, then exactly one tab-separated line per record. Tabs, newlines, carriage returns, and backslashes inside values are written as `\t`, `\n`, `\r`, and `\\`. |
+
+The mode is chosen, from highest priority to lowest, by `--format`, the
+`LPCLI_FORMAT` environment variable, `display.format` in `config.toml`, and
+finally automatically: `plain` when `display.accessible = true` or `TERM=dumb`,
+and `rich` otherwise. An invalid `LPCLI_FORMAT` value is an error.
+
+`json` and `tsv` are available for `status`, `bug search`, and
+`bug remote-bug-trackers`; other commands will follow. Passing
+`--format json` or `--format tsv` to another command is a usage error. When
+`json` or `tsv` comes from `LPCLI_FORMAT` or `display.format` instead, other
+commands print a warning on stderr and use their normal output.
+
+```bash
+lpcli --format json bug search --target ubuntu --package curl --limit 5
+lpcli bug remote-bug-trackers --search debian --format tsv
+lpcli --format plain status
+```
+
+In `json` mode:
+
+- Entries are exactly as Launchpad returns them, with the same field names,
+  `null` values, `*_link` fields, and values.
+- Lists use Launchpad's collection shape: `total_size`, `start`, and
+  `entries`. `bug search` passes Launchpad's result page through, including
+  `next_collection_link` when `--limit` cut the results short, and
+  `total_size_link` when Launchpad sends it instead of `total_size`.
+- `bug remote-bug-trackers --search` filters locally, so `total_size` is the
+  number of matches and is included only when every tracker was checked.
+  When `--limit` stops the search early, both `total_size` and
+  `next_collection_link` are omitted.
+- `status` has no Launchpad entry to pass through, so it prints an
+  lpcli-defined object under an `lpcli` member, for example
+  `{"lpcli": {"authentication": {"credentials": "oauth", "account": "someone", "verified": true}, "server": {...}}}`.
+  It never contains credentials.
+- JSON is indented when stdout is a terminal and compact otherwise.
+
+Color follows `--color auto|always|never`. With `auto`, the default,
+`CLICOLOR_FORCE` set to anything other than `0` turns color on, a non-empty
+`NO_COLOR` or `TERM=dumb` turns it off, and otherwise color is used only when
+the stream is a terminal. stdout and stderr are decided separately. `plain`,
+`json`, and `tsv` output on stdout is never colored.
+
+### Replacing `--json`
+
+`--json` was removed in 0.5.0 and is now rejected as an unexpected argument.
+Use `--format json` instead. The JSON is now Launchpad's collection shape, in
+the order Launchpad returns the trackers, instead of a bare array sorted by
+name:
+
+| | Before (0.4.x) | After (0.5.0) |
+|---|---|---|
+| Option of `bug remote-bug-trackers` | `--json` | `--format json` |
+| Output | `[{"name": "debbugs", ...}]` | `{"total_size": 1, "start": 0, "entries": [{"name": "debbugs", ...}]}` |
+| Reading names with `jq` | `jq '.[].name'` | `jq '.entries[].name'` |
+
+Each entry now carries every field Launchpad returns, such as
+`resource_type_link` and `http_etag`, not only the seven fields the old output
+selected. To keep sorting by name, use `jq '.entries | sort_by(.name)'`.
+
 ## Usage
 
 Run `lpcli --help` for the command list and `lpcli bug --help` for a command's
@@ -384,6 +464,8 @@ lpcli bug add-task --bug-id 2120577 --target debian --package arctica-greeter \
 lpcli bug remote-bug-trackers
 # Search tracker metadata and cap results; -s and -l are short forms.
 lpcli bug remote-bug-trackers --search debian --limit 10
+# The same search as Launchpad collection JSON, for scripts
+lpcli bug remote-bug-trackers --search debian --limit 10 --format json
 
 # Link an existing bug task to a remote bug tracker
 lpcli bug link-remote --bug-id 2120577 --target debian --bug-tracker debbugs --remote-bug 1150409

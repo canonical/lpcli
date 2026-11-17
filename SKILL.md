@@ -26,17 +26,25 @@ Use this skill whenever the user asks about **Launchpad** data, including:
 
 | User intent | lpcli command |
 |-------------|---------------|
-| Count/list bugs for a **source package** | `lpcli bug search --target ubuntu --package <name>` |
-| Count/list bugs for a **project** | `lpcli bug search --target <project>` |
+| Count/list bugs for a **source package** | `lpcli bug search --target ubuntu --package curl` (use the package name) |
+| Count/list bugs for a **project** | `lpcli bug search --target launchpad` (use the project name) |
 | Filter bugs by status | Add `--status "New"` (or Confirmed, Triaged, In Progress, Fix Committed, Fix Released, etc.) |
 | Filter bugs by importance | Add `--importance "Critical"` (or High, Medium, Low, Wishlist, Undecided) |
 | Filter bugs by tag | Add `--tag <tag>` |
 | Search bugs by keyword | Add `--keyword "<text>"` |
 | Limit results | Add `--limit <n>` |
 
-**Counting bugs**: `lpcli bug search` returns matching bugs. To count them,
-pipe through `wc -l` or count the output entries. When the user asks "how many",
-run the search and report the count.
+**Counting bugs**: `lpcli bug search` returns one page of matching bugs, up
+to `--limit` (default 25). Do not count table lines with `wc -l`; borders and
+wrapped rows make that wrong. Use `--format json` and read Launchpad's
+`total_size` (the count of all matches), or count `entries` for the returned
+page. When the user asks "how many", report `total_size`. If Launchpad sent
+`total_size_link` instead, the total is not in the output; say so rather than
+reporting the page size as the total.
+
+```bash
+lpcli --format json bug search --target ubuntu --package rustc-1.97 --limit 1
+```
 
 ## Prerequisites
 
@@ -45,10 +53,11 @@ run the search and report the count.
 - Run `lpcli login` first. Many commands, including common reads such as
   `bug show` and `bug search`, require authentication — do not assume any
   command works anonymously.
-- If the user logged in with a **hardware-bound token** (`lpcli hardware-token
-  issue` or `lpcli login --hardware-token`), each `lpcli` invocation needs a
-  touch of their USB security key (and possibly its PIN). Tell the user before
-  running commands. `lpcli status` shows which login is in use.
+- If the user logged in with a **hardware-bound token** (through the
+  `hardware-token issue` command or `lpcli login --hardware-token`), each
+  `lpcli` invocation needs a touch of their USB security key (and possibly its
+  PIN). Tell the user before running commands. `lpcli status` shows which
+  login is in use.
 
 ## CLI Reference
 
@@ -58,7 +67,25 @@ General syntax:
 lpcli <COMMAND> [SUBCOMMAND] [OPTIONS]
 ```
 
-Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
+Run `lpcli --help`, or `--help` after any command (for example
+`lpcli bug --help`), for full option details.
+
+### Output formats
+
+The global `--format` option selects `rich` (the default), `plain` (labeled
+records for screen readers), `json`, or `tsv`. **Agents should use
+`--format json` or `--format tsv`** wherever they are available: stdout then
+contains data only.
+
+- `json` and `tsv` work with `status`, `bug search`, and
+  `bug remote-bug-trackers`. Other commands reject them with a usage error
+  (exit code 2); use their default output.
+- JSON is Launchpad's own representation. Lists use Launchpad's collection
+  shape, `{"total_size", "start", "entries"}`, so read `.entries[]`.
+- `--json` is **no longer accepted**; it fails with an "unexpected argument"
+  error. Use `--format json`, and read `.entries[]` instead of `.[]`.
+- `LPCLI_FORMAT=json` sets a default for every command; commands without
+  JSON output then print a warning on stderr and use their normal output.
 
 ### Bugs
 
@@ -71,7 +98,7 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 | Search bugs by keyword | `lpcli bug search --target ubuntu --keyword "kernel panic" --limit 20` |
 | Search bugs by tag | `lpcli bug search --target ubuntu --tag "regression-update" --limit 10` |
 | Search bugs by importance | `lpcli bug search --target ubuntu --importance "Critical" --limit 10` |
-| Add a comment | `lpcli bug comment --bug-id 123456 --message "Reproduced on noble."` |
+| Add a comment | `lpcli bug add-comment --bug-id 123456 --message "Reproduced on noble."` |
 | List comments | `lpcli bug comments --bug-id 123456` |
 | File a new bug | `lpcli bug create --target ubuntu --package curl --title "title" --description "desc"` |
 | Edit a bug description | `lpcli bug set-description --bug-id 123456 --description "new text"` or `--description-file ./desc.txt` (`-` reads stdin) |
@@ -95,7 +122,7 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 | Unlink remote bug watch from task | `lpcli bug unlink-remote --bug-id 123456 --target debian` |
 | List bug watches (Linked Tasks column shows task links) | `lpcli bug watches --bug-id 123456` |
 | Find a remote bug tracker | `lpcli bug remote-bug-trackers --search "canonical/apport" --limit 20` |
-| Find remote bug trackers as JSON | `lpcli bug remote-bug-trackers --search "github" --json` |
+| Find remote bug trackers as JSON | `lpcli bug remote-bug-trackers --search "github" --format json` |
 | Register a bug tracker | `lpcli bug tracker create --base-url https://github.com/OWNER/REPO/issues --type github` |
 | Delete a bug task | `lpcli bug delete-task --bug-id 123456 --target ubuntu --package curl --series noble` |
 | Add a tag | `lpcli bug tag --bug-id 123456 --add-tag regression` |
@@ -244,8 +271,10 @@ Run `lpcli --help` or `lpcli <COMMAND> --help` for full option details.
 
 ```bash
 # "How many bugs are opened against rustc-1.97 in Launchpad?"
+# Report total_size from the JSON; entries holds at most --limit bugs.
+lpcli --format json bug search --target ubuntu --package rustc-1.97 --limit 1
+# For a readable list of the bugs themselves:
 lpcli bug search --target ubuntu --package rustc-1.97
-# To count: pipe output through wc -l or count the returned entries
 ```
 
 ### Triage a bug
@@ -257,7 +286,7 @@ lpcli bug set-status --bug-id 123456 --target curl \
     --series noble --status triaged
 lpcli bug set-importance --bug-id 123456 --target curl \
     --series noble --importance high
-lpcli bug comment --bug-id 123456 --message "Triaged as High for Noble."
+lpcli bug add-comment --bug-id 123456 --message "Triaged as High for Noble."
 ```
 
 ### Forward a bug to Debian or upstream
@@ -384,8 +413,9 @@ lpcli person ppas --name my-username
    (bug searches, package lookups, etc.) require authentication.
 3. **Use `--help`** — every subcommand supports `--help` for full option details
    (e.g. `lpcli bug search --help`).
-4. **Counting results** — `lpcli` outputs human-readable tables. To count bugs,
-   pipe through `grep -c` or `wc -l` on the relevant output lines.
+4. **Counting results** — use `--format json` and read `total_size` (or
+   count `entries`) instead of counting table lines; `--format tsv` gives
+   exactly one line per record after the header.
 5. **Source package names in Launchpad** may differ from upstream project names
    (e.g. `rustc-1.97` not `rust`). Use the exact source package name the user
    provides.

@@ -84,8 +84,17 @@ lpcli queue info --name mutter --status accepted --arch amd64 \
 Use mocked HTTP responses and isolated filesystem/subprocess fixtures for routine
 tests. Live Launchpad mutations require explicit authorization and a suitable test
 account. Documentation examples should pass both clap parsing and `validate_cli`;
-the CLI test suite checks examples in `README.md` and `AGENTS.md` without dispatching
-commands or making network requests.
+the CLI test suite checks examples in `README.md`, `AGENTS.md`, and `SKILL.md`
+without dispatching commands or making network requests.
+
+Commands ported to the output layer (`src/bin/lpcli/output.rs`) build a
+`Report` and are snapshot-tested in all four modes (`rich`, `plain`, `json`,
+`tsv`) with [insta](https://insta.rs). Snapshots live in `snapshots/` next to
+the tests; CI sets `INSTA_UPDATE=no`, so new or changed snapshots fail. Review
+changes with `cargo insta review` (or `INSTA_UPDATE=always cargo test` and
+`git diff`). Redact timestamps and mock-server URLs, and never snapshot
+credentials. JSON output must come from Launchpad's raw JSON (`client::Raw`);
+see `plans/decision_0001_preserve_launchpad_json.md`.
 
 Run the CI-equivalent checks, plus doctests:
 

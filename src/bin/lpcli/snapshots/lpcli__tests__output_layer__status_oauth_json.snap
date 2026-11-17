@@ -1,0 +1,19 @@
+---
+source: src/bin/lpcli/tests.rs
+expression: rendered
+---
+{
+  "lpcli": {
+    "authentication": {
+      "account": "someone",
+      "credentials": "oauth",
+      "verified": true
+    },
+    "server": {
+      "error": null,
+      "http_status": 200,
+      "reachable": true,
+      "resource_type_link": "https://api.launchpad.net/devel/#service-root"
+    }
+  }
+}

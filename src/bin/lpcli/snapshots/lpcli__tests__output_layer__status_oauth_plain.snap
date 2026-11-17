@@ -1,0 +1,10 @@
+---
+source: src/bin/lpcli/tests.rs
+expression: rendered
+---
+Authentication
+OK: Logged in as ~someone
+
+Launchpad API Server
+OK: Online
+Endpoint: https://api.launchpad.net/devel/#service-root

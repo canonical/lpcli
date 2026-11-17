@@ -212,6 +212,12 @@ impl LaunchpadClient {
         self.get_url(&self.url(path)).await
     }
 
+    /// Like [`Self::get_url()`], but also keep the exact JSON that Launchpad
+    /// returned, for output that must reproduce Launchpad's representation.
+    pub async fn get_url_raw<T: DeserializeOwned>(&self, url: &str) -> Result<Raw<T>> {
+        Raw::from_value(self.get_url(url).await?)
+    }
+
     /// Perform an authenticated GET request against an absolute URL.
     ///
     /// With a hardware-bound session, a request rejected because its access
@@ -1309,6 +1315,32 @@ fn encode_pairs(params: &[(&str, &str)]) -> String {
 // Pagination helpers
 // ---------------------------------------------------------------------------
 
+/// A typed Launchpad value together with the exact JSON it was decoded from.
+///
+/// The typed `value` keeps only the fields lpcli models, and re-encoding it
+/// could change Launchpad's representation. `raw` is the unmodified JSON
+/// (field names, `null`s, links and values), for output that must match
+/// Launchpad's own representation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Raw<T> {
+    /// The decoded value.
+    pub value: T,
+    /// The JSON exactly as Launchpad returned it.
+    pub raw: serde_json::Value,
+}
+
+impl<T: DeserializeOwned> Raw<T> {
+    /// Decode `raw` into `T`, keeping the original JSON alongside it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LpError::Json`] if `raw` does not match `T`.
+    pub fn from_value(raw: serde_json::Value) -> Result<Self> {
+        let value = T::deserialize(&raw)?;
+        Ok(Self { value, raw })
+    }
+}
+
 /// A generic Launchpad collection response.
 #[derive(Debug, serde::Deserialize)]
 pub struct Collection<T> {
@@ -1350,6 +1382,13 @@ impl<T: DeserializeOwned + std::fmt::Debug> Collection<T> {
     pub async fn fetch_page(client: &LaunchpadClient, url: &str) -> Result<Vec<T>> {
         let page: Collection<T> = client.get_url(url).await?;
         Ok(page.entries)
+    }
+
+    /// Like [`Self::fetch_page()`], but return the whole page, together with
+    /// the exact JSON Launchpad returned for it (including `total_size`,
+    /// `total_size_link`, `start` and `next_collection_link`, when present).
+    pub async fn fetch_page_raw(client: &LaunchpadClient, url: &str) -> Result<Raw<Self>> {
+        client.get_url_raw(url).await
     }
 }
 

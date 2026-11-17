@@ -1,0 +1,30 @@
+---
+source: src/bin/lpcli/tests.rs
+expression: report.json
+---
+{
+  "entries": [
+    {
+      "assignee_link": null,
+      "bug_link": "[server url]",
+      "bug_target_display_name": "curl (Ubuntu)",
+      "bug_target_name": "curl (Ubuntu)",
+      "bug_watch_link": null,
+      "date_created": "[timestamp]",
+      "date_fix_released": null,
+      "http_etag": "\"0123-4567\"",
+      "importance": "Undecided",
+      "is_complete": false,
+      "milestone_link": null,
+      "resource_type_link": "https://api.launchpad.net/devel/#bug_task",
+      "self_link": "[server url]",
+      "status": "Triaged",
+      "target_link": "[server url]",
+      "title": "Mocked",
+      "web_link": "https://bugs.launchpad.net/ubuntu/+source/curl/+bug/42"
+    }
+  ],
+  "next_collection_link": "[server url]",
+  "start": 0,
+  "total_size": 7
+}

@@ -3,7 +3,7 @@
 //! Parse command-line arguments with `clap` and dispatch to the `lpcli` library.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -11,17 +11,20 @@ use std::sync::Arc;
 mod config;
 #[path = "lpcli/display.rs"]
 mod display;
+#[path = "lpcli/output.rs"]
+mod output;
 
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 
 use display::Display;
+use output::{Block, ColorChoice, Column, Level, Noun, Output, OutputMode, Records, Report, Span};
 use ubuntu_info_rust::{Architecture, Pocket, SeriesInfo};
 
 use lpcli::{
     access_tokens, auth,
     bugs::{self, BugSearchParams},
-    client::LaunchpadClient,
+    client::{Collection, LaunchpadClient, Raw},
     cves::{self, CveSearchParams},
     download, git,
     hardware_key::{Authenticator, UsbAuthenticator},
@@ -371,6 +374,33 @@ struct Cli {
                      identity/security-management commands."
     )]
     public: bool,
+
+    /// Output format: rich, plain, json, or tsv.
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        value_name = "FORMAT",
+        long_help = "Output format. Overrides the LPCLI_FORMAT environment variable and \
+                     display.format in config.toml. Without any of these, lpcli uses plain when \
+                     display.accessible is true or TERM=dumb, and rich otherwise. json and tsv write \
+                     data only to stdout, and are available for status, bug search, and \
+                     bug remote-bug-trackers."
+    )]
+    format: Option<OutputMode>,
+
+    /// When to use color: auto, always, or never.
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        value_name = "WHEN",
+        default_value_t = ColorChoice::Auto,
+        long_help = "When to use color. auto follows CLICOLOR_FORCE, NO_COLOR, and TERM=dumb, and \
+                     otherwise uses color only when the output stream is a terminal. Color is decided \
+                     separately for stdout and stderr. plain, json, and tsv output is never colored."
+    )]
+    color: ColorChoice,
 
     #[command(subcommand)]
     command: Command,
@@ -1067,8 +1097,12 @@ enum BugCommand {
     },
     /// List remote bug trackers registered in Launchpad.
     ///
-    /// By default a compact table is printed. Use --json for
-    /// machine-readable output.
+    /// By default a compact table is printed. Use --format json for
+    /// Launchpad's collection JSON ({"total_size", "start", "entries"}),
+    /// with each tracker exactly as Launchpad returned it, or --format tsv
+    /// for one tracker per line. --search filters locally, so total_size
+    /// is omitted when --limit stops the search before every tracker was
+    /// checked.
     RemoteBugTrackers {
         /// Maximum number of remote bug trackers to return.
         #[arg(short, long, value_parser = parse_positive_limit)]
@@ -1076,14 +1110,6 @@ enum BugCommand {
         /// Case-insensitive substring to match against tracker metadata.
         #[arg(short, long)]
         search: Option<String>,
-        /// Print a JSON array of tracker objects instead of a table.
-        ///
-        /// The output is pure JSON: an array of tracker objects with stable
-        /// keys (self_link, name, title, summary, base_url, bug_tracker_type,
-        /// web_link), sorted by name. An empty result prints as []. No table
-        /// or summary prose is printed in this mode.
-        #[arg(long)]
-        json: bool,
     },
     /// Manage remote bug trackers registered in Launchpad.
     Tracker {
@@ -2306,8 +2332,15 @@ fn handle_skills() -> lpcli::error::Result<()> {
 
 #[tokio::main]
 async fn main() {
-    if let Err(e) = run().await {
-        eprintln!("{} {e}", "error:".red().bold());
+    let cli = Cli::parse();
+    if let Err(e) = validate_cli(&cli) {
+        e.exit();
+    }
+    let color = cli.color;
+    if let Err(e) = run_command(cli, config::load, handle_clear_cache).await {
+        let env = output::Environment::from_process();
+        let colored = output::color_enabled(color, &env, std::io::stderr().is_terminal());
+        eprintln!("{} {e}", output::error_prefix(colored));
         std::process::exit(1);
     }
 }
@@ -2322,6 +2355,19 @@ fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
         return Err(clap::Error::raw(
             clap::error::ErrorKind::ArgumentConflict,
             "--public is only available for data reads, not mutations or identity/security management",
+        ));
+    }
+    if let Some(format) = cli.format
+        && format.is_structured()
+        && !supports_structured_output(&cli.command)
+    {
+        return Err(clap::Error::raw(
+            clap::error::ErrorKind::ArgumentConflict,
+            format!(
+                "--format {} is only available for status, bug search, and bug remote-bug-trackers \
+                 so far; use --format rich or --format plain for this command\n",
+                format.name()
+            ),
         ));
     }
     let result = match &cli.command {
@@ -2384,14 +2430,6 @@ fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
     result.map_err(|msg| clap::Error::raw(clap::error::ErrorKind::InvalidValue, msg))
 }
 
-async fn run() -> lpcli::error::Result<()> {
-    let cli = Cli::parse();
-    if let Err(e) = validate_cli(&cli) {
-        e.exit();
-    }
-    run_command(cli, config::load, handle_clear_cache).await
-}
-
 async fn run_command(
     cli: Cli,
     load_config: impl FnOnce() -> lpcli::error::Result<config::AppConfig>,
@@ -2405,11 +2443,38 @@ async fn run_command(
     }
     let settings = load_config()?;
     let display = Display::new(settings.display.width);
+    let env = output::Environment::from_process();
+    let (stdout_terminal, stderr_terminal) = output::terminals();
+    let output = Output::resolve(output::Settings {
+        format: cli.format,
+        color: cli.color,
+        config_format: settings.display.format,
+        accessible: settings.display.accessible,
+        display,
+        structured_output: supports_structured_output(&cli.command),
+        env: &env,
+        stdout_terminal,
+        stderr_terminal,
+    })
+    .map_err(lpcli::error::LpError::Other)?;
+    if let Some(warning) = output.warning() {
+        output.warn(warning)?;
+    }
+    // Commands not yet ported to the output layer print through `colored`,
+    // so apply the resolved stdout color decision to them as well. Ported
+    // renderers receive an explicit style instead. The override is
+    // process-wide, so test builds leave it alone to keep parallel tests
+    // independent.
+    let stdout_color = output.stdout_style().color;
+    #[cfg(not(test))]
+    colored::control::set_override(stdout_color);
+    #[cfg(test)]
+    let _ = stdout_color;
     let cache_timeout = hardware_token_cache_timeout(&settings);
     let policy = read_auth_policy(&cli.command, cli.authenticated, cli.public);
 
     match cli.command {
-        Command::Status => handle_status().await?,
+        Command::Status => handle_status(&output).await?,
 
         Command::Login(args) if args.hardware_token => {
             handle_hardware_login(args, cache_timeout).await?
@@ -2445,7 +2510,7 @@ async fn run_command(
 
         Command::HardwareToken(cmd) => handle_hardware_token(cmd, &display, cache_timeout).await?,
 
-        Command::Bug(cmd) => handle_bug(cmd, &display, policy, cache_timeout).await?,
+        Command::Bug(cmd) => handle_bug(cmd, &display, &output, policy, cache_timeout).await?,
         Command::Person(cmd) => handle_person(cmd, &display, policy, cache_timeout).await?,
         Command::Package(cmd) => handle_package(cmd, &display, policy, cache_timeout).await?,
         Command::Project(cmd) => handle_project(cmd, &display, policy, cache_timeout).await?,
@@ -2673,6 +2738,7 @@ async fn fetch_bug_comments(
 async fn handle_bug(
     cmd: BugCommand,
     display: &Display,
+    output: &Output,
     policy: ReadAuthPolicy,
     cache_timeout: std::time::Duration,
 ) -> lpcli::error::Result<()> {
@@ -2738,29 +2804,8 @@ async fn handle_bug(
                 limit: Some(limit),
                 ..Default::default()
             };
-            let tasks = bugs::search_bugs(&client, &target, &params).await?;
-            let mut table = build_table(display, vec!["ID", "Title", "Status", "Target"]);
-            for task in &tasks {
-                // The bug number is the last path segment of bug_link, e.g.
-                // "https://api.launchpad.net/devel/bugs/12345" → "12345".
-                let bug_id = task
-                    .bug_link
-                    .as_deref()
-                    .and_then(|url| url.rsplit('/').next())
-                    .unwrap_or("—")
-                    .to_string();
-                table.add_row(vec![
-                    bug_id,
-                    task.title.as_deref().unwrap_or("—").to_string(),
-                    task.status.as_deref().unwrap_or("—").to_string(),
-                    task.bug_target_display_name
-                        .as_deref()
-                        .unwrap_or("—")
-                        .to_string(),
-                ]);
-            }
-            println!("{table}");
-            println!("{} bug(s) found.", tasks.len());
+            let page = bugs::search_bugs_raw(&client, &target, &params).await?;
+            output.print(&bug_search_report(&page))?;
         }
 
         BugCommand::AddComment {
@@ -3564,44 +3609,9 @@ async fn handle_bug(
             println!("{} bug watch(es).", watches.len());
         }
 
-        BugCommand::RemoteBugTrackers {
-            limit,
-            search,
-            json,
-        } => {
-            let trackers = bugs::search_bug_trackers(&client, search.as_deref(), limit).await?;
-            if json {
-                // Machine-readable mode: pure JSON, no table or summary prose.
-                println!("{}", trackers_to_json(&trackers)?);
-                return Ok(());
-            }
-            if trackers.is_empty() {
-                if search.is_some() {
-                    println!("No remote bug trackers matched the search.");
-                } else {
-                    println!("No remote bug trackers found.");
-                }
-                return Ok(());
-            }
-
-            let mut table = build_table(display, vec!["Name", "Title", "Type", "Base URL"]);
-            for tracker in &trackers {
-                table.add_row(vec![
-                    tracker.name.as_deref().unwrap_or("—").to_string(),
-                    tracker.title.as_deref().unwrap_or("—").to_string(),
-                    tracker
-                        .bug_tracker_type
-                        .as_deref()
-                        .unwrap_or("—")
-                        .to_string(),
-                    tracker.base_url.as_deref().unwrap_or("—").to_string(),
-                ]);
-            }
-            println!("{table}");
-            println!(
-                "{} remote bug tracker(s). Use the Name value with --bug-tracker.",
-                trackers.len()
-            );
+        BugCommand::RemoteBugTrackers { limit, search } => {
+            let found = bugs::search_bug_trackers_raw(&client, search.as_deref(), limit).await?;
+            output.print(&remote_bug_trackers_report(&found, search.is_some()))?;
         }
 
         BugCommand::Tracker {
@@ -5206,57 +5216,152 @@ async fn handle_hardware_token(
 /// Display authentication status and Launchpad server reachability.
 ///
 /// Both checks run concurrently to minimise latency.
-async fn handle_status() -> lpcli::error::Result<()> {
-    // Run both checks in parallel.
+async fn handle_status(output: &Output) -> lpcli::error::Result<()> {
     let (server, auth) = tokio::join!(status::check_server(), status::check_auth());
+    output.print(&status_report(&server, &auth))
+}
 
-    // Authentication section.
-    println!("{}", "Authentication".bold());
-    println!("{}", "─".repeat(40));
-    if let Some(account) = &auth.hardware_account {
-        println!(
-            "{} Hardware-bound grant stored for {}",
-            "✓".green().bold(),
-            format!("~{account}").cyan().bold()
-        );
-        println!("  Not verified with Launchpad, which would need a touch of your security key.");
+/// Which kind of stored credentials `status` found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusCredentials {
+    HardwareToken,
+    OAuth,
+    None,
+}
+
+impl StatusCredentials {
+    fn key(self) -> &'static str {
+        match self {
+            Self::HardwareToken => "hardware_token",
+            Self::OAuth => "oauth",
+            Self::None => "none",
+        }
+    }
+}
+
+/// Build the `status` report.
+///
+/// There is no Launchpad entry to pass through, so the JSON is an
+/// lpcli-defined object under the `lpcli` member. It names the account but
+/// never contains credentials, tokens, or grant secrets, which `AuthStatus`
+/// does not carry.
+fn status_report(server: &status::ServerStatus, auth: &status::AuthStatus) -> Report {
+    // Launchpad names have no leading `~`; the display form adds one.
+    let name = |account: &str| account.trim_start_matches('~').to_string();
+    let (credentials, account, verified) = if let Some(account) = &auth.hardware_account {
+        (StatusCredentials::HardwareToken, Some(name(account)), false)
     } else if auth.logged_in {
-        match &auth.username {
-            Some(name) => println!("{} Logged in as {}", "✓".green().bold(), name.cyan().bold()),
-            None => println!(
-                "{} Credentials found (could not verify with server)",
-                "~".yellow().bold()
-            ),
-        }
+        let account = auth.username.as_deref().map(name);
+        let verified = account.is_some();
+        (StatusCredentials::OAuth, account, verified)
     } else {
-        println!(
-            "{} Not logged in.  Run {} to authenticate.",
-            "✗".red().bold(),
-            "`lpcli login`".bold()
-        );
+        (StatusCredentials::None, None, false)
+    };
+
+    let mut blocks = vec![Block::Heading("Authentication".into())];
+    match (credentials, &account) {
+        (StatusCredentials::HardwareToken, Some(account)) => {
+            blocks.push(Block::Status(
+                Level::Ok,
+                vec![
+                    Span::Text("Hardware-bound grant stored for ".into()),
+                    Span::Name(format!("~{account}")),
+                ],
+            ));
+            blocks.push(Block::Note(vec![Span::Text(
+                "Not verified with Launchpad, which would need a touch of your security key."
+                    .into(),
+            )]));
+        }
+        (StatusCredentials::OAuth, Some(account)) => blocks.push(Block::Status(
+            Level::Ok,
+            vec![
+                Span::Text("Logged in as ".into()),
+                Span::Name(format!("~{account}")),
+            ],
+        )),
+        (StatusCredentials::OAuth, None) | (StatusCredentials::HardwareToken, None) => {
+            blocks.push(Block::Status(
+                Level::Warning,
+                vec![Span::Text(
+                    "Credentials found (could not verify with server)".into(),
+                )],
+            ));
+        }
+        (StatusCredentials::None, _) => blocks.push(Block::Status(
+            Level::Error,
+            vec![
+                Span::Text("Not logged in. Run ".into()),
+                Span::Command("lpcli login".into()),
+                Span::Text(" to authenticate.".into()),
+            ],
+        )),
     }
 
-    println!();
-
-    // Launchpad server section.
-    println!("{}", "Launchpad API Server".bold());
-    println!("{}", "─".repeat(40));
+    blocks.push(Block::Break);
+    blocks.push(Block::Heading("Launchpad API Server".into()));
     if server.reachable {
-        println!("{} Online", "✓".green().bold());
-        if let Some(ref rtl) = server.resource_type_link {
-            println!("  Endpoint: {rtl}");
+        blocks.push(Block::Status(Level::Ok, vec![Span::Text("Online".into())]));
+        if let Some(link) = &server.resource_type_link {
+            blocks.push(Block::Field("Endpoint", link.clone()));
         }
     } else {
-        println!("{} Unreachable", "✗".red().bold());
-        if let Some(status_code) = server.http_status {
-            println!("  HTTP status: {status_code}");
+        blocks.push(Block::Status(
+            Level::Error,
+            vec![Span::Text("Unreachable".into())],
+        ));
+        if let Some(code) = server.http_status {
+            blocks.push(Block::Field("HTTP status", code.to_string()));
         }
-        if let Some(ref err) = server.error {
-            println!("  Error: {err}");
+        if let Some(error) = &server.error {
+            blocks.push(Block::Field("Reason", error.clone()));
         }
     }
 
-    Ok(())
+    let json = serde_json::json!({
+        "lpcli": {
+            "authentication": {
+                "credentials": credentials.key(),
+                "account": account,
+                "verified": verified,
+            },
+            "server": {
+                "reachable": server.reachable,
+                "http_status": server.http_status,
+                "resource_type_link": server.resource_type_link,
+                "error": server.error,
+            },
+        }
+    });
+    let column = |key| Column { label: key, key };
+    let records = Records {
+        columns: [
+            "credentials",
+            "account",
+            "verified",
+            "reachable",
+            "http_status",
+            "resource_type_link",
+            "error",
+        ]
+        .into_iter()
+        .map(column)
+        .collect(),
+        rows: vec![vec![
+            Some(credentials.key().to_string()),
+            account,
+            Some(verified.to_string()),
+            Some(server.reachable.to_string()),
+            server.http_status.map(|code| code.to_string()),
+            server.resource_type_link.clone(),
+            server.error.clone(),
+        ]],
+    };
+    Report {
+        blocks,
+        json,
+        records,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6484,17 +6589,146 @@ fn build_table(display: &Display, headers: Vec<&str>) -> display::DisplayTable {
 // Bug watch and remote bug tracker display helpers
 // ---------------------------------------------------------------------------
 
-/// Serialize remote bug trackers as a pure JSON array for `--json` output.
+// ---------------------------------------------------------------------------
+// Output-layer reports
+// ---------------------------------------------------------------------------
+
+/// Commands whose results support `--format json` and `--format tsv`.
+fn supports_structured_output(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Status
+            | Command::Bug(BugCommand::Search { .. } | BugCommand::RemoteBugTrackers { .. })
+    )
+}
+
+/// Build the `bug search` report. The JSON is the Launchpad result page,
+/// unmodified, including `next_collection_link` when `--limit` cut the
+/// results short and `total_size_link` when Launchpad sends one.
+fn bug_search_report(page: &Raw<Collection<bugs::BugTask>>) -> Report {
+    let rows = page
+        .value
+        .entries
+        .iter()
+        .map(|task| {
+            vec![
+                // The bug number is the last path segment of bug_link, e.g.
+                // "https://api.launchpad.net/devel/bugs/12345" -> "12345".
+                task.bug_link
+                    .as_deref()
+                    .and_then(|url| url.rsplit('/').next())
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string),
+                task.title.clone(),
+                task.status.clone(),
+                task.bug_target_display_name.clone(),
+            ]
+        })
+        .collect();
+    Report {
+        blocks: vec![Block::List {
+            noun: Noun {
+                singular: "bug",
+                plural: "bugs",
+            },
+            empty: "No bugs found.".into(),
+            hint: None,
+        }],
+        json: page.raw.clone(),
+        records: Records {
+            columns: vec![
+                Column {
+                    label: "ID",
+                    key: "id",
+                },
+                Column {
+                    label: "Title",
+                    key: "title",
+                },
+                Column {
+                    label: "Status",
+                    key: "status",
+                },
+                Column {
+                    label: "Target",
+                    key: "bug_target_display_name",
+                },
+            ],
+            rows,
+        },
+    }
+}
+
+/// Build the `bug remote-bug-trackers` report.
 ///
-/// The [`bugs::BugTracker`] fields serialize in declaration order with stable
-/// keys (absent fields serialize as null), and the array is sorted by tracker
-/// name so the output is deterministic across runs. Sorting borrows the
-/// trackers instead of cloning them. The result must be printed verbatim:
-/// callers must not add table or summary prose around it.
-fn trackers_to_json(trackers: &[bugs::BugTracker]) -> lpcli::error::Result<String> {
-    let mut sorted: Vec<&bugs::BugTracker> = trackers.iter().collect();
-    sorted.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(serde_json::to_string_pretty(&sorted)?)
+/// The JSON uses Launchpad's collection shape with every tracker exactly as
+/// Launchpad returned it, in Launchpad's order. The search runs locally, so
+/// no Launchpad link can continue the filtered list: `next_collection_link`
+/// is never included, and `total_size` (the number of matches) only when
+/// every page was scanned.
+fn remote_bug_trackers_report(found: &bugs::BugTrackerSearch, searched: bool) -> Report {
+    let entries: Vec<serde_json::Value> = found
+        .trackers
+        .iter()
+        .map(|tracker| tracker.raw.clone())
+        .collect();
+    let mut json = serde_json::Map::new();
+    if found.complete {
+        json.insert("total_size".into(), entries.len().into());
+    }
+    json.insert("start".into(), 0.into());
+    json.insert("entries".into(), entries.into());
+
+    let rows = found
+        .trackers
+        .iter()
+        .map(|tracker| {
+            let tracker = &tracker.value;
+            vec![
+                tracker.name.clone(),
+                tracker.title.clone(),
+                tracker.bug_tracker_type.clone(),
+                tracker.base_url.clone(),
+            ]
+        })
+        .collect();
+    let empty = if searched {
+        "No remote bug trackers matched the search."
+    } else {
+        "No remote bug trackers found."
+    };
+    Report {
+        blocks: vec![Block::List {
+            noun: Noun {
+                singular: "remote bug tracker",
+                plural: "remote bug trackers",
+            },
+            empty: empty.into(),
+            hint: Some("Use the Name value with --bug-tracker.".into()),
+        }],
+        json: json.into(),
+        records: Records {
+            columns: vec![
+                Column {
+                    label: "Name",
+                    key: "name",
+                },
+                Column {
+                    label: "Title",
+                    key: "title",
+                },
+                Column {
+                    label: "Type",
+                    key: "bug_tracker_type",
+                },
+                Column {
+                    label: "Base URL",
+                    key: "base_url",
+                },
+            ],
+            rows,
+        },
+    }
 }
 
 /// Best-effort display name for a bug task in watch-link listings.
