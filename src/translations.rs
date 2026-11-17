@@ -7,7 +7,7 @@
 //! | [`get_distro_series_import_queue`] | List translation import queue entries for a distro series |
 //! | [`get_distro_series_templates`] | List translation templates for a distro series |
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Collection, LaunchpadClient};
@@ -26,7 +26,7 @@ pub struct TranslationImportQueueEntry {
     /// `"Failed"`, `"Needs Review"`, `"Blocked"`, `"Needs Information"`.
     pub status: Option<String>,
     /// When this entry was created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// API link to the person who uploaded the file.
     pub uploader_link: Option<String>,
     /// API link to the associated source package, if any.
@@ -51,7 +51,7 @@ pub struct TranslationTemplate {
     /// Whether this template is obsolete.
     pub is_obsolete: Option<bool>,
     /// When the template was last updated.
-    pub date_last_updated: Option<DateTime<Utc>>,
+    pub date_last_updated: Option<Timestamp>,
     /// API self-link.
     pub self_link: Option<String>,
     /// Launchpad web link.

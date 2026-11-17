@@ -15,7 +15,7 @@
 //! | [`get_inline_comments`] | Fetch inline (diff) comments for a merge proposal |
 //! | [`get_preview_diffs`] | List all preview diffs for a merge proposal |
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Collection, LaunchpadClient};
@@ -53,9 +53,9 @@ pub struct GitRepository {
     /// Launchpad web link.
     pub web_link: Option<String>,
     /// Date created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// Date last modified.
-    pub date_last_modified: Option<DateTime<Utc>>,
+    pub date_last_modified: Option<Timestamp>,
     /// Number of loose objects (indicates whether a repack would help).
     pub loose_object_count: Option<u64>,
     /// Number of pack files.
@@ -109,9 +109,9 @@ pub struct MergeProposal {
     /// Link to the collection of all preview diffs.
     pub preview_diffs_collection_link: Option<String>,
     /// Date the proposal was created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// Date last updated.
-    pub date_last_modified: Option<DateTime<Utc>>,
+    pub date_last_modified: Option<Timestamp>,
 }
 
 /// A code review comment on a merge proposal.
@@ -130,7 +130,7 @@ pub struct CodeReviewComment {
     /// API link to the comment author.
     pub author_link: Option<String>,
     /// When the comment was posted.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// API self-link.
     pub self_link: Option<String>,
     /// Launchpad web link.
@@ -182,7 +182,7 @@ pub struct PreviewDiff {
     /// API self-link.
     pub self_link: Option<String>,
     /// When this diff was created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// Title / description.
     pub title: Option<String>,
     /// Number of lines added.

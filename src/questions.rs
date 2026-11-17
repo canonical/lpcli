@@ -9,7 +9,7 @@
 //! | [`search_questions`] | Search questions on a project or distribution |
 //! | [`get_question_messages`] | List messages (answers) on a question |
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Collection, LaunchpadClient};
@@ -38,9 +38,9 @@ pub struct Question {
     /// API link to the person who answered, if any.
     pub answerer_link: Option<String>,
     /// When the question was created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// When the question was last updated.
-    pub date_last_updated: Option<DateTime<Utc>>,
+    pub date_last_updated: Option<Timestamp>,
     /// API self-link.
     pub self_link: Option<String>,
     /// Launchpad web link.
@@ -60,7 +60,7 @@ pub struct QuestionMessage {
     /// API link to the message author.
     pub owner_link: Option<String>,
     /// When the message was posted.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// API self-link.
     pub self_link: Option<String>,
     /// Launchpad web link.

@@ -13,7 +13,7 @@
 //! | [`list_git_access_tokens`] | List tokens for a Git repository |
 //! | [`revoke_access_token`] | Revoke a token by its `self_link` URL |
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Collection, LaunchpadClient};
@@ -33,11 +33,11 @@ pub struct AccessToken {
     /// Whether the token has expired.
     pub is_expired: Option<bool>,
     /// When the token was created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// When the token was last used, if ever.
-    pub date_last_used: Option<DateTime<Utc>>,
+    pub date_last_used: Option<Timestamp>,
     /// When the token expires, if it has an expiry.
-    pub date_expires: Option<DateTime<Utc>>,
+    pub date_expires: Option<Timestamp>,
     /// API self-link (used to revoke the token).
     pub self_link: Option<String>,
     /// Launchpad web link.

@@ -37,8 +37,8 @@
 //! | [`validate_github_watch_url`] | Validate a watch URL shape for a [`GitHubBugRef`] |
 //! | [`link_github_bug_task`] | Ensure tracker + watch, validate URL, and link the task |
 
-use chrono::{DateTime, Utc};
 use futures_util::future::try_join_all;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Collection, LaunchpadClient, Raw};
@@ -60,9 +60,9 @@ pub struct Bug {
     /// Tags attached to this bug.
     pub tags: Vec<String>,
     /// When the bug was filed.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// When the bug was last updated.
-    pub date_last_updated: Option<DateTime<Utc>>,
+    pub date_last_updated: Option<Timestamp>,
     /// API self-link for this bug.
     pub self_link: Option<String>,
     /// URL of the bug in the Launchpad web UI.
@@ -157,7 +157,7 @@ pub struct BugTask {
     /// API link to the assignee, if any.
     pub assignee_link: Option<String>,
     /// Date this task was created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// Target name (project or source package).
     pub bug_target_display_name: Option<String>,
     /// Target API link.
@@ -216,11 +216,11 @@ pub struct BugWatch {
     /// Importance on the remote bug tracker.
     pub remote_importance: Option<String>,
     /// Date this watch was created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// Date this watch was last checked by Launchpad.
-    pub date_last_checked: Option<DateTime<Utc>>,
+    pub date_last_checked: Option<Timestamp>,
     /// Date this watch was last changed on the remote tracker.
-    pub date_last_changed: Option<DateTime<Utc>>,
+    pub date_last_changed: Option<Timestamp>,
     /// API link to the owner who created this watch.
     pub owner_link: Option<String>,
     /// Last error encountered when checking the remote bug, if any.
@@ -244,9 +244,9 @@ pub struct BugComment {
     /// Comment text.
     pub content: Option<String>,
     /// When the comment was posted.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// When the comment was deleted (if deleted).
-    pub date_deleted: Option<DateTime<Utc>>,
+    pub date_deleted: Option<Timestamp>,
     /// API link to the author.
     pub owner_link: Option<String>,
     /// Sequence number within the bug.
@@ -717,7 +717,7 @@ pub struct BugSubscription {
     /// API link to the bug.
     pub bug_link: Option<String>,
     /// When the subscription was created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// API link to the person who created the subscription.
     pub subscribed_by_link: Option<String>,
 }

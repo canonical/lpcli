@@ -16,7 +16,7 @@
 //! | Source publications | `/ubuntu/+archive/primary?ws.op=getPublishedSources` |
 //! | PPAs | `/~{person}/+archive/ubuntu/{ppa}` |
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Collection, LaunchpadClient};
@@ -61,9 +61,9 @@ pub struct SourcePackagePublishingHistory {
     /// Publishing status (e.g. "Published", "Superseded").
     pub status: Option<String>,
     /// When this record was created.
-    pub date_published: Option<DateTime<Utc>>,
+    pub date_published: Option<Timestamp>,
     /// When this record was superseded, if applicable.
-    pub date_superseded: Option<DateTime<Utc>>,
+    pub date_superseded: Option<Timestamp>,
     /// Pocket (e.g. `"Release"`, `"Updates"`, `"Security"`).
     pub pocket: Option<String>,
     /// Archive this was published in.
@@ -88,7 +88,7 @@ pub struct BinaryPackagePublishingHistory {
     /// Status.
     pub status: Option<String>,
     /// When published.
-    pub date_published: Option<DateTime<Utc>>,
+    pub date_published: Option<Timestamp>,
 }
 
 /// A Launchpad Personal Package Archive (PPA).

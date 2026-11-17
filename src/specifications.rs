@@ -8,7 +8,7 @@
 //! | [`list_project_specifications`] | List all specs for a project |
 //! | [`list_valid_project_specifications`] | List non-obsolete specs for a project |
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Collection, LaunchpadClient};
@@ -52,7 +52,7 @@ pub struct Specification {
     /// Launchpad web link.
     pub web_link: Option<String>,
     /// Date created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
 }
 
 // ---------------------------------------------------------------------------

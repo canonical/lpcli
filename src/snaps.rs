@@ -10,7 +10,7 @@
 //! | [`get_snap_pending_builds`] | List pending builds for a snap |
 //! | [`request_snap_builds`] | Request builds for a snap recipe |
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -47,7 +47,7 @@ pub struct Snap {
     /// Launchpad web link.
     pub web_link: Option<String>,
     /// Date the recipe was created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
 }
 
 /// A snap build record.
@@ -64,7 +64,7 @@ pub struct SnapBuild {
     /// API link to the target distribution architecture series.
     pub distro_arch_series_link: Option<String>,
     /// When the build started running.
-    pub date_started: Option<DateTime<Utc>>,
+    pub date_started: Option<Timestamp>,
     /// Build farm queue score.
     pub score: Option<i64>,
     /// Store upload status.
@@ -85,9 +85,9 @@ pub struct SnapBuildRequest {
     /// Error message, if the request failed.
     pub error_message: Option<String>,
     /// When the request was created.
-    pub date_requested: Option<DateTime<Utc>>,
+    pub date_requested: Option<Timestamp>,
     /// When the request finished.
-    pub date_finished: Option<DateTime<Utc>>,
+    pub date_finished: Option<Timestamp>,
     /// API self-link.
     pub self_link: Option<String>,
     /// Launchpad web link.

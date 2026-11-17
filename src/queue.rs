@@ -10,7 +10,7 @@
 //! |----------|------|
 //! | Package uploads | `/{distro}/{series}?ws.op=getPackageUploads` |
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Collection, LaunchpadClient};
@@ -46,7 +46,7 @@ pub struct PackageUpload {
     /// Queue status (e.g. "New", "Accepted", "Done", "Rejected", "Unapproved").
     pub status: Option<String>,
     /// The date this package upload was done.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// Whether this upload contains sources.
     pub contains_source: Option<bool>,
     /// Whether this upload contains binaries.
@@ -300,7 +300,7 @@ pub struct PackageUploadLog {
     /// Comment left by the reviewer (e.g. rejection reason).
     pub comment: Option<String>,
     /// When this action happened.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
 }
 
 /// Fetch upload log entries for a package upload.

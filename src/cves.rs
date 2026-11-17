@@ -8,7 +8,7 @@
 //! | [`search_cves`] | Advanced CVE search with optional filters |
 //! | [`get_bug_cves`] | List CVEs linked to a specific bug |
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Collection, LaunchpadClient};
@@ -36,7 +36,7 @@ pub struct Cve {
     /// Launchpad API self-link.
     pub self_link: Option<String>,
     /// When the CVE was made public.
-    pub date_made_public: Option<DateTime<Utc>>,
+    pub date_made_public: Option<Timestamp>,
 }
 
 /// Filters used with [`search_cves`].

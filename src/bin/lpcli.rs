@@ -2173,14 +2173,14 @@ impl From<PermissionArg> for OAuthPermission {
 }
 
 /// Parse an expiry given as `YYYY-MM-DD` (midnight UTC) or RFC 3339.
-fn parse_expiry(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
-    if let Ok(date) = chrono::DateTime::parse_from_rfc3339(value) {
-        return Ok(date.with_timezone(&chrono::Utc));
+fn parse_expiry(value: &str) -> Result<jiff::Timestamp, String> {
+    if let Some(date) = lpcli::time::parse_rfc3339_timestamp(value) {
+        return Ok(date);
     }
-    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+    jiff::civil::Date::strptime("%Y-%m-%d", value)
         .ok()
-        .and_then(|date| date.and_hms_opt(0, 0, 0))
-        .map(|date| date.and_utc())
+        .and_then(|date| date.to_zoned_datetime(jiff::tz::TimeZone::UTC).ok())
+        .map(|date| date.timestamp())
         .ok_or_else(|| format!("invalid date '{value}'; use YYYY-MM-DD or RFC 3339"))
 }
 
@@ -2227,7 +2227,7 @@ enum HardwareTokenCommand {
         /// When the grant expires (YYYY-MM-DD or RFC 3339).  Launchpad
         /// defaults to, and limits grants to, 365 days.
         #[arg(long, value_parser = parse_expiry)]
-        expires: Option<chrono::DateTime<chrono::Utc>>,
+        expires: Option<jiff::Timestamp>,
 
         /// The OAuth consumer key that will use the grant.
         #[arg(long, default_value = hardware_tokens::HARDWARE_CONSUMER_KEY)]
@@ -2890,7 +2890,7 @@ async fn handle_bug(
                 let author = c.owner_link.as_deref().unwrap_or("unknown");
                 let date = c
                     .date_created
-                    .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                    .map(|d| d.strftime("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_default();
                 println!("{}", format!("Comment #{idx} — {author} — {date}").bold());
                 println!("{}", c.content.as_deref().unwrap_or(""));
@@ -3117,7 +3117,7 @@ async fn handle_bug(
                     .unwrap_or("—");
                 let date = s
                     .date_created
-                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .map(|d| d.strftime("%Y-%m-%d").to_string())
                     .unwrap_or_default();
                 table.add_row(vec![person, by, &date]);
             }
@@ -3802,7 +3802,7 @@ async fn handle_person(
                     .unwrap_or("—");
                 let date = m
                     .date_joined
-                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .map(|d| d.strftime("%Y-%m-%d").to_string())
                     .unwrap_or_default();
                 table.add_row(vec![member_name, m.status.as_deref().unwrap_or("—"), &date]);
             }
@@ -4110,7 +4110,7 @@ async fn handle_project(
             for r in &releases {
                 let date = r
                     .date_released
-                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .map(|d| d.strftime("%Y-%m-%d").to_string())
                     .unwrap_or_else(|| "—".to_string());
                 let notes = r.release_notes.as_deref().unwrap_or("").to_string();
                 table.add_row(vec![r.version.as_deref().unwrap_or("—"), &date, &notes]);
@@ -4224,7 +4224,7 @@ async fn handle_git(
                 println!("Access:   {info}");
             }
             if let Some(modified) = repo.date_last_modified {
-                println!("Modified: {}", modified.format("%Y-%m-%d"));
+                println!("Modified: {}", modified.strftime("%Y-%m-%d"));
             }
             if let Some(link) = &repo.web_link {
                 println!("URL:      {}", link.underline());
@@ -4252,7 +4252,7 @@ async fn handle_git(
             for r in &repos {
                 let modified = r
                     .date_last_modified
-                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .map(|d| d.strftime("%Y-%m-%d").to_string())
                     .unwrap_or_default();
                 table.add_row(vec![
                     r.unique_name
@@ -4297,7 +4297,7 @@ async fn handle_git(
                     .unwrap_or_else(|| "—".to_string());
                 let date = p
                     .date_created
-                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .map(|d| d.strftime("%Y-%m-%d").to_string())
                     .unwrap_or_default();
                 table.add_row(vec![
                     &mp_id,
@@ -4329,7 +4329,7 @@ async fn handle_git(
                         .unwrap_or("unknown");
                     let date = c
                         .date_created
-                        .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                        .map(|d| d.strftime("%Y-%m-%d %H:%M").to_string())
                         .unwrap_or_default();
                     let vote_str = c
                         .vote
@@ -4392,7 +4392,7 @@ async fn handle_git(
                             .unwrap_or_else(|| "?".to_string());
                     let date = d
                         .date_created
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                        .map(|dt| dt.strftime("%Y-%m-%d %H:%M").to_string())
                         .unwrap_or_default();
                     let lines = d
                         .diff_lines_count
@@ -4556,7 +4556,7 @@ async fn handle_question(
                     .unwrap_or("unknown");
                 let date = m
                     .date_created
-                    .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                    .map(|d| d.strftime("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_default();
                 println!("{}", format!("Message #{idx} — {author} — {date}").bold());
                 if let Some(action) = &m.action {
@@ -4594,7 +4594,7 @@ async fn handle_webhook(
                     .unwrap_or_default();
                 let date = h
                     .date_created
-                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .map(|d| d.strftime("%Y-%m-%d").to_string())
                     .unwrap_or_default();
                 table.add_row(vec![
                     h.delivery_url.as_deref().unwrap_or("—"),
@@ -4654,7 +4654,7 @@ async fn handle_webhook(
             for d in &deliveries {
                 let date = d
                     .date_sent
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                    .map(|dt| dt.strftime("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_default();
                 table.add_row(vec![
                     &date,
@@ -4692,7 +4692,7 @@ async fn handle_translation(
             for e in &entries {
                 let date = e
                     .date_created
-                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .map(|d| d.strftime("%Y-%m-%d").to_string())
                     .unwrap_or_default();
                 table.add_row(vec![
                     e.path.as_deref().unwrap_or("—"),
@@ -4877,11 +4877,11 @@ async fn handle_access_token(
                 let scopes = t.scopes.as_ref().map(|v| v.join(", ")).unwrap_or_default();
                 let created = t
                     .date_created
-                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .map(|d| d.strftime("%Y-%m-%d").to_string())
                     .unwrap_or_default();
                 let last_used = t
                     .date_last_used
-                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .map(|d| d.strftime("%Y-%m-%d").to_string())
                     .unwrap_or_else(|| "never".to_string());
                 table.add_row(vec![
                     t.description.as_deref().unwrap_or("—"),
@@ -4903,11 +4903,11 @@ async fn handle_access_token(
                 let scopes = t.scopes.as_ref().map(|v| v.join(", ")).unwrap_or_default();
                 let created = t
                     .date_created
-                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .map(|d| d.strftime("%Y-%m-%d").to_string())
                     .unwrap_or_default();
                 let last_used = t
                     .date_last_used
-                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .map(|d| d.strftime("%Y-%m-%d").to_string())
                     .unwrap_or_else(|| "never".to_string());
                 table.add_row(vec![
                     t.description.as_deref().unwrap_or("—"),
@@ -5095,9 +5095,7 @@ async fn handle_hardware_token(
                 display,
                 vec!["ID", "Name", "Registered", "Last Used", "Status"],
             );
-            let date = |d: Option<chrono::DateTime<chrono::Utc>>| {
-                d.map(|d| d.format("%Y-%m-%d").to_string())
-            };
+            let date = |d: Option<jiff::Timestamp>| d.map(|d| d.strftime("%Y-%m-%d").to_string());
             for key in &keys {
                 table.add_row(vec![
                     key.id.map(|id| id.to_string()).unwrap_or_default(),
@@ -5764,7 +5762,7 @@ async fn handle_queue_search(
         let arches = upload.display_arches.as_deref().unwrap_or("—");
         let created = upload
             .date_created
-            .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+            .map(|d| d.strftime("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_else(|| "—".to_string());
 
         table.add_row(vec![
@@ -6214,7 +6212,7 @@ async fn handle_queue_info(
         println!("  Pocket:    {pocket}");
     }
     if let Some(date) = &upload.date_created {
-        println!("  Created:   {}", date.format("%Y-%m-%d %H:%M UTC"));
+        println!("  Created:   {}", date.strftime("%Y-%m-%d %H:%M UTC"));
     }
 
     // If the package is rejected, show the rejection reason from the logs.
@@ -6233,7 +6231,7 @@ async fn handle_queue_info(
                 println!("  {} {}", "Reason:".red().bold(), comment);
             }
             if let Some(date) = &log.date_created {
-                println!("  Rejected:  {}", date.format("%Y-%m-%d %H:%M UTC"));
+                println!("  Rejected:  {}", date.strftime("%Y-%m-%d %H:%M UTC"));
             }
         }
     }

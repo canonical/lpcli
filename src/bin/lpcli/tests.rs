@@ -677,6 +677,56 @@ mod runtime_errors {
 }
 
 #[test]
+fn expiry_parser_accepts_dates_and_rfc3339_offsets_as_instants() {
+    for (input, expected) in [
+        ("2026-12-31", "2026-12-31T00:00:00Z"),
+        ("2026-12-31T12:00:00Z", "2026-12-31T12:00:00Z"),
+        ("2026-12-31T14:00:00+02:00", "2026-12-31T12:00:00Z"),
+    ] {
+        assert_eq!(
+            parse_expiry(input).unwrap().to_string(),
+            expected,
+            "{input}"
+        );
+    }
+    for invalid in [
+        "2026-02-30",
+        "2026-12-31T12:00:00",
+        "2026-12-31T12:00-04",
+        "2026-12-31T12:00:00-04:00[America/New_York]",
+        "31/12/2026",
+        "",
+    ] {
+        let error = parse_expiry(invalid).unwrap_err();
+        assert!(
+            error.contains("YYYY-MM-DD or RFC 3339"),
+            "{invalid}: {error}"
+        );
+    }
+}
+
+#[test]
+fn launchpad_timestamps_deserialize_and_keep_cli_display_formats() {
+    let task: bugs::BugTask = serde_json::from_value(serde_json::json!({
+        "date_created": "2026-01-02T03:04:05.678901+00:00",
+    }))
+    .unwrap();
+    let date = task.date_created.unwrap();
+    assert_eq!(date.strftime("%Y-%m-%d").to_string(), "2026-01-02");
+    assert_eq!(
+        date.strftime("%Y-%m-%d %H:%M UTC").to_string(),
+        "2026-01-02 03:04 UTC"
+    );
+
+    let milestone: projects::Milestone = serde_json::from_value(serde_json::json!({
+        "name": "1.0",
+        "date_targeted": "2026-12-31",
+    }))
+    .unwrap();
+    assert_eq!(milestone.date_targeted.unwrap().to_string(), "2026-12-31");
+}
+
+#[test]
 fn hardware_cache_config_is_converted_without_overriding_zero() {
     assert_eq!(
         hardware_token_cache_timeout(&config::AppConfig::default()),

@@ -71,7 +71,7 @@ url = { version = "2", features = ["serde"] }
 percent-encoding = "2"
 
 # Time
-chrono = { version = "0.4", features = ["serde"] }
+jiff = { version = "1.0.0", features = ["serde"] }
 # RFC 9110 HTTP-date parsing for Retry-After (including legacy date formats)
 httpdate = "1"
 

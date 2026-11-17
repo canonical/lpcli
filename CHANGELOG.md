@@ -43,6 +43,13 @@ Entries move to a `0.5.0` section when that release is tagged. Entries marked
 
 ### Changed
 
+- **Breaking (library):** date and time fields now use `jiff` instead of the
+  unmaintained `chrono` crate. Launchpad timestamps are `jiff::Timestamp`,
+  milestone target dates are `jiff::civil::Date`, and
+  `IssueGrantRequest::date_expires` is a `jiff::Timestamp`. CLI date output
+  and accepted `--expires` formats are unchanged. `lpcli::time` provides
+  strict RFC 3339 timestamp parsing that preserves the previous accepted
+  grammar.
 - `status`, `bug search`, and `bug remote-bug-trackers` count results in
   words, such as `2 bugs found.`, instead of `2 bug(s) found.`.
 - Colored output on stdout now also turns off when stdout is not a terminal,

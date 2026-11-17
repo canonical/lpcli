@@ -12,7 +12,7 @@
 //! | [`get_team_members`] | List members of a team |
 //! | [`get_person_bugs`] | Bugs assigned to or filed by a person |
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Collection, LaunchpadClient};
@@ -56,7 +56,7 @@ pub struct Person {
     /// Launchpad web profile URL.
     pub web_link: Option<String>,
     /// Date the account was created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// Email address (only visible to the authenticated user themselves).
     pub preferred_email_address_link: Option<String>,
     /// Short description / biography.
@@ -77,9 +77,9 @@ pub struct TeamMembership {
     /// Membership status (e.g. "Approved", "Administrator").
     pub status: Option<String>,
     /// When the membership was first made active.
-    pub date_joined: Option<DateTime<Utc>>,
+    pub date_joined: Option<Timestamp>,
     /// When the membership expires.
-    pub date_expires: Option<DateTime<Utc>>,
+    pub date_expires: Option<Timestamp>,
 }
 
 // ---------------------------------------------------------------------------

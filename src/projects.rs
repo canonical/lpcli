@@ -13,7 +13,7 @@
 //! | Active milestones | `/{project}/active_milestones` |
 //! | Releases | `/{project}/{milestone_name}/release` |
 
-use chrono::{DateTime, NaiveDate, Utc};
+use jiff::{Timestamp, civil::Date};
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Collection, LaunchpadClient};
@@ -43,7 +43,7 @@ pub struct Project {
     /// Whether the project is active.
     pub active: Option<bool>,
     /// Date the project was registered.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// Owner API link.
     pub owner_link: Option<String>,
     /// Active series link.
@@ -62,7 +62,7 @@ pub struct Milestone {
     /// Whether this milestone is active.
     pub is_active: Option<bool>,
     /// Target date.
-    pub date_targeted: Option<NaiveDate>,
+    pub date_targeted: Option<Date>,
     /// API self-link.
     pub self_link: Option<String>,
     /// Web link.
@@ -77,7 +77,7 @@ pub struct Release {
     /// Version string (e.g. `"2.0.0"`).
     pub version: Option<String>,
     /// Release date.
-    pub date_released: Option<DateTime<Utc>>,
+    pub date_released: Option<Timestamp>,
     /// Body of the release notes.
     pub release_notes: Option<String>,
     /// Body of the changelog.
@@ -186,7 +186,7 @@ pub struct ProjectSeries {
     /// API link to the series owner.
     pub owner_link: Option<String>,
     /// Date the series was created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
 }
 
 /// Fetch a single project series by project name and series name.

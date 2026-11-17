@@ -10,7 +10,7 @@
 //! | [`ping_webhook`] | Send a test ping delivery |
 //! | [`list_deliveries`] | List recent deliveries for a webhook |
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Collection, LaunchpadClient};
@@ -34,9 +34,9 @@ pub struct Webhook {
     /// API link to the person who created the webhook.
     pub registrant_link: Option<String>,
     /// Date created.
-    pub date_created: Option<DateTime<Utc>>,
+    pub date_created: Option<Timestamp>,
     /// Date last modified.
-    pub date_last_modified: Option<DateTime<Utc>>,
+    pub date_last_modified: Option<Timestamp>,
     /// API self-link.
     pub self_link: Option<String>,
     /// Launchpad web link.
@@ -53,7 +53,7 @@ pub struct WebhookDelivery {
     /// Whether the delivery is still pending.
     pub pending: Option<bool>,
     /// When the delivery was dispatched.
-    pub date_sent: Option<DateTime<Utc>>,
+    pub date_sent: Option<Timestamp>,
     /// API link to the parent webhook.
     pub webhook_link: Option<String>,
     /// API self-link.
