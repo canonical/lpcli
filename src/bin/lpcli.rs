@@ -3,7 +3,7 @@
 //! Parse command-line arguments with `clap` and dispatch to the `lpcli` library.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -2336,11 +2336,20 @@ async fn main() {
     if let Err(e) = validate_cli(&cli) {
         e.exit();
     }
-    let color = cli.color;
-    if let Err(e) = run_command(cli, config::load, handle_clear_cache).await {
-        let env = output::Environment::from_process();
-        let colored = output::color_enabled(color, &env, std::io::stderr().is_terminal());
-        eprintln!("{} {e}", output::error_prefix(colored));
+    let env = output::Environment::from_process();
+    let terminals = output::terminals();
+    let mut output = initial_error_output(&cli, &env, terminals);
+    if let Err(e) = run_command(
+        cli,
+        config::load,
+        handle_clear_cache,
+        &mut output,
+        &env,
+        terminals,
+    )
+    .await
+    {
+        eprint!("{}", output.render_error(&e.to_string()));
         std::process::exit(1);
     }
 }
@@ -2430,10 +2439,47 @@ fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
     result.map_err(|msg| clap::Error::raw(clap::error::ErrorKind::InvalidValue, msg))
 }
 
+fn resolve_command_output(
+    cli: &Cli,
+    settings: &config::AppConfig,
+    env: &output::Environment,
+    (stdout_terminal, stderr_terminal): (bool, bool),
+) -> Result<Output, String> {
+    Output::resolve(output::Settings {
+        format: cli.format,
+        color: cli.color,
+        config_format: settings.display.format,
+        accessible: settings.display.accessible,
+        display: Display::new(settings.display.width),
+        structured_output: supports_structured_output(&cli.command),
+        env,
+        stdout_terminal,
+        stderr_terminal,
+    })
+}
+
+/// Error styling before configuration is available must not prevent dispatch
+/// (especially clear-cache), even when LPCLI_FORMAT itself is invalid.
+fn initial_error_output(cli: &Cli, env: &output::Environment, terminals: (bool, bool)) -> Output {
+    let settings = config::AppConfig::default();
+    resolve_command_output(cli, &settings, env, terminals).unwrap_or_else(|_| {
+        let fallback_env = output::Environment {
+            format: None,
+            ..env.clone()
+        };
+        // Validated flags and the automatic mode cannot fail resolution.
+        resolve_command_output(cli, &settings, &fallback_env, terminals)
+            .expect("validated flags and automatic output mode are valid")
+    })
+}
+
 async fn run_command(
     cli: Cli,
     load_config: impl FnOnce() -> lpcli::error::Result<config::AppConfig>,
     clear_cache: impl FnOnce() -> lpcli::error::Result<()>,
+    output: &mut Output,
+    env: &output::Environment,
+    terminals: (bool, bool),
 ) -> lpcli::error::Result<()> {
     if matches!(
         &cli.command,
@@ -2443,20 +2489,8 @@ async fn run_command(
     }
     let settings = load_config()?;
     let display = Display::new(settings.display.width);
-    let env = output::Environment::from_process();
-    let (stdout_terminal, stderr_terminal) = output::terminals();
-    let output = Output::resolve(output::Settings {
-        format: cli.format,
-        color: cli.color,
-        config_format: settings.display.format,
-        accessible: settings.display.accessible,
-        display,
-        structured_output: supports_structured_output(&cli.command),
-        env: &env,
-        stdout_terminal,
-        stderr_terminal,
-    })
-    .map_err(lpcli::error::LpError::Other)?;
+    *output = resolve_command_output(&cli, &settings, env, terminals)
+        .map_err(lpcli::error::LpError::Other)?;
     if let Some(warning) = output.warning() {
         output.warn(warning)?;
     }
@@ -2474,7 +2508,7 @@ async fn run_command(
     let policy = read_auth_policy(&cli.command, cli.authenticated, cli.public);
 
     match cli.command {
-        Command::Status => handle_status(&output).await?,
+        Command::Status => handle_status(output).await?,
 
         Command::Login(args) if args.hardware_token => {
             handle_hardware_login(args, cache_timeout).await?
@@ -2510,7 +2544,7 @@ async fn run_command(
 
         Command::HardwareToken(cmd) => handle_hardware_token(cmd, &display, cache_timeout).await?,
 
-        Command::Bug(cmd) => handle_bug(cmd, &display, &output, policy, cache_timeout).await?,
+        Command::Bug(cmd) => handle_bug(cmd, &display, output, policy, cache_timeout).await?,
         Command::Person(cmd) => handle_person(cmd, &display, policy, cache_timeout).await?,
         Command::Package(cmd) => handle_package(cmd, &display, policy, cache_timeout).await?,
         Command::Project(cmd) => handle_project(cmd, &display, policy, cache_timeout).await?,

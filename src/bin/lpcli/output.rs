@@ -361,6 +361,16 @@ impl Output {
         Ok(())
     }
 
+    /// Format a runtime error for stderr. Structured errors are deferred to Phase 1.
+    pub fn render_error(&self, message: &str) -> String {
+        let message = clean(message);
+        if self.mode == OutputMode::Plain {
+            format!("Error: {message}\n")
+        } else {
+            format!("{} {message}\n", error_prefix(self.stderr.color))
+        }
+    }
+
     /// Format a warning for stderr.
     pub fn render_warning(&self, message: &str) -> String {
         let message = clean(message);
@@ -718,7 +728,8 @@ impl Renderer for JsonRenderer {
 
 /// Escape a TSV field so that every record stays on one line and the column
 /// count never changes: backslash, tab, newline, and carriage return become
-/// `\\`, `\t`, `\n`, and `\r`.
+/// `\\`, `\t`, `\n`, and `\r`. Other control characters and Unicode line
+/// separators use `\u{hex}` escapes, preventing terminal control injection.
 pub fn escape_tsv(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for c in value.chars() {
@@ -727,6 +738,9 @@ pub fn escape_tsv(value: &str) -> String {
             '\t' => escaped.push_str("\\t"),
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
+            c if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') => {
+                escaped.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
+            }
             c => escaped.push(c),
         }
     }
@@ -1040,6 +1054,22 @@ pub(crate) mod tests {
         let rendered = Output::fixed(OutputMode::Plain, true, 80).render(&sample());
         insta::assert_snapshot!(rendered);
         assert_plain_invariants(&rendered);
+    }
+
+    #[test]
+    fn tsv_escapes_terminal_controls_reversibly() {
+        let mut report = sample();
+        let payload = "\u{1b}]52;c;payload\u{7}\u{0}\u{85}\u{2028}\u{2029}";
+        report.records.rows[0][0] = Some(payload.into());
+        let rendered = Output::fixed(OutputMode::Tsv, false, 80).render(&report);
+        assert_tsv_invariants(&rendered, 2);
+        assert!(rendered.contains("\\u{1b}]52;c;payload\\u{7}\\u{0}\\u{85}\\u{2028}\\u{2029}"));
+        assert!(
+            !rendered
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+        );
+        assert_eq!(escape_tsv("\\u{1b}"), "\\\\u{1b}");
     }
 
     #[test]

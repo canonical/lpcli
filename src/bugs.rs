@@ -859,12 +859,22 @@ pub struct BugTrackerSearch {
 /// The search runs locally over Launchpad's pages, so no Launchpad link can
 /// continue a filtered list; [`BugTrackerSearch::complete`] tells callers
 /// whether the number of matches is the true total.
+///
+/// # Errors
+///
+/// A zero limit is rejected before making any HTTP request.
 pub async fn search_bug_trackers_raw(
     client: &LaunchpadClient,
     search: Option<&str>,
     limit: Option<usize>,
 ) -> Result<BugTrackerSearch> {
     const PAGE_SIZE: usize = 100;
+
+    if limit == Some(0) {
+        return Err(LpError::Other(
+            "Bug tracker search limit must be positive.".into(),
+        ));
+    }
 
     let mut page_url = client.url(&format!("/bugs/bugtrackers?ws.size={PAGE_SIZE}"));
     let search = search.map(str::to_lowercase);

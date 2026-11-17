@@ -281,7 +281,7 @@ The global `--format` option selects one of four output modes:
 | `rich` | Color, Unicode tables, and headings. The default. |
 | `plain` | For screen readers and braille displays: each record as `Field: value` lines with a blank line between records, the count first (for example `2 bugs found.`), ASCII punctuation, no color or box drawing, words such as `OK:`, `Warning:`, and `Error:` instead of symbols, and `none` for missing values. |
 | `json` | Launchpad's own JSON representation, on stdout only. |
-| `tsv` | A header row, then exactly one tab-separated line per record. Tabs, newlines, carriage returns, and backslashes inside values are written as `\t`, `\n`, `\r`, and `\\`. |
+| `tsv` | A header row, then exactly one tab-separated line per record. Tabs, newlines, carriage returns, and backslashes inside values are written as `\t`, `\n`, `\r`, and `\\`. Other control characters and Unicode line separators are escaped as `\u{hex}` (for example, ESC becomes `\u{1b}`). |
 
 The mode is chosen, from highest priority to lowest, by `--format`, the
 `LPCLI_FORMAT` environment variable, `display.format` in `config.toml`, and

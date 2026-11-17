@@ -262,6 +262,29 @@ async fn search_bug_trackers_filters_across_pages_and_stops_at_limit() {
 }
 
 #[tokio::test]
+async fn tracker_search_zero_limit_is_rejected_without_requests() {
+    let mut server = Server::new_async().await;
+    let mock = server
+        .mock("GET", "/bugs/bugtrackers")
+        .match_query(mockito::Matcher::Any)
+        .expect(0)
+        .create_async()
+        .await;
+    let client = LaunchpadClient::new(None).with_base_url(server.url());
+    for search in [None, Some("no matches")] {
+        let error = bugs::search_bug_trackers_raw(&client, search, Some(0))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("limit must be positive"));
+        let error = bugs::search_bug_trackers(&client, search, Some(0))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("limit must be positive"));
+    }
+    mock.assert_async().await;
+}
+
+#[tokio::test]
 async fn search_bug_trackers_raw_keeps_launchpad_json_and_reports_completeness() {
     let mut server = Server::new_async().await;
     let mut first: serde_json::Value =

@@ -437,6 +437,8 @@ async fn clear_cache_dispatch_skips_malformed_config_and_propagates_clear_failur
         validate_cli(&cli).unwrap();
         let config_reads = std::cell::Cell::new(0);
         let clears = std::cell::Cell::new(0);
+        let env = output::Environment::default();
+        let mut output = initial_error_output(&cli, &env, (false, false));
         let result = run_command(
             cli,
             || {
@@ -451,6 +453,9 @@ async fn clear_cache_dispatch_skips_malformed_config_and_propagates_clear_failur
                     Ok(())
                 }
             },
+            &mut output,
+            &env,
+            (false, false),
         )
         .await;
         assert_eq!(config_reads.get(), 0);
@@ -467,13 +472,208 @@ async fn clear_cache_dispatch_skips_malformed_config_and_propagates_clear_failur
 async fn other_commands_still_require_valid_config_before_dispatch() {
     let cli = Cli::try_parse_from(["lpcli", "hardware-token", "show"]).unwrap();
     validate_cli(&cli).unwrap();
+    let env = output::Environment::default();
+    let mut output = initial_error_output(&cli, &env, (false, false));
     let result = run_command(
         cli,
         || Err(lpcli::error::LpError::Config("malformed config".into())),
         || panic!("only clear-cache bypasses configuration"),
+        &mut output,
+        &env,
+        (false, false),
     )
     .await;
     assert!(matches!(result, Err(lpcli::error::LpError::Config(_))));
+}
+
+mod runtime_errors {
+    use super::*;
+
+    fn cli(args: &[&str]) -> Cli {
+        let cli = Cli::try_parse_from(args).unwrap();
+        validate_cli(&cli).unwrap();
+        cli
+    }
+
+    #[test]
+    fn plain_errors_follow_flag_env_config_and_accessibility_even_with_forced_color() {
+        for source in ["flag", "env", "config", "accessible", "dumb"] {
+            let args = if source == "flag" {
+                vec!["lpcli", "--format", "plain", "--color", "always", "status"]
+            } else {
+                vec!["lpcli", "--color", "always", "status"]
+            };
+            let cli = cli(&args);
+            let env = output::Environment {
+                format: (source == "env").then(|| "plain".into()),
+                clicolor_force: Some("1".into()),
+                term: (source == "dumb").then(|| "dumb".into()),
+                ..Default::default()
+            };
+            let mut settings = config::AppConfig::default();
+            settings.display.format = (source == "config").then_some(OutputMode::Plain);
+            settings.display.accessible = source == "accessible";
+            let output = resolve_command_output(&cli, &settings, &env, (true, true)).unwrap();
+            assert_eq!(
+                output.render_error("request failed"),
+                "Error: request failed\n",
+                "{source}"
+            );
+            output::tests::assert_plain_invariants(&output.render_error("request failed"));
+        }
+    }
+
+    #[test]
+    fn runtime_errors_use_stderr_color_and_remain_text_in_structured_modes() {
+        for mode in ["rich", "json", "tsv"] {
+            let cli = cli(&["lpcli", "--format", mode, "status"]);
+            let env = output::Environment::default();
+            for (stdout_terminal, stderr_terminal) in [(true, false), (false, true)] {
+                let output = resolve_command_output(
+                    &cli,
+                    &config::AppConfig::default(),
+                    &env,
+                    (stdout_terminal, stderr_terminal),
+                )
+                .unwrap();
+                let rendered = output.render_error("request failed");
+                assert_eq!(rendered.contains('\u{1b}'), stderr_terminal, "{mode}");
+                assert!(rendered.ends_with(" request failed\n"));
+                assert!(serde_json::from_str::<serde_json::Value>(&rendered).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn pre_config_errors_ignore_invalid_env_without_losing_plain_flag_or_dumb_terminal() {
+        for flag in [false, true] {
+            let args = if flag {
+                vec!["lpcli", "--format", "plain", "--color", "always", "status"]
+            } else {
+                vec!["lpcli", "--color", "always", "status"]
+            };
+            let cli = cli(&args);
+            let env = output::Environment {
+                format: Some("invalid".into()),
+                term: Some("dumb".into()),
+                ..Default::default()
+            };
+            let output = initial_error_output(&cli, &env, (true, true));
+            assert_eq!(output.render_error("bad config"), "Error: bad config\n");
+        }
+    }
+
+    #[tokio::test]
+    async fn config_errors_preserve_flag_and_env_plain_and_load_once() {
+        for flag in [false, true] {
+            let args = if flag {
+                vec!["lpcli", "--format", "plain", "--color", "always", "status"]
+            } else {
+                vec!["lpcli", "--color", "always", "status"]
+            };
+            let cli = cli(&args);
+            let env = output::Environment {
+                format: Some("plain".into()),
+                ..Default::default()
+            };
+            let mut output = initial_error_output(&cli, &env, (true, true));
+            let reads = std::cell::Cell::new(0);
+            let err = run_command(
+                cli,
+                || {
+                    reads.set(reads.get() + 1);
+                    Err(lpcli::error::LpError::Config("bad config".into()))
+                },
+                || panic!("status must not clear cache"),
+                &mut output,
+                &env,
+                (true, true),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(reads.get(), 1);
+            let rendered = output.render_error(&err.to_string());
+            assert!(rendered.starts_with("Error: "));
+            assert!(rendered.contains("bad config"));
+            output::tests::assert_plain_invariants(&rendered);
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_errors_preserve_resolved_config_plain_and_accessibility() {
+        for accessible in [false, true] {
+            let mut cli = cli(&["lpcli", "--color", "always", "login", "--hardware-token"]);
+            // Exercise a deterministic handler failure before reading secrets,
+            // credentials, or hardware; clap normally rejects this combination.
+            let Command::Login(args) = &mut cli.command else {
+                panic!("expected login command");
+            };
+            args.grant_token = Some("test-grant".into());
+            args.account = None;
+            let env = output::Environment::default();
+            let mut output = initial_error_output(&cli, &env, (true, true));
+            assert_eq!(output.mode(), OutputMode::Rich);
+            let reads = std::cell::Cell::new(0);
+            let err = run_command(
+                cli,
+                || {
+                    reads.set(reads.get() + 1);
+                    let mut settings = config::AppConfig::default();
+                    settings.display.format = (!accessible).then_some(OutputMode::Plain);
+                    settings.display.accessible = accessible;
+                    Ok(settings)
+                },
+                || panic!("login must not clear cache"),
+                &mut output,
+                &env,
+                (true, true),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(reads.get(), 1);
+            assert!(matches!(err, lpcli::error::LpError::HardwareToken(_)));
+            let rendered = output.render_error(&err.to_string());
+            assert!(rendered.starts_with("Error: "));
+            assert!(rendered.contains("--account is required"));
+            output::tests::assert_plain_invariants(&rendered);
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_cache_errors_preserve_plain_and_bypass_invalid_env_and_config() {
+        let cli = cli(&[
+            "lpcli",
+            "--format",
+            "plain",
+            "--color",
+            "always",
+            "hardware-token",
+            "clear-cache",
+        ]);
+        let env = output::Environment {
+            format: Some("invalid".into()),
+            ..Default::default()
+        };
+        let mut output = initial_error_output(&cli, &env, (true, true));
+        let err = run_command(
+            cli,
+            || panic!("clear-cache must not load config"),
+            || {
+                Err(lpcli::error::LpError::HardwareToken(
+                    "cache unavailable".into(),
+                ))
+            },
+            &mut output,
+            &env,
+            (true, true),
+        )
+        .await
+        .unwrap_err();
+        let rendered = output.render_error(&err.to_string());
+        assert!(rendered.starts_with("Error: "));
+        assert!(rendered.contains("cache unavailable"));
+        output::tests::assert_plain_invariants(&rendered);
+    }
 }
 
 #[test]
