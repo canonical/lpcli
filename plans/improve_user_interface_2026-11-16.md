@@ -512,6 +512,27 @@ characters, or emoji, and the manual checks pass.
 
 ### Phase 3: Visual polish
 
+**Status: complete (2026-11-18).**
+
+- Ported every remaining `bug` subcommand to `output.rs` (`Report`/`Block::Table`)
+  and routed remaining stdout writes (`identity`, `webhook`, `snap`,
+  `access-token`, `queue`, `skills`) through `Output`, leaving no `println!`
+  calls outside `output.rs`.
+- Removed `colored` overrides from CLI dispatch and applied the four-color
+  light/dark-safe `anstyle` palette in `RichRenderer` for semantic statuses,
+  importances/priorities, tags, and person/team values when color is enabled,
+  preserving existing uncolored `rich` snapshots.
+- Normalized usernames (`output::link_name`, trimming leading `~`) and
+  timestamps (`output::format_date`, `output::format_datetime`,
+  `output::format_timestamp_str`) across `bug`, `git`, `queue`, `webhook`,
+  `identity`, and `read_domains`.
+- Added `--no-pager` and `$PAGER` paging in `Output` when stdout is a non-dumb
+  terminal, `$PAGER` is non-empty and not `cat`, and rendered lines exceed
+  `$LINES` (24 by default).
+- Added Phase 3 tests and snapshots in
+  `src/bin/lpcli/tests/phase3_visual_polish.rs` and updated `README.md` and
+  `CHANGELOG.md`.
+
 1. Port every remaining command to the output layer.
 2. Show names instead of URLs, add date formatting, and apply the color set.
 3. Add the pager.

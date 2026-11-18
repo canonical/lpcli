@@ -522,9 +522,7 @@ pub(crate) fn queue_search_report(search: &QueueSearch) -> Report {
                 upload.pocket.clone(),
                 upload.status.clone(),
                 upload.display_arches.clone(),
-                upload
-                    .date_created
-                    .map(|d| d.strftime("%Y-%m-%d %H:%M").to_string()),
+                output::format_datetime(upload.date_created),
             ]
         })
         .collect();
@@ -1178,26 +1176,23 @@ pub(crate) async fn print_queue_mutation(
                     "http_status": error.http_status(),
                 },
             }});
-            let mut stdout = std::io::stdout().lock();
             if quiet {
-                writeln!(
-                    stdout,
-                    "{}",
+                output.write_raw(&format!(
+                    "{}\n",
                     mutation
                         .self_link
                         .chars()
                         .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
                         .collect::<String>()
-                )?;
+                ))?;
             } else if output.mode() == crate::output::OutputMode::Json {
-                writeln!(stdout, "{result}")?;
+                output.write_raw(&format!("{result}\n"))?;
             } else {
                 output.warn(&format!(
                     "{action} succeeded for {}, but the updated entry could not be read back.",
                     mutation.self_link
                 ))?;
             }
-            stdout.flush()?;
             return Err(lpcli::error::LpError::Partial(format!(
                 "{} succeeded, but refreshing the result failed: {}",
                 action,
@@ -1205,10 +1200,11 @@ pub(crate) async fn print_queue_mutation(
             )));
         }
     };
-    let mut stdout = std::io::stdout().lock();
-    stdout.write_all(render_queue_mutation(output, quiet, mutation, &entry).as_bytes())?;
-    stdout.flush()?;
-    Ok(())
+    if quiet {
+        output.write_raw(&render_queue_mutation(output, true, mutation, &entry))
+    } else {
+        output.print(&queue_mutation_report(mutation, &entry))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1483,8 +1479,5 @@ pub(crate) async fn handle_queue_info<O: QueueOutput + ?Sized>(
     if output.mode() == OutputMode::Json {
         return output.print_json(&info.json());
     }
-    let mut stdout = std::io::stdout().lock();
-    stdout.write_all(info.render(&output).as_bytes())?;
-    stdout.flush()?;
-    Ok(())
+    output.write_paged(&info.render(&output))
 }

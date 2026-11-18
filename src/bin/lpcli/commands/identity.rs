@@ -153,7 +153,7 @@ fn print_mutation(
 }
 
 fn day(timestamp: Option<jiff::Timestamp>) -> Option<String> {
-    timestamp.map(|d| d.strftime("%Y-%m-%d").to_string())
+    output::format_date(timestamp)
 }
 
 // ---------------------------------------------------------------------------
@@ -867,7 +867,7 @@ pub(crate) async fn handle_hardware_token(
             if print {
                 // The grant is the result, so it is printed even with --quiet,
                 // and in launchpadlib's format whatever the output mode.
-                println!("{}", grant.to_issuance_json().as_str());
+                output.write_raw(&format!("{}\n", grant.to_issuance_json().as_str()))?;
                 eprintln!("Warning: this is the grant secret; it will not be shown again.");
                 return Ok(());
             }

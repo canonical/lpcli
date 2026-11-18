@@ -374,6 +374,11 @@ line, occasional milestones, and a summary with no redrawing; `json` and `tsv`
 suppress progress output; and `rich` on a terminal shows animated progress
 bars. Passing `--progress none` turns progress reporting off.
 
+Human-facing output (`rich` and `plain`) is piped through `$PAGER` when stdout
+is a non-dumb terminal, `$PAGER` is set to a non-empty command other than
+`cat`, and the rendered output exceeds `$LINES` (24 lines by default). Passing
+`--no-pager` disables paging and writes directly to stdout.
+
 ### Replacing `--json`
 
 `--json` was removed in 0.5.0 and is now rejected as an unexpected argument.

@@ -83,16 +83,13 @@ fn flag(value: Option<bool>) -> Option<String> {
 }
 
 fn day(value: Option<jiff::Timestamp>) -> Option<String> {
-    value.map(|value| value.strftime("%Y-%m-%d").to_string())
+    output::format_date(value)
 }
 
 /// The final path segment of a Launchpad link, without a leading `~`, e.g.
 /// `https://api.launchpad.net/devel/~jdoe` -> `jdoe`.
 fn link_name(link: Option<&str>) -> Option<String> {
-    link.and_then(|url| url.rsplit('/').next())
-        .map(|segment| segment.trim_start_matches('~'))
-        .filter(|segment| !segment.is_empty())
-        .map(str::to_string)
+    output::link_name(link)
 }
 
 /// Whether an account is a person or a team. Launchpad sends `is_team`;
@@ -877,9 +874,7 @@ fn question_messages_report(found: &Raw<Vec<questions::QuestionMessage>>) -> Rep
     for m in &found.value {
         let index = m.index.map(|index| index.to_string());
         let author = link_name(m.owner_link.as_deref());
-        let date = m
-            .date_created
-            .map(|date| date.strftime("%Y-%m-%d %H:%M").to_string());
+        let date = output::format_datetime(m.date_created);
         blocks.push(Block::Heading(format!(
             "Message #{}: {}, {}",
             index.as_deref().unwrap_or("?"),

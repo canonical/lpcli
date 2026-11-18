@@ -1,0 +1,12 @@
+---
+source: src/bin/lpcli/tests/phase3_visual_polish.rs
+expression: "render_rich(&outcome, false)"
+---
+┌──────────┬─────────────┬────────────┬────────┬───────────────────────────────────┬───────────────┐
+│ Watch ID ┆ Tracker     ┆ Remote Bug ┆ Status ┆ URL                               ┆ Linked Tasks  │
+╞══════════╪═════════════╪════════════╪════════╪═══════════════════════════════════╪═══════════════╡
+│ 9001     ┆ github-curl ┆ 1234       ┆ open   ┆ https://github.com/curl/curl/issu ┆ curl (Ubuntu) │
+│          ┆             ┆            ┆        ┆ es/1234                           ┆               │
+│ 9002     ┆ debbugs     ┆ 987654     ┆ done   ┆ https://bugs.debian.org/987654    ┆ orphan        │
+└──────────┴─────────────┴────────────┴────────┴───────────────────────────────────┴───────────────┘
+2 bug watches found.

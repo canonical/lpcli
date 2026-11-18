@@ -20,7 +20,7 @@
 //! successful results and the failures are printed first and the command
 //! then fails with [`lpcli::error::LpError::Partial`] (exit code 7).
 
-use std::fmt::Write as _;
+use std::io::Write as _;
 
 use crate::*;
 
@@ -33,15 +33,8 @@ use lpcli::error::{ErrorKind, LpError};
 /// What a bug command writes to stdout in the selected mode.
 #[derive(Debug)]
 pub(crate) enum BugBody {
-    /// A report ported to the output layer, rendered in every mode.
+    /// A report rendered by the output layer in every mode.
     Report(Report),
-    /// Contract JSON, optional TSV records, legacy `rich` text, and `plain` blocks.
-    Text {
-        json: serde_json::Value,
-        records: Option<Records>,
-        text: String,
-        plain: Vec<Block>,
-    },
     /// Nothing on stdout, because nothing was changed.
     Empty,
 }
@@ -60,18 +53,15 @@ pub(crate) struct BugOutcome {
 }
 
 impl BugOutcome {
-    fn read(json: serde_json::Value, text: String, plain: Vec<Block>) -> Self {
-        Self {
-            body: BugBody::Text {
-                json,
-                records: None,
-                text,
-                plain,
+    fn read_blocks(json: serde_json::Value, blocks: Vec<Block>) -> Self {
+        Self::report(Report {
+            blocks,
+            json,
+            records: Records {
+                columns: Vec::new(),
+                rows: Vec::new(),
             },
-            warnings: Vec::new(),
-            quiet: None,
-            error: None,
-        }
+        })
     }
 
     fn report(report: Report) -> Self {
@@ -83,37 +73,31 @@ impl BugOutcome {
         }
     }
 
-    fn list(json: serde_json::Value, records: Records, text: String, plain: Vec<Block>) -> Self {
-        Self {
-            body: BugBody::Text {
-                json,
-                records: Some(records),
-                text,
-                plain,
-            },
-            ..Self::read(serde_json::Value::Null, String::new(), Vec::new())
-        }
+    fn list_blocks(json: serde_json::Value, records: Records, blocks: Vec<Block>) -> Self {
+        Self::report(Report {
+            blocks,
+            json,
+            records,
+        })
     }
 
     /// A mutation whose result is `json`; `--quiet` prints `links`.
     pub(crate) fn mutation(
         json: serde_json::Value,
-        text: String,
-        plain: Vec<Block>,
+        blocks: Vec<Block>,
         links: Vec<String>,
     ) -> Self {
         Self {
             quiet: Some(links),
-            ..Self::read(json, text, plain)
+            ..Self::read_blocks(json, blocks)
         }
     }
 
     /// A mutation whose result is one Launchpad entry.
-    fn entry<T>(entry: &Raw<T>, text: String, plain: Vec<Block>) -> Self {
+    fn entry<T>(entry: &Raw<T>, blocks: Vec<Block>) -> Self {
         Self::mutation(
             entry.raw.clone(),
-            text,
-            plain,
+            blocks,
             raw_self_link(&entry.raw).into_iter().collect(),
         )
     }
@@ -128,23 +112,6 @@ impl BugOutcome {
         }
         match &self.body {
             BugBody::Report(report) => output.render(report),
-            BugBody::Text {
-                json,
-                records,
-                text,
-                plain,
-            } => match (output.mode(), records) {
-                (OutputMode::Json, _) => output.render(&Report::json(json.clone())),
-                (OutputMode::Tsv, Some(records)) => output.render(&Report {
-                    records: records.clone(),
-                    ..Report::json(serde_json::Value::Null)
-                }),
-                (OutputMode::Plain, _) => output.render(&Report {
-                    blocks: plain.clone(),
-                    ..Report::json(serde_json::Value::Null)
-                }),
-                _ => output.style_legacy_text(text),
-            },
             BugBody::Empty => String::new(),
         }
     }
@@ -154,28 +121,19 @@ impl BugOutcome {
         if output.mode().is_structured() {
             return String::new();
         }
-        match output.mode() {
-            OutputMode::Plain => self
-                .warnings
-                .iter()
-                .map(|warning| output.render_warning(warning))
-                .collect(),
-            _ => self
-                .warnings
-                .iter()
-                .map(|warning| {
-                    output.style_legacy_stderr_text(&format!("{} {warning}\n", "✗".red().bold()))
-                })
-                .collect(),
-        }
+        self.warnings
+            .iter()
+            .map(|warning| output.render_warning(warning))
+            .collect()
     }
 
     /// Print the outcome, then return its deferred error, if any.
     fn emit(self, output: &Output, quiet: bool) -> lpcli::error::Result<()> {
-        let mut stdout = std::io::stdout().lock();
-        stdout.write_all(self.render(output, quiet).as_bytes())?;
-        stdout.flush()?;
-        drop(stdout);
+        if quiet {
+            output.write_raw(&self.render(output, true))?;
+        } else if let BugBody::Report(report) = &self.body {
+            output.print(report)?;
+        }
         let warnings = self.render_warnings(output);
         if !warnings.is_empty() {
             std::io::stderr().lock().write_all(warnings.as_bytes())?;
@@ -350,9 +308,8 @@ pub(crate) fn finish_batch(
         // The returned error already reports the only failure.
         outcome.body = BugBody::Empty;
         outcome.warnings.clear();
-    } else if let BugBody::Text { text, plain, .. } = &mut outcome.body {
-        text.clear();
-        plain.clear();
+    } else if let BugBody::Report(report) = &mut outcome.body {
+        report.blocks.clear();
     }
     outcome.error = failures.into_iter().next().map(|failure| failure.error);
     outcome
@@ -416,7 +373,7 @@ async fn update_tasks(
     bug_id: u64,
     matched: &[&bugs::BugTask],
     change: &TaskChange,
-    success: String,
+    spans: Vec<Span>,
 ) -> BugOutcome {
     let mut entries = Vec::new();
     let mut failures = Vec::new();
@@ -447,16 +404,14 @@ async fn update_tasks(
         "bug_tasks": collection_json(entries),
         "lpcli": {"failures": failures_json(&failures)},
     });
-    let text = format!(
-        "{} {success} for {applied} task(s) on bug #{bug_id}.\n",
-        "✓".green().bold()
-    );
-    let plain = vec![plain_ok(format!(
-        "{success} for {applied} task(s) on bug #{bug_id}."
-    ))];
+    let mut status_spans = spans;
+    status_spans.push(Span::Text(format!(
+        " for {applied} task(s) on bug #{bug_id}."
+    )));
+    let blocks = vec![Block::Status(Level::Ok, status_spans)];
     let total = matched.len();
     finish_batch(
-        BugOutcome::mutation(json, text, plain, links),
+        BugOutcome::mutation(json, blocks, links),
         applied,
         failures,
         |failures| {
@@ -470,7 +425,7 @@ async fn update_tasks(
 }
 
 // ---------------------------------------------------------------------------
-// Rich and plain text
+// Report block builders
 // ---------------------------------------------------------------------------
 
 struct ParsedTask<'a> {
@@ -524,306 +479,82 @@ fn task_display_target(target_name: &str, series: Option<&str>, task: &bugs::Bug
     }
 }
 
-/// Render a list of bug tasks as a grouped table.
-pub(crate) fn format_bug_tasks(tasks: &[bugs::BugTask], display: &Display) -> String {
-    let by_target = group_bug_tasks(tasks, "—");
-
-    let has_any_watch = tasks.iter().any(|t| t.bug_watch_link.is_some());
-    let header = if has_any_watch {
-        vec![
-            "Target",
-            "Series",
-            "Status",
-            "Importance",
-            "Assignee",
-            "Watch",
-        ]
-    } else {
-        vec!["Target", "Series", "Status", "Importance", "Assignee"]
-    };
-    let mut table = build_table(display, header);
-    for (target_name, tasks_for_target) in &by_target {
-        for pt in tasks_for_target {
-            let display_target = if pt.series.is_some() {
-                format!("    {target_name}")
-            } else {
-                task_display_target(target_name, None, pt.task)
-            };
-            let series_str = pt.series.as_deref().unwrap_or("").to_string();
-            let assignee_str = pt
-                .task
-                .assignee_link
-                .as_deref()
-                .and_then(|url| {
-                    url.rsplit('/')
-                        .next()
-                        .map(|seg| seg.trim_start_matches('~').to_string())
-                })
-                .unwrap_or_else(|| "—".to_string());
-            let mut row = vec![
-                display_target,
-                series_str,
-                pt.task.status.as_deref().unwrap_or("—").to_string(),
-                pt.task.importance.as_deref().unwrap_or("—").to_string(),
-                assignee_str,
-            ];
-            if has_any_watch {
-                let watch_str = pt
-                    .task
-                    .bug_watch_id()
-                    .map(|id| format!("#{id}"))
-                    .unwrap_or_else(|| "—".to_string());
-                row.push(watch_str);
-            }
-            table.add_row(row);
-        }
-    }
-    format!("{table}\n")
-}
-
-pub(crate) fn format_bug_attachments(
-    attachments: &[bugs::BugAttachment],
-    download_urls: &[Option<String>],
-    display: &Display,
-) -> String {
-    let mut table = build_table(display, vec!["Title", "Type", "URL"]);
-    for (a, url) in attachments.iter().zip(download_urls.iter()) {
-        let title = a.title.as_deref().unwrap_or("—").to_string();
-        let kind = a.attachment_type.as_deref().unwrap_or("—").to_string();
-        table.add_row(vec![title, kind, url.as_deref().unwrap_or("—").to_string()]);
-    }
-    format!(
-        "{}\n{table}\n{} attachment(s).\n",
-        "Attachments".bold(),
-        attachments.len()
-    )
-}
-
-fn format_bug_show(read: &BugReportRead, display: &Display) -> String {
-    let bug = &read.bug;
-    let mut out = String::new();
-    let _ = writeln!(out, "{}", format!("Bug #{}", bug.id).bold());
-    let _ = writeln!(out, "{}", "─".repeat(60));
-    let _ = writeln!(out, "{}", bug.title.bold());
-    if let Some(desc) = &bug.description {
-        let _ = writeln!(out, "\n{desc}");
-    }
-    out.push('\n');
-    if !bug.tags.is_empty() {
-        let _ = writeln!(out, "Tags:    {}", bug.tags.join(", ").cyan());
-    }
-    if let Some(count) = bug.users_affected_count {
-        let _ = writeln!(out, "Affects: {count} user(s)");
-    }
-    if let Some(link) = &bug.web_link {
-        let _ = writeln!(out, "URL:     {}", link.underline());
-    }
-    out.push('\n');
-    out.push_str(&format_bug_tasks(&read.tasks, display));
-    if !read.attachments.is_empty() {
-        out.push('\n');
-        out.push_str(&format_bug_attachments(
-            &read.attachments,
-            &read.download_urls,
-            display,
-        ));
-    }
-    out
-}
-
-fn format_bug_comments(read: &BugCommentsRead) -> String {
-    let mut out = String::new();
-    for (i, c) in read.comments.iter().enumerate() {
-        // Skip comments that were previously deleted.
-        if c.date_deleted.is_some() {
-            continue;
-        }
-        let idx = c.index.unwrap_or(i as u64);
-        let author = c.owner_link.as_deref().unwrap_or("unknown");
-        let date = c
-            .date_created
-            .map(|d| d.strftime("%Y-%m-%d %H:%M").to_string())
-            .unwrap_or_default();
-        let _ = writeln!(
-            out,
-            "{}",
-            format!("Comment #{idx} — {author} — {date}").bold()
-        );
-        let _ = writeln!(out, "{}", c.content.as_deref().unwrap_or(""));
-        // Show any attachments associated with this comment.
-        for (a, url) in read.attachments.iter().zip(&read.download_urls) {
-            if c.self_link.is_none() || a.message_link.as_deref() != c.self_link.as_deref() {
-                continue;
-            }
-            let name = a.title.as_deref().unwrap_or("attachment");
-            let kind = a.attachment_type.as_deref().unwrap_or("Unspecified");
-            match url {
-                Some(url) => {
-                    let _ = writeln!(out, "  {} [{kind}] {url}", format!("📎 {name}").cyan());
-                }
-                None => {
-                    let _ = writeln!(out, "  {} [{kind}]", format!("📎 {name}").cyan());
-                }
-            }
-        }
-        let _ = writeln!(out, "{}", "─".repeat(60));
-    }
-    out
-}
-
-fn format_bug_subscriptions(subs: &[bugs::BugSubscription], display: &Display) -> String {
-    let mut table = build_table(display, vec!["Person", "Subscribed By", "Date"]);
-    for s in subs {
-        let person = s
-            .person_link
-            .as_deref()
-            .and_then(|u| u.rsplit('/').next())
-            .unwrap_or("—");
-        let by = s
-            .subscribed_by_link
-            .as_deref()
-            .and_then(|u| u.rsplit('/').next())
-            .unwrap_or("—");
-        let date = s
-            .date_created
-            .map(|d| d.strftime("%Y-%m-%d").to_string())
-            .unwrap_or_default();
-        table.add_row(vec![person, by, &date]);
-    }
-    format!("{table}\n")
-}
-
-fn format_bug_watches(watches: &[bugs::BugWatch], linked: &[String], display: &Display) -> String {
-    let mut table = build_table(
-        display,
-        vec![
-            "Watch ID",
-            "Tracker",
-            "Remote Bug",
-            "Status",
-            "URL",
-            "Linked Tasks",
-        ],
-    );
-    for (w, linked_tasks) in watches.iter().zip(linked) {
-        let watch_id = w.id().unwrap_or("—");
-        let tracker = w
-            .bug_tracker_link
-            .as_deref()
-            .and_then(|u| u.rsplit('/').next())
-            .unwrap_or("—");
-        table.add_row(vec![
-            watch_id.to_string(),
-            tracker.to_string(),
-            w.remote_bug.as_deref().unwrap_or("—").to_string(),
-            w.remote_status.as_deref().unwrap_or("—").to_string(),
-            w.url.as_deref().unwrap_or("—").to_string(),
-            linked_tasks.clone(),
-        ]);
-    }
-    format!(
-        "{}\n{table}\n{} bug watch(es).\n",
-        "Bug Watches".bold(),
-        watches.len()
-    )
-}
-
-fn ok_line(message: &str) -> String {
-    format!("{} {message}\n", "✓".green().bold())
-}
-
-fn plain_ok(message: impl Into<String>) -> Block {
+fn ok_block(message: impl Into<String>) -> Block {
     Block::Status(Level::Ok, vec![Span::Text(message.into())])
 }
 
-fn plain_note(message: impl Into<String>) -> Block {
+fn note_block(message: impl Into<String>) -> Block {
     Block::Note(vec![Span::Text(message.into())])
 }
 
-fn plain_link_name(link: Option<&str>) -> String {
-    link.and_then(|url| url.rsplit('/').next())
-        .map(|seg| seg.trim_start_matches('~'))
-        .filter(|seg| !seg.is_empty())
-        .unwrap_or("none")
-        .to_string()
-}
-
-fn plain_bug_tasks(tasks: &[bugs::BugTask], empty_message: &str) -> Vec<Block> {
-    if tasks.is_empty() {
-        return vec![plain_note(empty_message)];
-    }
+fn bug_tasks_table_block(tasks: &[bugs::BugTask], empty: String) -> Block {
     let by_target = group_bug_tasks(tasks, "none");
     let has_any_watch = tasks.iter().any(|t| t.bug_watch_link.is_some());
-    let mut blocks = vec![plain_note(
-        Noun {
-            singular: "bug task",
-            plural: "bug tasks",
-        }
-        .count(tasks.len()),
-    )];
+    let mut columns = vec![
+        column("Target", "target"),
+        column("Series", "series"),
+        column("Status", "status"),
+        column("Importance", "importance"),
+        column("Assignee", "assignee"),
+    ];
+    if has_any_watch {
+        columns.push(column("Watch", "watch"));
+    }
+    let mut rows = Vec::new();
     for (target_name, tasks_for_target) in &by_target {
         for pt in tasks_for_target {
             let display_target = task_display_target(target_name, pt.series.as_deref(), pt.task);
-            blocks.push(Block::Break);
-            blocks.push(Block::Field("Target", display_target));
-            if let Some(series) = &pt.series {
-                blocks.push(Block::Field("Series", series.clone()));
-            }
-            blocks.push(Block::Field(
-                "Status",
-                pt.task.status.clone().unwrap_or_else(|| "none".into()),
-            ));
-            blocks.push(Block::Field(
-                "Importance",
-                pt.task.importance.clone().unwrap_or_else(|| "none".into()),
-            ));
-            blocks.push(Block::Field(
-                "Assignee",
-                plain_link_name(pt.task.assignee_link.as_deref()),
-            ));
+            let mut row = vec![
+                Some(display_target),
+                Some(pt.series.clone().unwrap_or_default()),
+                pt.task.status.clone(),
+                pt.task.importance.clone(),
+                output::link_name(pt.task.assignee_link.as_deref()),
+            ];
             if has_any_watch {
-                let watch_str = pt
-                    .task
-                    .bug_watch_id()
-                    .map(|id| format!("#{id}"))
-                    .unwrap_or_else(|| "none".into());
-                blocks.push(Block::Field("Watch", watch_str));
+                row.push(pt.task.bug_watch_id().map(|id| format!("#{id}")));
             }
+            rows.push(row);
         }
     }
-    blocks
+    Block::Table {
+        records: Records { columns, rows },
+        noun: Noun {
+            singular: "bug task",
+            plural: "bug tasks",
+        },
+        empty,
+        hint: None,
+    }
 }
 
-fn plain_bug_attachments_list(
+fn bug_attachments_table_block(
     attachments: &[bugs::BugAttachment],
     download_urls: &[Option<String>],
-) -> Vec<Block> {
-    let mut blocks = vec![plain_note(
-        Noun {
+    empty: String,
+) -> Block {
+    let columns = vec![
+        column("Title", "title"),
+        column("Type", "type"),
+        column("URL", "download_url"),
+    ];
+    let rows = attachments
+        .iter()
+        .zip(download_urls.iter())
+        .map(|(a, url)| vec![a.title.clone(), a.attachment_type.clone(), url.clone()])
+        .collect();
+    Block::Table {
+        records: Records { columns, rows },
+        noun: Noun {
             singular: "attachment",
             plural: "attachments",
-        }
-        .count(attachments.len()),
-    )];
-    for (a, url) in attachments.iter().zip(download_urls.iter()) {
-        blocks.push(Block::Break);
-        blocks.push(Block::Field(
-            "Title",
-            a.title.clone().unwrap_or_else(|| "none".into()),
-        ));
-        blocks.push(Block::Field(
-            "Type",
-            a.attachment_type.clone().unwrap_or_else(|| "none".into()),
-        ));
-        blocks.push(Block::Field(
-            "URL",
-            url.clone().unwrap_or_else(|| "none".into()),
-        ));
+        },
+        empty,
+        hint: None,
     }
-    blocks
 }
 
-fn plain_bug_show(read: &BugReportRead) -> Vec<Block> {
+fn bug_show_blocks(read: &BugReportRead) -> Vec<Block> {
     let bug = &read.bug;
     let mut blocks = vec![
         Block::Heading(format!("Bug #{}", bug.id)),
@@ -842,19 +573,23 @@ fn plain_bug_show(read: &BugReportRead) -> Vec<Block> {
         blocks.push(Block::Field("Description", desc.clone()));
     }
     blocks.push(Block::Break);
-    blocks.extend(plain_bug_tasks(&read.tasks, "No bug tasks found."));
+    blocks.push(bug_tasks_table_block(
+        &read.tasks,
+        "No bug tasks found.".into(),
+    ));
     if !read.attachments.is_empty() {
         blocks.push(Block::Break);
         blocks.push(Block::Heading("Attachments".into()));
-        blocks.extend(plain_bug_attachments_list(
+        blocks.push(bug_attachments_table_block(
             &read.attachments,
             &read.download_urls,
+            "No attachments found.".into(),
         ));
     }
     blocks
 }
 
-fn plain_bug_comments(read: &BugCommentsRead, bug_id: u64) -> Vec<Block> {
+fn bug_comments_blocks(read: &BugCommentsRead, bug_id: u64) -> Vec<Block> {
     let visible: Vec<(usize, &bugs::BugComment)> = read
         .comments
         .iter()
@@ -862,9 +597,9 @@ fn plain_bug_comments(read: &BugCommentsRead, bug_id: u64) -> Vec<Block> {
         .filter(|(_, c)| c.date_deleted.is_none())
         .collect();
     if visible.is_empty() {
-        return vec![plain_note(format!("No comments found for bug #{bug_id}."))];
+        return vec![note_block(format!("No comments found for bug #{bug_id}."))];
     }
-    let mut blocks = vec![plain_note(
+    let mut blocks = vec![note_block(
         Noun {
             singular: "comment",
             plural: "comments",
@@ -873,16 +608,11 @@ fn plain_bug_comments(read: &BugCommentsRead, bug_id: u64) -> Vec<Block> {
     )];
     for (i, c) in visible {
         let idx = c.index.unwrap_or(i as u64);
-        let date = c
-            .date_created
-            .map(|d| d.strftime("%Y-%m-%d %H:%M").to_string())
-            .unwrap_or_else(|| "none".into());
+        let author = output::link_name(c.owner_link.as_deref()).unwrap_or_else(|| "none".into());
+        let date = output::format_datetime(c.date_created).unwrap_or_else(|| "none".into());
         blocks.push(Block::Break);
         blocks.push(Block::Field("Comment", format!("#{idx}")));
-        blocks.push(Block::Field(
-            "Author",
-            plain_link_name(c.owner_link.as_deref()),
-        ));
+        blocks.push(Block::Field("Author", author));
         blocks.push(Block::Field("Date", date));
         blocks.push(Block::Field(
             "Content",
@@ -904,86 +634,75 @@ fn plain_bug_comments(read: &BugCommentsRead, bug_id: u64) -> Vec<Block> {
     blocks
 }
 
-fn plain_bug_subscriptions(subs: &[bugs::BugSubscription], bug_id: u64) -> Vec<Block> {
-    if subs.is_empty() {
-        return vec![plain_note(format!(
-            "No subscriptions found for bug #{bug_id}."
-        ))];
-    }
-    let mut blocks = vec![plain_note(
-        Noun {
+fn bug_subscriptions_table_block(subs: &[bugs::BugSubscription], bug_id: u64) -> Block {
+    let columns = vec![
+        column("Person", "person"),
+        column("Subscribed By", "subscribed_by"),
+        column("Date", "date_created"),
+    ];
+    let rows = subs
+        .iter()
+        .map(|s| {
+            vec![
+                output::link_name(s.person_link.as_deref()),
+                output::link_name(s.subscribed_by_link.as_deref()),
+                output::format_date(s.date_created),
+            ]
+        })
+        .collect();
+    Block::Table {
+        records: Records { columns, rows },
+        noun: Noun {
             singular: "subscription",
             plural: "subscriptions",
-        }
-        .count(subs.len()),
-    )];
-    for s in subs {
-        let date = s
-            .date_created
-            .map(|d| d.strftime("%Y-%m-%d").to_string())
-            .unwrap_or_else(|| "none".into());
-        blocks.push(Block::Break);
-        blocks.push(Block::Field(
-            "Person",
-            plain_link_name(s.person_link.as_deref()),
-        ));
-        blocks.push(Block::Field(
-            "Subscribed By",
-            plain_link_name(s.subscribed_by_link.as_deref()),
-        ));
-        blocks.push(Block::Field("Date", date));
+        },
+        empty: format!("No subscriptions found for bug #{bug_id}."),
+        hint: None,
     }
-    blocks
 }
 
-fn plain_bug_watches(watches: &[bugs::BugWatch], linked: &[String], bug_id: u64) -> Vec<Block> {
-    if watches.is_empty() {
-        return vec![plain_note(format!(
-            "No bug watches found for bug #{bug_id}."
-        ))];
-    }
-    let mut blocks = vec![plain_note(
-        Noun {
+fn bug_watches_table_block(watches: &[bugs::BugWatch], linked: &[String], bug_id: u64) -> Block {
+    let columns = vec![
+        column("Watch ID", "id"),
+        column("Tracker", "bug_tracker"),
+        column("Remote Bug", "remote_bug"),
+        column("Status", "remote_status"),
+        column("URL", "url"),
+        column("Linked Tasks", "linked_tasks"),
+    ];
+    let rows = watches
+        .iter()
+        .zip(linked)
+        .map(|(w, linked_tasks)| {
+            vec![
+                w.id().map(str::to_string),
+                output::link_name(w.bug_tracker_link.as_deref()),
+                w.remote_bug.clone(),
+                w.remote_status.clone(),
+                w.url.clone(),
+                Some(linked_tasks.clone()),
+            ]
+        })
+        .collect();
+    Block::Table {
+        records: Records { columns, rows },
+        noun: Noun {
             singular: "bug watch",
             plural: "bug watches",
-        }
-        .count(watches.len()),
-    )];
-    for (w, linked_tasks) in watches.iter().zip(linked) {
-        blocks.push(Block::Break);
-        blocks.push(Block::Field(
-            "Watch ID",
-            w.id().unwrap_or("none").to_string(),
-        ));
-        blocks.push(Block::Field(
-            "Tracker",
-            plain_link_name(w.bug_tracker_link.as_deref()),
-        ));
-        blocks.push(Block::Field(
-            "Remote Bug",
-            w.remote_bug.clone().unwrap_or_else(|| "none".into()),
-        ));
-        blocks.push(Block::Field(
-            "Status",
-            w.remote_status.clone().unwrap_or_else(|| "none".into()),
-        ));
-        blocks.push(Block::Field(
-            "URL",
-            w.url.clone().unwrap_or_else(|| "none".into()),
-        ));
-        blocks.push(Block::Field("Linked Tasks", linked_tasks.clone()));
+        },
+        empty: format!("No bug watches found for bug #{bug_id}."),
+        hint: None,
     }
-    blocks
 }
 
-fn plain_ensure_tracker_result(tracker: &bugs::BugTracker, created: bool) -> Vec<Block> {
+fn ensure_tracker_blocks(tracker: &bugs::BugTracker, created: bool) -> Vec<Block> {
     let name = tracker.name.as_deref().unwrap_or("(unknown name)");
     let state = if created {
         "created"
     } else {
         "reused (already existed)"
     };
-    let mut blocks = vec![plain_ok(format!("Bug tracker '{name}' {state}."))];
+    let mut blocks = vec![ok_block(format!("Bug tracker '{name}' {state}."))];
     if let Some(tracker_type) = tracker.bug_tracker_type.as_deref() {
         blocks.push(Block::Field("Type", tracker_type.to_string()));
     }
@@ -1307,7 +1026,6 @@ impl BugWatchesRead {
 
 pub(crate) async fn handle_bug(
     cmd: BugCommand,
-    display: &Display,
     output: &Output,
     quiet: bool,
     policy: ReadAuthPolicy,
@@ -1319,9 +1037,7 @@ pub(crate) async fn handle_bug(
     } else {
         client
     };
-    bug_outcome(&client, cmd, display)
-        .await?
-        .emit(output, quiet)
+    bug_outcome(&client, cmd).await?.emit(output, quiet)
 }
 
 fn attachment_params<'a>(
@@ -1345,28 +1061,22 @@ fn attachment_params<'a>(
 pub(crate) async fn bug_outcome(
     client: &LaunchpadClient,
     cmd: BugCommand,
-    display: &Display,
 ) -> lpcli::error::Result<BugOutcome> {
     Ok(match cmd {
         BugCommand::Show { bug_id } => {
             let read = fetch_bug_report(client, bug_id).await?;
-            BugOutcome::read(
-                read.json(),
-                format_bug_show(&read, display),
-                plain_bug_show(&read),
-            )
+            BugOutcome::read_blocks(read.json(), bug_show_blocks(&read))
         }
 
         BugCommand::Tasks { bug_id } => {
             let tasks = bugs::get_bug_tasks_raw(client, bug_id).await?;
-            BugOutcome::list(
+            BugOutcome::list_blocks(
                 tasks.raw.clone(),
                 tasks_records(&tasks.raw),
-                format_bug_tasks(&tasks.value, display),
-                plain_bug_tasks(
+                vec![bug_tasks_table_block(
                     &tasks.value,
-                    &format!("No bug tasks found for bug #{bug_id}."),
-                ),
+                    format!("No bug tasks found for bug #{bug_id}."),
+                )],
             )
         }
 
@@ -1410,21 +1120,20 @@ pub(crate) async fn bug_outcome(
                 );
                 let attachment = bugs::add_bug_attachment_raw(client, bug_id, &params).await?;
                 let msg = format!("Comment with attachment added to bug #{bug_id}.");
-                BugOutcome::entry(&attachment, ok_line(&msg), vec![plain_ok(msg)])
+                BugOutcome::entry(&attachment, vec![ok_block(msg)])
             } else {
                 let comment = bugs::add_bug_comment_raw(client, bug_id, &message).await?;
                 let msg = format!("Comment added to bug #{bug_id}.");
-                BugOutcome::entry(&comment, ok_line(&msg), vec![plain_ok(msg)])
+                BugOutcome::entry(&comment, vec![ok_block(msg)])
             }
         }
 
         BugCommand::Comments { bug_id } => {
             let read = fetch_bug_comments(client, bug_id).await?;
-            BugOutcome::list(
+            BugOutcome::list_blocks(
                 read.json(),
                 read.records(),
-                format_bug_comments(&read),
-                plain_bug_comments(&read, bug_id),
+                bug_comments_blocks(&read, bug_id),
             )
         }
 
@@ -1440,8 +1149,7 @@ pub(crate) async fn bug_outcome(
                     "comment_index": comment_index,
                     "deleted": true,
                 }}),
-                ok_line(&msg),
-                vec![plain_ok(msg)],
+                vec![ok_block(msg)],
                 Vec::new(),
             )
         }
@@ -1462,15 +1170,12 @@ pub(crate) async fn bug_outcome(
             };
             let bug = bugs::create_bug_raw(client, &effective_target, &title, &description).await?;
             let bug_id = bug.value.id;
-            let created_msg = format!("Bug #{bug_id} created.");
-            let mut text = ok_line(&created_msg);
-            let mut plain = vec![plain_ok(created_msg)];
+            let mut blocks = vec![ok_block(format!("Bug #{bug_id} created."))];
             if let Some(link) = &bug.value.web_link {
-                let _ = writeln!(text, "URL: {}", link.underline());
-                plain.push(Block::Field("URL", link.clone()));
+                blocks.push(Block::Field("URL", link.clone()));
             }
             if attachment_file.is_none() && attachment_url.is_none() {
-                return Ok(BugOutcome::entry(&bug, text, plain));
+                return Ok(BugOutcome::entry(&bug, blocks));
             }
 
             let params = attachment_params(
@@ -1484,9 +1189,7 @@ pub(crate) async fn bug_outcome(
             let (attachment, failures) =
                 match bugs::add_bug_attachment_raw(client, bug_id, &params).await {
                     Ok(attachment) => {
-                        let attached_msg = format!("Attachment added to bug #{bug_id}.");
-                        text.push_str(&ok_line(&attached_msg));
-                        plain.push(plain_ok(attached_msg));
+                        blocks.push(ok_block(format!("Attachment added to bug #{bug_id}.")));
                         links.extend(raw_self_link(&attachment.raw));
                         (attachment.raw, Vec::new())
                     }
@@ -1502,7 +1205,7 @@ pub(crate) async fn bug_outcome(
             });
             // The bug was created, so any failure here is partial.
             finish_batch(
-                BugOutcome::mutation(json, text, plain, links),
+                BugOutcome::mutation(json, blocks, links),
                 1,
                 failures,
                 |failures| {
@@ -1523,14 +1226,11 @@ pub(crate) async fn bug_outcome(
         } => {
             let text = resolve_new_description(description, description_file.as_deref())?;
             let updated = bugs::set_bug_description_raw(client, bug_id, &text).await?;
-            let msg = format!("Description updated for bug #{bug_id}.");
-            let mut text = ok_line(&msg);
-            let mut plain = vec![plain_ok(msg)];
+            let mut blocks = vec![ok_block(format!("Description updated for bug #{bug_id}."))];
             if let Some(link) = &updated.value.web_link {
-                let _ = writeln!(text, "URL: {}", link.underline());
-                plain.push(Block::Field("URL", link.clone()));
+                blocks.push(Block::Field("URL", link.clone()));
             }
-            BugOutcome::entry(&updated, text, plain)
+            BugOutcome::entry(&updated, blocks)
         }
 
         BugCommand::SetStatus {
@@ -1555,7 +1255,7 @@ pub(crate) async fn bug_outcome(
                 bug_id,
                 &matched,
                 &TaskChange::Status(status.into()),
-                format!("Status updated to '{status}'"),
+                vec![Span::Text(format!("Status updated to '{status}'"))],
             )
             .await
         }
@@ -1582,7 +1282,7 @@ pub(crate) async fn bug_outcome(
                 bug_id,
                 &matched,
                 &TaskChange::Importance(importance.into()),
-                format!("Importance updated to '{importance}'"),
+                vec![Span::Text(format!("Importance updated to '{importance}'"))],
             )
             .await
         }
@@ -1610,7 +1310,10 @@ pub(crate) async fn bug_outcome(
                 bug_id,
                 &matched,
                 &TaskChange::Assignee(assignee_url),
-                format!("Assigned to ~{name}"),
+                vec![
+                    Span::Text("Assigned to ".into()),
+                    Span::Name(format!("~{name}")),
+                ],
             )
             .await
         }
@@ -1618,55 +1321,55 @@ pub(crate) async fn bug_outcome(
         BugCommand::Subscribe { bug_id, name } => {
             let person_url = client.url(&format!("/~{name}"));
             let sub = bugs::subscribe_to_bug_raw(client, bug_id, &person_url).await?;
-            let msg = format!("Subscribed ~{name} to bug #{bug_id}.");
-            let mut text = ok_line(&msg);
-            let mut plain = vec![plain_ok(msg)];
+            let mut blocks = vec![Block::Status(
+                Level::Ok,
+                vec![
+                    Span::Text("Subscribed ".into()),
+                    Span::Name(format!("~{name}")),
+                    Span::Text(format!(" to bug #{bug_id}.")),
+                ],
+            )];
             if let Some(link) = &sub.value.self_link {
-                let _ = writeln!(text, "Subscription: {link}");
-                plain.push(Block::Field("Subscription", link.clone()));
+                blocks.push(Block::Field("Subscription", link.clone()));
             }
-            BugOutcome::entry(&sub, text, plain)
+            BugOutcome::entry(&sub, blocks)
         }
 
         BugCommand::Unsubscribe { bug_id, name } => {
             let person_url = client.url(&format!("/~{name}"));
             bugs::unsubscribe_from_bug(client, bug_id, &person_url).await?;
-            let msg = format!("Unsubscribed ~{name} from bug #{bug_id}.");
+            let blocks = vec![Block::Status(
+                Level::Ok,
+                vec![
+                    Span::Text("Unsubscribed ".into()),
+                    Span::Name(format!("~{name}")),
+                    Span::Text(format!(" from bug #{bug_id}.")),
+                ],
+            )];
             BugOutcome::mutation(
                 serde_json::json!({"lpcli": {
                     "bug_id": bug_id,
                     "person_link": person_url,
                     "unsubscribed": true,
                 }}),
-                ok_line(&msg),
-                vec![plain_ok(msg)],
+                blocks,
                 Vec::new(),
             )
         }
 
         BugCommand::Subscriptions { bug_id } => {
             let subs = bugs::get_bug_subscriptions_raw(client, bug_id).await?;
-            BugOutcome::list(
+            BugOutcome::list_blocks(
                 subs.raw.clone(),
                 subscriptions_records(&subs.raw),
-                format_bug_subscriptions(&subs.value, display),
-                plain_bug_subscriptions(&subs.value, bug_id),
+                vec![bug_subscriptions_table_block(&subs.value, bug_id)],
             )
         }
 
         BugCommand::Attachments { bug_id } => {
             let attachments = bugs::get_bug_attachments_raw(client, bug_id).await?;
             let download_urls = resolve_attachment_download_urls(client, &attachments.value).await;
-            let (text, plain) = if attachments.value.is_empty() {
-                let msg = format!("No attachments for bug #{bug_id}.");
-                (format!("{msg}\n"), vec![plain_note(msg)])
-            } else {
-                (
-                    format_bug_attachments(&attachments.value, &download_urls, display),
-                    plain_bug_attachments_list(&attachments.value, &download_urls),
-                )
-            };
-            BugOutcome::list(
+            BugOutcome::list_blocks(
                 serde_json::json!({
                     "attachments": attachments.raw,
                     "lpcli": {
@@ -1675,8 +1378,11 @@ pub(crate) async fn bug_outcome(
                     },
                 }),
                 attachments_records(&attachments.raw, &download_urls),
-                text,
-                plain,
+                vec![bug_attachments_table_block(
+                    &attachments.value,
+                    &download_urls,
+                    format!("No attachments for bug #{bug_id}."),
+                )],
             )
         }
 
@@ -1734,21 +1440,19 @@ pub(crate) async fn bug_outcome(
             let final_tags = apply_tag_additions(after_remove, add_tag, add_many_tags);
 
             let updated = bugs::set_bug_tags_raw(client, bug_id, &final_tags).await?;
-            let (text, plain) = if updated.value.tags.is_empty() {
-                let msg = format!("Bug #{bug_id} tags cleared (no tags).");
-                (ok_line(&msg), vec![plain_ok(msg)])
+            let blocks = if updated.value.tags.is_empty() {
+                vec![ok_block(format!("Bug #{bug_id} tags cleared (no tags)."))]
             } else {
                 let tags = updated.value.tags.join(", ");
-                (
-                    format!(
-                        "{} Bug #{bug_id} tags updated: {}\n",
-                        "✓".green().bold(),
-                        tags.cyan()
-                    ),
-                    vec![plain_ok(format!("Bug #{bug_id} tags updated: {tags}"))],
-                )
+                vec![Block::Status(
+                    Level::Ok,
+                    vec![
+                        Span::Text(format!("Bug #{bug_id} tags updated: ")),
+                        Span::Name(tags),
+                    ],
+                )]
             };
-            BugOutcome::entry(&updated, text, plain)
+            BugOutcome::entry(&updated, blocks)
         }
 
         BugCommand::LinkRemote {
@@ -1825,28 +1529,29 @@ pub(crate) async fn bug_outcome(
 
             let watch_id = watch.value.id().unwrap_or(&remote_bug_label);
             let watch_title = watch.value.title.as_deref().unwrap_or(watch_id);
-            let msg = format!("Linked task '{display_name}' to remote bug: {watch_title}");
-            let mut text = ok_line(&msg);
             // The final watch URL is always printed: Launchpad derives it
             // from the tracker, so a missing URL must stay visible rather
             // than be silently skipped (mis-typed trackers generate junk
             // URLs that otherwise only show up in `bug watches`).
-            let _ = writeln!(text, "{}", watch_url_line(&watch.value));
             let plain_url = watch
                 .value
                 .url
                 .as_deref()
                 .unwrap_or("(Launchpad returned no watch URL; check `lpcli bug watches`)")
                 .to_string();
-            let plain = vec![plain_ok(msg), Block::Field("URL", plain_url)];
+            let blocks = vec![
+                ok_block(format!(
+                    "Linked task '{display_name}' to remote bug: {watch_title}"
+                )),
+                Block::Field("URL", plain_url),
+            ];
             let links = [&linked_task.raw, &watch.raw]
                 .into_iter()
                 .filter_map(raw_self_link)
                 .collect();
             BugOutcome::mutation(
                 serde_json::json!({"bug_task": linked_task.raw, "bug_watch": watch.raw}),
-                text,
-                plain,
+                blocks,
                 links,
             )
         }
@@ -1880,9 +1585,9 @@ pub(crate) async fn bug_outcome(
 
             let updated = bugs::unset_bug_watch_raw(client, effective_task_url).await?;
 
-            let msg = format!("Unlinked remote bug watch from task '{display_name}'.");
-            let mut text = ok_line(&msg);
-            let mut plain = vec![plain_ok(msg)];
+            let mut blocks = vec![ok_block(format!(
+                "Unlinked remote bug watch from task '{display_name}'."
+            ))];
             // Unlinking only detaches the task; the watch object survives
             // (the REST API cannot delete watches) and becomes an orphan
             // that `bug watches` will report. Point at the web UI, which is
@@ -1891,10 +1596,9 @@ pub(crate) async fn bug_outcome(
                 let note = format!(
                     "The watch itself remains on bug #{bug_id}; delete it in the web UI at https://bugs.launchpad.net/bugs/{bug_id}/+watch/{watch_id}"
                 );
-                let _ = writeln!(text, "  Note: {note}");
-                plain.push(plain_note(note));
+                blocks.push(note_block(note));
             }
-            BugOutcome::entry(&updated, text, plain)
+            BugOutcome::entry(&updated, blocks)
         }
 
         BugCommand::Watches { bug_id } => {
@@ -1906,13 +1610,15 @@ pub(crate) async fn bug_outcome(
             )?;
             let read = BugWatchesRead { watches, tasks };
             let linked = read.linked_cells();
-            let text = if read.watches.value.is_empty() {
-                format!("No bug watches found for bug #{bug_id}.\n")
-            } else {
-                format_bug_watches(&read.watches.value, &linked, display)
-            };
-            let plain = plain_bug_watches(&read.watches.value, &linked, bug_id);
-            BugOutcome::list(read.json(), read.records(), text, plain)
+            BugOutcome::list_blocks(
+                read.json(),
+                read.records(),
+                vec![bug_watches_table_block(
+                    &read.watches.value,
+                    &linked,
+                    bug_id,
+                )],
+            )
         }
 
         BugCommand::RemoteBugTrackers { limit, search } => {
@@ -1949,12 +1655,7 @@ pub(crate) async fn bug_outcome(
             // whether the tracker was created or reused.
             let bugs::EnsureBugTrackerRawOutcome { tracker, created } =
                 bugs::ensure_bug_tracker_raw(client, &params).await?;
-            let text = format_ensure_tracker_result(&tracker.value, created)
-                .into_iter()
-                .map(|line| line + "\n")
-                .collect();
-            let plain = plain_ensure_tracker_result(&tracker.value, created);
-            BugOutcome::entry(&tracker, text, plain)
+            BugOutcome::entry(&tracker, ensure_tracker_blocks(&tracker.value, created))
         }
     })
 }
@@ -2028,8 +1729,7 @@ async fn add_tasks(client: &LaunchpadClient, args: AddTasks) -> BugOutcome {
         changes.push(TaskChange::Assignee(client.url(&format!("/~{name}"))));
     }
 
-    let mut text = String::new();
-    let mut plain = Vec::new();
+    let mut blocks = Vec::new();
     let mut tasks = Vec::new();
     let mut watches = Vec::new();
     let mut failures = Vec::new();
@@ -2052,9 +1752,7 @@ async fn add_tasks(client: &LaunchpadClient, args: AddTasks) -> BugOutcome {
             .bug_target_display_name
             .clone()
             .unwrap_or_else(|| series_name.clone());
-        let msg = format!("Bug task added: {display_name}");
-        text.push_str(&ok_line(&msg));
-        plain.push(plain_ok(msg));
+        blocks.push(ok_block(format!("Bug task added: {display_name}")));
 
         let Some(task_url) = task.value.self_link.clone() else {
             let operations = changes
@@ -2105,12 +1803,11 @@ async fn add_tasks(client: &LaunchpadClient, args: AddTasks) -> BugOutcome {
                 Ok((linked, watch)) => {
                     let watch_id = watch.value.id().unwrap_or(remote_id);
                     let watch_title = watch.value.title.as_deref().unwrap_or(watch_id);
-                    let link_msg = format!("Bug task linked to remote bug: {watch_title}");
-                    text.push_str(&ok_line(&link_msg));
-                    plain.push(plain_ok(link_msg));
+                    blocks.push(ok_block(format!(
+                        "Bug task linked to remote bug: {watch_title}"
+                    )));
                     if let Some(url) = &watch.value.url {
-                        let _ = writeln!(text, "  Remote URL: {url}");
-                        plain.push(Block::Field("Remote URL", url.clone()));
+                        blocks.push(Block::Field("Remote URL", url.clone()));
                     }
                     latest = linked.raw;
                     watches.push(watch.raw);
@@ -2149,7 +1846,7 @@ async fn add_tasks(client: &LaunchpadClient, args: AddTasks) -> BugOutcome {
     }
     let requested = targets.len();
     finish_batch(
-        BugOutcome::mutation(json, text, plain, links),
+        BugOutcome::mutation(json, blocks, links),
         created,
         failures,
         |failures| {
@@ -2223,8 +1920,7 @@ async fn delete_tasks(
         }
     };
 
-    let mut text = String::new();
-    let mut plain = Vec::new();
+    let mut blocks = Vec::new();
     let mut deleted = Vec::new();
     let mut failures = Vec::new();
     for task in &matched {
@@ -2243,9 +1939,7 @@ async fn delete_tasks(
         };
         match bugs::delete_bug_task(client, task_url).await {
             Ok(()) => {
-                let msg = format!("Deleted bug task: {display_name}");
-                text.push_str(&ok_line(&msg));
-                plain.push(plain_ok(msg));
+                blocks.push(ok_block(format!("Deleted bug task: {display_name}")));
                 deleted.push(task_url.to_string());
             }
             Err(error) => failures.push(BugFailure::new(
@@ -2263,15 +1957,10 @@ async fn delete_tasks(
     } else {
         format!(", {} error(s)", failures.len())
     };
-    let _ = writeln!(
-        text,
-        "\n{} Deleted {count} task(s) on bug #{bug_id}{summary_suffix}.",
-        "✓".green().bold(),
-    );
-    if !plain.is_empty() {
-        plain.push(Block::Break);
+    if !blocks.is_empty() {
+        blocks.push(Block::Break);
     }
-    plain.push(Block::Status(
+    blocks.push(Block::Status(
         if failures.is_empty() {
             Level::Ok
         } else {
@@ -2288,7 +1977,7 @@ async fn delete_tasks(
     }});
     let total = matched.len();
     Ok(finish_batch(
-        BugOutcome::mutation(json, text, plain, Vec::new()),
+        BugOutcome::mutation(json, blocks, Vec::new()),
         count,
         failures,
         |failures| {
@@ -2311,31 +2000,24 @@ async fn delete_tasks(
 /// Launchpad returned — ensureBugTracker may return an existing tracker
 /// found by base URL, silently ignoring the requested name and type — plus
 /// whether the tracker was created or reused.
+#[cfg(test)]
 pub(crate) fn format_ensure_tracker_result(
     tracker: &bugs::BugTracker,
     created: bool,
 ) -> Vec<String> {
-    let name = tracker.name.as_deref().unwrap_or("(unknown name)");
-    let state = if created {
-        "created"
-    } else {
-        "reused (already existed)"
+    let report = Report {
+        blocks: ensure_tracker_blocks(tracker, created),
+        json: serde_json::Value::Null,
+        records: Records {
+            columns: Vec::new(),
+            rows: Vec::new(),
+        },
     };
-    let mut lines = vec![format!(
-        "{} Bug tracker '{}' {state}.",
-        "✓".green().bold(),
-        name
-    )];
-    if let Some(tracker_type) = tracker.bug_tracker_type.as_deref() {
-        lines.push(format!("  Type:     {tracker_type}"));
-    }
-    if let Some(base_url) = tracker.base_url.as_deref() {
-        lines.push(format!("  Base URL: {base_url}"));
-    }
-    if let Some(self_link) = tracker.self_link.as_deref() {
-        lines.push(format!("  API:      {self_link}"));
-    }
-    lines
+    Output::fixed(OutputMode::Rich, false, 100)
+        .render(&report)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 /// The final watch URL line printed after a successful link, for both the
@@ -2345,6 +2027,7 @@ pub(crate) fn format_ensure_tracker_result(
 /// tracker, so a missing URL must stay visible rather than be silently
 /// skipped (mis-typed trackers generate junk URLs that otherwise only show
 /// up in `bug watches`).
+#[cfg(test)]
 pub(crate) fn watch_url_line(watch: &bugs::BugWatch) -> String {
     match watch.url.as_deref() {
         Some(url) => format!("  URL: {url}"),

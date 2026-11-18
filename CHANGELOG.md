@@ -12,12 +12,24 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 ### Added
 
+- A global `--no-pager` option and automatic `$PAGER` support for `rich` and
+  `plain` output when stdout is a non-dumb terminal, `$PAGER` is non-empty and
+  not `cat`, and the rendered output exceeds `$LINES` (`24` lines by default).
 - A global `--progress auto|plain|rich|none` option and non-redrawing download
   progress reporting on stderr (`plain` mode emits a start line, occasional
   milestones, per-file results, and a summary; `--progress none` disables
   progress output).
 
 ### Changed
+
+- Ported every remaining command (all `bug` subcommands, `queue`, `webhook`,
+  `snap`, `access-token`, `hardware-token issue --print`, and `skills`) through
+  the output layer (`Output`), removing direct `println!` calls from command
+  handlers and replacing `colored` overrides with `anstyle`.
+- Applied a consistent four-color ANSI palette in `rich` mode for status,
+  importance/priority, tag, and person/team values when color is enabled, and
+  normalized Launchpad usernames and timestamps across comment views (`bug
+  comments`, `git comments`, `question messages`).
 
 - Accessible `plain` output across all `bug` commands (`show`, `tasks`,
   `comments`, `subscriptions`, `attachments`, `watches`, and mutations), with

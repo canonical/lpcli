@@ -27,7 +27,7 @@ fn bug_command(argv: &[&str]) -> BugCommand {
 
 async fn run_bug(server: &mockito::Server, argv: &[&str]) -> lpcli::error::Result<BugOutcome> {
     let client = mock_read_client(server, true);
-    bug_outcome(&client, bug_command(argv), &Display::from_width(100)).await
+    bug_outcome(&client, bug_command(argv)).await
 }
 
 fn render_plain(outcome: &BugOutcome) -> String {
