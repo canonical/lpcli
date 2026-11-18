@@ -368,6 +368,12 @@ Color follows `--color auto|always|never`. With `auto`, the default,
 the stream is a terminal. stdout and stderr are decided separately. `plain`,
 `json`, and `tsv` output on stdout is never colored.
 
+Download progress on stderr follows `--progress auto|plain|rich|none`. With
+`auto`, `plain` output or a non-terminal stderr reports progress as a start
+line, occasional milestones, and a summary with no redrawing; `json` and `tsv`
+suppress progress output; and `rich` on a terminal shows animated progress
+bars. Passing `--progress none` turns progress reporting off.
+
 ### Replacing `--json`
 
 `--json` was removed in 0.5.0 and is now rejected as an unexpected argument.

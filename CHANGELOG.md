@@ -10,6 +10,25 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 ## [Unreleased]
 
+### Added
+
+- A global `--progress auto|plain|rich|none` option and non-redrawing download
+  progress reporting on stderr (`plain` mode emits a start line, occasional
+  milestones, per-file results, and a summary; `--progress none` disables
+  progress output).
+
+### Changed
+
+- Accessible `plain` output across all `bug` commands (`show`, `tasks`,
+  `comments`, `subscriptions`, `attachments`, `watches`, and mutations), with
+  leading result counts, labeled `Field: value` records, explicit `Series:`
+  fields instead of indentation, `Attachment:` labels instead of emoji,
+  `OK:`/`Warning:`/`Error:` word prefixes instead of symbols, and ASCII
+  sanitization for external text in `plain` mode.
+- Clearer assistive-technology wording in the security-key selection prompt
+  (`Choose a ... (enter a number from 1 to N): `) and grant-secret prompt
+  (`Enter grant secret (oauth_token_secret): `).
+
 ## [0.5.0] - 2026-11-17
 
 This is a SemVer-incompatible release that implements Phases 0 and 1 of

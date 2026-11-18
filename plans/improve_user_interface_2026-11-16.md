@@ -2,7 +2,8 @@
 
 - **Date:** 2026-11-16
 - **Status:** Phases 0 and 1 implemented in lpcli 0.5.0 (2026-11-17);
-  Phases 2 to 4 proposed
+  Phase 2 implemented pending manual Orca and BRLTTY desktop testing;
+  Phases 3 to 4 proposed
 - **Baseline:** lpcli 0.4.0
 - **Target release:** lpcli 0.5.0 (a SemVer-incompatible release) for
   Phases 0 and 1
@@ -483,6 +484,23 @@ during Phase 1:
 error variant has a tested exit code, and the documentation examples pass.
 
 ### Phase 2: Accessibility
+
+**Status: implementation and automated checks complete (2026-11-18); manual
+Orca and BRLTTY testing pending human verification.**
+
+- All `bug` commands (`show`, `tasks`, `comments`, `subscriptions`,
+  `attachments`, `watches`, and mutations) render accessible `plain` output
+  with leading counts, `Field: value` records, explicit `Series:` and
+  `Attachment:` fields, and `OK:`/`Warning:`/`Error:` word labels.
+- `PlainRenderer` and error/warning formatting sanitize banned symbols, em/en
+  dashes, box drawing, and emoji in `plain` mode (`clean_plain`).
+- Added `--progress auto|plain|rich|none` and non-redrawing stderr download
+  progress (`ProgressMode::Plain`) with `ProgressMode::None` suppression.
+- Updated security-key choice and grant-secret prompts to state expected input
+  in words without bracketed range notation.
+- Added Phase 2 unit and insta snapshot tests verified under `plain`, `NO_COLOR`,
+  and `TERM=dumb`; manual screen-reader/braille checks with Orca and BRLTTY on
+  Ubuntu 26.04 remain to be run interactively.
 
 1. Implement the `plain` renderer and the accessibility setting.
 2. Replace symbols with words, and add quiet progress reporting.

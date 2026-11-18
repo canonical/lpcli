@@ -247,7 +247,7 @@ pub(crate) fn read_grant_secret(
     no_input: bool,
 ) -> lpcli::error::Result<zeroize::Zeroizing<String>> {
     grant_secret_from(std::env::var_os(GRANT_SECRET_ENV), no_input, || {
-        rpassword::prompt_password("Grant secret (oauth_token_secret): ")
+        rpassword::prompt_password("Enter grant secret (oauth_token_secret): ")
     })
 }
 

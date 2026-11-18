@@ -1118,7 +1118,12 @@ fn total_failure_of_several_steps_lists_every_failure() {
     ];
     let json = serde_json::json!({"lpcli": {"failures": ["a", "b"]}});
     let outcome = finish_batch(
-        BugOutcome::mutation(json.clone(), "✓ Updated 0 task(s).\n".into(), Vec::new()),
+        BugOutcome::mutation(
+            json.clone(),
+            "✓ Updated 0 task(s).\n".into(),
+            Vec::new(),
+            Vec::new(),
+        ),
         0,
         failures,
         |_| unreachable!("nothing was applied"),
@@ -1148,6 +1153,7 @@ fn quiet_links_are_terminal_safe() {
     let outcome = BugOutcome::mutation(
         serde_json::json!({}),
         String::new(),
+        Vec::new(),
         vec!["https://api.launchpad.net/devel/bugs/1\u{1b}[2J".into()],
     );
     assert_eq!(

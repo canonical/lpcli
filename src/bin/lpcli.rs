@@ -34,7 +34,10 @@ use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 
 use display::Display;
-use output::{Block, ColorChoice, Column, Level, Noun, Output, OutputMode, Records, Report, Span};
+use output::{
+    Block, ColorChoice, Column, Level, Noun, Output, OutputMode, ProgressChoice, Records, Report,
+    Span,
+};
 use ubuntu_info_rust::{Architecture, Pocket, SeriesInfo};
 
 use lpcli::{
@@ -417,6 +420,20 @@ struct Cli {
                      separately for stdout and stderr. plain, json, and tsv output is never colored."
     )]
     color: ColorChoice,
+
+    /// How downloads report progress on stderr: auto, plain, rich, or none.
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        value_name = "MODE",
+        default_value_t = ProgressChoice::Auto,
+        long_help = "How downloads report progress on stderr. auto uses plain line-by-line \
+                     progress in plain mode or when stderr is not a terminal, none in json and \
+                     tsv modes, and animated progress bars in rich mode on a terminal. \
+                     --progress none turns progress output off."
+    )]
+    progress: ProgressChoice,
 
     /// Select comma-separated Launchpad attributes in JSON entries.
     #[arg(long, global = true, value_name = "FIELDS", value_delimiter = ',', value_parser = parse_field_name)]
@@ -2517,6 +2534,7 @@ fn resolve_command_output(
         stdout_terminal,
         stderr_terminal,
     })
+    .map(|output| output.with_progress(cli.progress, stderr_terminal))
 }
 
 /// Error styling before configuration is available must not prevent dispatch
@@ -2908,11 +2926,22 @@ fn read_client_with_auth(
 }
 
 /// Metadata may be signed, but arbitrary file URLs and redirects must not be.
+#[cfg(test)]
 async fn download_public_files(
     urls: &[String],
     output_dir: &std::path::Path,
 ) -> lpcli::error::Result<Vec<download::DownloadOutcome>> {
-    download::download_files(&LaunchpadClient::new(None), urls, output_dir).await
+    download_public_files_with_progress(urls, output_dir, download::ProgressMode::None).await
+}
+
+/// Download public files with an explicit stderr progress reporting mode.
+async fn download_public_files_with_progress(
+    urls: &[String],
+    output_dir: &std::path::Path,
+    progress: download::ProgressMode,
+) -> lpcli::error::Result<Vec<download::DownloadOutcome>> {
+    download::download_files_with_progress(&LaunchpadClient::new(None), urls, output_dir, progress)
+        .await
 }
 
 fn hardware_token_cache_timeout(settings: &config::AppConfig) -> std::time::Duration {

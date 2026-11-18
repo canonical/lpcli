@@ -1,0 +1,16 @@
+---
+source: src/bin/lpcli/tests/phase2_accessibility.rs
+expression: plain
+---
+2 bug tasks found.
+
+Target: curl (Ubuntu)
+Status: Confirmed
+Importance: Medium
+Assignee: none
+
+Target: curl
+Series: noble
+Status: Fix Released
+Importance: Medium
+Assignee: bob

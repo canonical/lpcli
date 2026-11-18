@@ -900,7 +900,7 @@ pub(crate) async fn handle_queue_download<O: QueueOutput + ?Sized>(
     let outcomes = if urls.is_empty() {
         Vec::new()
     } else {
-        if !output.mode().is_structured() {
+        if output.mode() == OutputMode::Rich && output.progress() == download::ProgressMode::Rich {
             let upload = &target.upload.value;
             output.print(&text_report(vec![Block::Heading(format!(
                 "Downloading {} file(s) for {} ({})",
@@ -909,7 +909,7 @@ pub(crate) async fn handle_queue_download<O: QueueOutput + ?Sized>(
                 upload_version(upload),
             ))]))?;
         }
-        download_public_files(&urls, &output_dir).await?
+        download_public_files_with_progress(&urls, &output_dir, output.progress()).await?
     };
     let download = QueueDownload {
         target,

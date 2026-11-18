@@ -4,10 +4,13 @@
 //! `queue` and `packages` modules to download source files from Launchpad.
 //!
 //! Downloaded files are written to a user-specified output directory
-//! (defaulting to the current working directory).  Each file download
-//! displays a progress bar showing the filename and transfer progress.
+//! (defaulting to the current working directory). Progress reporting on stderr
+//! can use animated bars ([`ProgressMode::Rich`]), non-redrawing lines for
+//! screen readers and non-terminal streams ([`ProgressMode::Plain`]), or be
+//! disabled ([`ProgressMode::None`]).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
@@ -45,15 +48,99 @@ pub enum DownloadOutcome {
     },
 }
 
-/// Download a list of files from the given URLs into `output_dir` in parallel.
+/// How [`download_files_with_progress`] reports progress on stderr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProgressMode {
+    /// Animated progress bars via `indicatif`.
+    #[default]
+    Rich,
+    /// Start line, occasional milestones, and a summary on stderr, with no redrawing.
+    Plain,
+    /// Do not report progress.
+    None,
+}
+
+/// Format the initial stderr line emitted before downloads begin in
+/// [`ProgressMode::Plain`].
+pub fn format_plain_start(total_files: usize, output_dir: &Path) -> String {
+    format!(
+        "Downloading {total_files} file(s) to '{}'...",
+        sanitize_plain_fragment(&output_dir.display().to_string())
+    )
+}
+
+/// Format an intermediate transfer milestone line emitted on stderr in
+/// [`ProgressMode::Plain`].
+pub fn format_plain_milestone(filename: &str, downloaded: u64, total: u64) -> String {
+    format!(
+        "Progress: {}: 50% ({downloaded}/{total} bytes)",
+        sanitize_plain_fragment(filename)
+    )
+}
+
+/// Format a per-file completion or failure line emitted on stderr in
+/// [`ProgressMode::Plain`].
+pub fn format_plain_outcome(outcome: &DownloadOutcome) -> String {
+    match outcome {
+        DownloadOutcome::Success(file) => {
+            let filename = file.path.file_name().map_or_else(
+                || file.path.to_string_lossy().into_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            format!(
+                "OK: {} ({} bytes)",
+                sanitize_plain_fragment(&filename),
+                file.size
+            )
+        }
+        DownloadOutcome::Failed { filename, error } => {
+            format!(
+                "Error: {}: {}",
+                sanitize_plain_fragment(filename),
+                sanitize_plain_fragment(error)
+            )
+        }
+    }
+}
+
+/// Format the final summary line emitted after downloads finish in
+/// [`ProgressMode::Plain`].
+pub fn format_plain_summary(outcomes: &[DownloadOutcome]) -> String {
+    let failed = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, DownloadOutcome::Failed { .. }))
+        .count();
+    let downloaded = outcomes.len() - failed;
+    if failed == 0 {
+        format!("Download complete: {downloaded} file(s) downloaded.")
+    } else {
+        format!("Download complete: {downloaded} file(s) downloaded, {failed} failed.")
+    }
+}
+
+fn sanitize_plain_fragment(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\r' => {}
+            '\n' | '\t' => out.push(' '),
+            '—' | '–' => out.push('-'),
+            '✓' => out.push_str("OK"),
+            '✗' => out.push_str("Error"),
+            '\u{2500}'..='\u{257F}' | '\u{1F300}'..='\u{1FAFF}' => {}
+            c if c.is_control() => out.push('\u{FFFD}'),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Download a list of files from the given URLs into `output_dir` in parallel
+/// using animated terminal progress bars ([`ProgressMode::Rich`]).
 ///
 /// Each URL is fetched concurrently (with OAuth authentication when
 /// credentials are present on the client) and saved under `output_dir`
 /// using the filename from the URL's last path segment.
-///
-/// A progress bar is displayed for each file showing the filename, download
-/// progress, transfer speed, and ETA.  All progress bars update
-/// simultaneously as the parallel downloads proceed.
 ///
 /// Unlike an all-or-nothing approach, this function attempts every download
 /// and reports per-file success or failure via [`DownloadOutcome`].
@@ -67,6 +154,22 @@ pub async fn download_files(
     urls: &[String],
     output_dir: &Path,
 ) -> Result<Vec<DownloadOutcome>> {
+    download_files_with_progress(client, urls, output_dir, ProgressMode::Rich).await
+}
+
+/// Download a list of files from the given URLs into `output_dir` in parallel,
+/// reporting progress according to `progress`.
+///
+/// # Errors
+///
+/// Returns a hard error only if the output directory cannot be created.
+/// Individual file download failures are captured in the returned outcomes.
+pub async fn download_files_with_progress(
+    client: &LaunchpadClient,
+    urls: &[String],
+    output_dir: &Path,
+    progress: ProgressMode,
+) -> Result<Vec<DownloadOutcome>> {
     // Ensure the output directory exists.
     std::fs::create_dir_all(output_dir).map_err(|e| {
         LpError::Io(std::io::Error::new(
@@ -78,8 +181,16 @@ pub async fn download_files(
         ))
     })?;
 
-    let multi = MultiProgress::new();
+    if urls.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let total_files = urls.len();
+    if progress == ProgressMode::Plain {
+        eprintln!("{}", format_plain_start(total_files, output_dir));
+    }
+
+    let multi = (progress == ProgressMode::Rich).then(MultiProgress::new);
 
     // Prepare tasks: extract filenames upfront so we can report errors
     // immediately for malformed URLs without spawning a task.
@@ -90,60 +201,83 @@ pub async fn download_files(
         let filename = match extract_filename(url) {
             Ok(f) => f,
             Err(e) => {
-                immediate_failures.push((
-                    idx,
-                    DownloadOutcome::Failed {
-                        filename: url.clone(),
-                        error: e.to_string(),
-                    },
-                ));
+                let outcome = DownloadOutcome::Failed {
+                    filename: url.clone(),
+                    error: e.to_string(),
+                };
+                if progress == ProgressMode::Plain {
+                    eprintln!("{}", format_plain_outcome(&outcome));
+                }
+                immediate_failures.push((idx, outcome));
                 continue;
             }
         };
 
-        // Create a progress bar for this file.
-        let pb = multi.add(ProgressBar::new(0));
-        pb.set_style(progress_style_bytes());
-        pb.set_prefix(format!("[{}/{}]", idx + 1, total_files));
-        pb.set_message(filename.clone());
+        // Create a progress bar for this file in rich mode.
+        let pb = multi.as_ref().map(|m| {
+            let bar = m.add(ProgressBar::new(0));
+            bar.set_style(progress_style_bytes());
+            bar.set_prefix(format!("[{}/{}]", idx + 1, total_files));
+            bar.set_message(filename.clone());
+            bar
+        });
 
         let dest = output_dir.join(&filename);
         let client_clone = client.clone();
         let url_clone = url.clone();
 
         let handle = tokio::spawn(async move {
+            let milestone_reported = AtomicBool::new(false);
             let result = client_clone
                 .download_to_file_with_progress(&url_clone, &dest, |downloaded, total| {
-                    if let Some(total_size) = total
-                        && pb.length() != Some(total_size)
-                    {
-                        pb.set_length(total_size);
+                    if let Some(pb) = &pb {
+                        if let Some(total_size) = total
+                            && pb.length() != Some(total_size)
+                        {
+                            pb.set_length(total_size);
+                        }
+                        pb.set_position(downloaded);
                     }
-                    pb.set_position(downloaded);
+                    if progress == ProgressMode::Plain
+                        && let Some(total_size) = total
+                        && total_size > 0
+                        && downloaded < total_size
+                        && downloaded.saturating_mul(2) >= total_size
+                        && !milestone_reported.swap(true, Ordering::Relaxed)
+                    {
+                        eprintln!(
+                            "{}",
+                            format_plain_milestone(&filename, downloaded, total_size)
+                        );
+                    }
                 })
                 .await;
 
             match result {
                 Ok(size) => {
-                    pb.set_length(size);
-                    pb.set_position(size);
-                    pb.finish_with_message(format!("{filename} ✓"));
-                    (
-                        idx,
-                        DownloadOutcome::Success(DownloadedFile { path: dest, size }),
-                    )
+                    let outcome = DownloadOutcome::Success(DownloadedFile { path: dest, size });
+                    if let Some(pb) = pb {
+                        pb.set_length(size);
+                        pb.set_position(size);
+                        pb.finish_with_message(format!("OK: {filename}"));
+                    } else if progress == ProgressMode::Plain {
+                        eprintln!("{}", format_plain_outcome(&outcome));
+                    }
+                    (idx, outcome)
                 }
                 Err(e) => {
-                    pb.abandon_with_message(format!("{filename} ✗"));
                     // Clean up partial file if it was created.
                     let _ = std::fs::remove_file(&dest);
-                    (
-                        idx,
-                        DownloadOutcome::Failed {
-                            filename,
-                            error: e.to_string(),
-                        },
-                    )
+                    let outcome = DownloadOutcome::Failed {
+                        filename: filename.clone(),
+                        error: e.to_string(),
+                    };
+                    if let Some(pb) = pb {
+                        pb.abandon_with_message(format!("Error: {filename}"));
+                    } else if progress == ProgressMode::Plain {
+                        eprintln!("{}", format_plain_outcome(&outcome));
+                    }
+                    (idx, outcome)
                 }
             }
         });
@@ -163,13 +297,14 @@ pub async fn download_files(
             Err(e) => {
                 // A JoinError means the task panicked — should not happen,
                 // but handle gracefully.
-                indexed_results.push((
-                    usize::MAX,
-                    DownloadOutcome::Failed {
-                        filename: "<unknown>".to_string(),
-                        error: format!("Download task failed: {e}"),
-                    },
-                ));
+                let outcome = DownloadOutcome::Failed {
+                    filename: "<unknown>".to_string(),
+                    error: format!("Download task failed: {e}"),
+                };
+                if progress == ProgressMode::Plain {
+                    eprintln!("{}", format_plain_outcome(&outcome));
+                }
+                indexed_results.push((usize::MAX, outcome));
             }
         }
     }
@@ -178,10 +313,13 @@ pub async fn download_files(
     indexed_results.extend(immediate_failures);
     indexed_results.sort_by_key(|(idx, _)| *idx);
 
-    let results = indexed_results
+    let results: Vec<DownloadOutcome> = indexed_results
         .into_iter()
         .map(|(_, outcome)| outcome)
         .collect();
+    if progress == ProgressMode::Plain && !results.is_empty() {
+        eprintln!("{}", format_plain_summary(&results));
+    }
     Ok(results)
 }
 

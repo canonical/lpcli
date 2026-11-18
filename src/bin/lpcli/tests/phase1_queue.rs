@@ -611,6 +611,7 @@ async fn queue_download_partial_failures_return_partial_after_printing() {
     assert_eq!(report.json["lpcli"]["downloaded"], 1);
     assert_eq!(report.json["lpcli"]["failed"], 1);
     let plain = render(&report, OutputMode::Plain);
+    assert_plain_invariants(&plain);
     assert!(plain.contains("Error: curl_8.5.0.orig.tar.gz: "), "{plain}");
     assert!(plain.contains("1 file(s) downloaded from ubuntu/noble, 1 failed."));
     assert_json_report!("queue_download_partial_json", stable(&report.json, &base));

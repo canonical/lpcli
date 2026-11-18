@@ -69,6 +69,44 @@ pub enum ColorChoice {
     Never,
 }
 
+/// When and how to report download progress on stderr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum ProgressChoice {
+    /// Follow the output mode and whether stderr is a terminal.
+    #[default]
+    Auto,
+    /// Start line, occasional milestones, and a summary, with no redrawing.
+    Plain,
+    /// Animated progress bars on stderr.
+    Rich,
+    /// Do not report progress.
+    None,
+}
+
+/// Choose the download progress mode for an invocation.
+pub fn resolve_progress(
+    choice: ProgressChoice,
+    mode: OutputMode,
+    stderr_terminal: bool,
+) -> lpcli::download::ProgressMode {
+    match choice {
+        ProgressChoice::None => lpcli::download::ProgressMode::None,
+        ProgressChoice::Plain => lpcli::download::ProgressMode::Plain,
+        ProgressChoice::Rich => lpcli::download::ProgressMode::Rich,
+        ProgressChoice::Auto => {
+            if mode == OutputMode::Plain {
+                lpcli::download::ProgressMode::Plain
+            } else if mode.is_structured() {
+                lpcli::download::ProgressMode::None
+            } else if !stderr_terminal {
+                lpcli::download::ProgressMode::Plain
+            } else {
+                lpcli::download::ProgressMode::Rich
+            }
+        }
+    }
+}
+
 /// The environment variables that affect output, captured once so that
 /// mode and color selection are pure functions of their inputs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -248,6 +286,7 @@ pub struct Output {
     pretty_json: bool,
     warning: Option<String>,
     fields: Option<Vec<String>>,
+    progress: lpcli::download::ProgressMode,
 }
 
 impl Output {
@@ -314,6 +353,7 @@ impl Output {
             pretty_json: settings.stdout_terminal,
             warning,
             fields: settings.fields,
+            progress: resolve_progress(ProgressChoice::Auto, mode, settings.stderr_terminal),
         })
     }
 
@@ -332,7 +372,19 @@ impl Output {
             pretty_json: true,
             warning: None,
             fields: None,
+            progress: lpcli::download::ProgressMode::None,
         }
+    }
+
+    /// Select the download progress mode on stderr from `choice` and `stderr_terminal`.
+    pub fn with_progress(mut self, choice: ProgressChoice, stderr_terminal: bool) -> Self {
+        self.progress = resolve_progress(choice, self.mode, stderr_terminal);
+        self
+    }
+
+    /// The resolved download progress mode for stderr.
+    pub fn progress(&self) -> lpcli::download::ProgressMode {
+        self.progress
     }
 
     /// Use `--fields` selection, for tests.
@@ -434,23 +486,24 @@ impl Output {
 
     /// Format a text runtime error message for stderr.
     pub fn render_error_message(&self, message: &str) -> String {
-        let message = clean(&redact_secrets(message));
+        let redacted = redact_secrets(message);
         if self.mode == OutputMode::Plain {
-            format!("Error: {message}\n")
+            format!("Error: {}\n", clean_plain(&redacted))
         } else {
-            format!("{} {message}\n", error_prefix(self.stderr.color))
+            format!("{} {}\n", error_prefix(self.stderr.color), clean(&redacted))
         }
     }
 
     /// Format a warning for stderr.
     pub fn render_warning(&self, message: &str) -> String {
-        let message = clean(&redact_secrets(message));
+        let redacted = redact_secrets(message);
         if self.mode == OutputMode::Plain {
-            format!("Warning: {message}\n")
+            format!("Warning: {}\n", clean_plain(&redacted))
         } else {
             format!(
-                "{} {message}\n",
-                paint("warning:", WARNING, self.stderr.color)
+                "{} {}\n",
+                paint("warning:", WARNING, self.stderr.color),
+                clean(&redacted)
             )
         }
     }
@@ -617,7 +670,7 @@ pub struct Noun {
 }
 
 impl Noun {
-    fn count(self, n: usize) -> String {
+    pub(crate) fn count(self, n: usize) -> String {
         let noun = if n == 1 { self.singular } else { self.plural };
         format!("{n} {noun} found.")
     }
@@ -782,6 +835,27 @@ fn clean(text: &str) -> String {
         .collect()
 }
 
+/// Sanitize text for `plain` mode: keep ASCII punctuation and words rather than
+/// decorative symbols, em/en dashes, box drawing, or emoji, and neutralize
+/// control characters.
+pub(crate) fn clean_plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' => out.push('\n'),
+            '\r' => {}
+            '\t' => out.push(' '),
+            '—' | '–' => out.push('-'),
+            '✓' => out.push_str("OK"),
+            '✗' => out.push_str("Error"),
+            '\u{2500}'..='\u{257F}' | '\u{1F300}'..='\u{1FAFF}' => {}
+            c if c.is_control() => out.push('\u{FFFD}'),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 impl RichRenderer {
     fn spans(&self, spans: &[Span]) -> String {
         spans
@@ -873,8 +947,8 @@ impl PlainRenderer {
         spans
             .iter()
             .map(|span| match span {
-                Span::Text(text) | Span::Name(text) => clean(text),
-                Span::Command(command) => format!("\"{}\"", clean(command)),
+                Span::Text(text) | Span::Name(text) => clean_plain(text),
+                Span::Command(command) => format!("\"{}\"", clean_plain(command)),
             })
             .collect()
     }
@@ -882,7 +956,7 @@ impl PlainRenderer {
     /// `Label: value`, with continuation lines indented so each record stays
     /// one block of lines.
     fn field(out: &mut String, label: &str, value: Option<&str>) {
-        let value = value.map_or_else(|| "none".to_string(), clean);
+        let value = value.map_or_else(|| "none".to_string(), clean_plain);
         out.push_str(label);
         out.push_str(": ");
         out.push_str(&value.replace('\n', "\n  "));
@@ -891,14 +965,14 @@ impl PlainRenderer {
 
     fn list(out: &mut String, records: &Records, noun: Noun, empty: &str, hint: Option<&str>) {
         if records.rows.is_empty() {
-            out.push_str(&clean(empty));
+            out.push_str(&clean_plain(empty));
             out.push('\n');
             return;
         }
         out.push_str(&noun.count(records.rows.len()));
         if let Some(hint) = hint {
             out.push(' ');
-            out.push_str(&clean(hint));
+            out.push_str(&clean_plain(hint));
         }
         out.push('\n');
         for row in &records.rows {
@@ -916,7 +990,7 @@ impl Renderer for PlainRenderer {
         for block in &report.blocks {
             match block {
                 Block::Heading(text) => {
-                    out.push_str(&clean(text));
+                    out.push_str(&clean_plain(text));
                     out.push('\n');
                 }
                 Block::Status(level, spans) => {
