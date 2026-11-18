@@ -222,8 +222,8 @@ retry only the parts that failed.
 |--------|---------|
 | Show a repo | `lpcli git show --path "~my-username/launchpad/+git/myrepo"` |
 | Show default repo | `lpcli git default --target launchpad` |
-| List person repos | `lpcli git list-person-repos --name my-username` |
-| List repos for a target | `lpcli git list --target launchpad` |
+| List person or team repos | `lpcli git list-person-repos --name my-username` (`--name` accepts team names, with or without a leading `~`) |
+| List repos for a target, incl. personal forks | `lpcli git list --target launchpad` (`--target`: project, `ubuntu/+source/pkg`, or `~person`/`~team`) |
 | List refs (branches/tags) | `lpcli git refs --path "~my-username/launchpad/+git/myrepo"` |
 | List merge proposals | `lpcli git proposals --path "~my-username/launchpad/+git/myrepo"` |
 | Filter merge proposals | `lpcli git proposals --path "~my-username/launchpad/+git/myrepo" --status "Needs review"` |
