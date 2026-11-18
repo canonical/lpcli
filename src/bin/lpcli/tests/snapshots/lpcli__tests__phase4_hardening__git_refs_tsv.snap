@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+path	display_name	commit_sha1
+refs/heads/main	main	0123456789abcdef0123456789abcdef01234567
+refs/tags/v1	refs/tags/v1	fedcba9876543210fedcba9876543210fedcba98

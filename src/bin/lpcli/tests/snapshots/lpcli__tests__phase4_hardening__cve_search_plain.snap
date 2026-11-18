@@ -1,0 +1,13 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+2 CVEs found.
+
+CVE: 2024-1234
+Status: Entry
+Title: Curl overflow
+
+CVE: 2024-9999
+Status: Entry
+Title: Other bug

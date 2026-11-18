@@ -12,6 +12,12 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 ### Added
 
+- Complete snapshot coverage across `schema`, structured errors, remaining `git`,
+  `queue`, and domain TSV list outputs, representative `plain` and `rich`
+  reports across all command domains, and `bug`/`queue`/`package` partial
+  failures, verified by an automated snapshot accessibility and redaction audit.
+- Accessibility guarantees and manual Orca/BRLTTY release checklist alongside a
+  `0.4.x` migration guide in `README.md`.
 - A global `--no-pager` option and automatic `$PAGER` support for `rich` and
   `plain` output when stdout is a non-dumb terminal, `$PAGER` is non-empty and
   not `cat`, and the rendered output exceeds `$LINES` (`24` lines by default).
@@ -22,6 +28,10 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 ### Changed
 
+- Expanded `plain` sanitization (`clean_plain`, `download` progress messages,
+  and `assert_plain_invariants`) to also strip bullet (`●`), info (`ℹ`), and
+  dingbat/symbol ranges while normalizing `–` and `—` to `-`.
+- Documented `--no-pager` and `--progress none` in `SKILL.md`.
 - Ported every remaining command (all `bug` subcommands, `queue`, `webhook`,
   `snap`, `access-token`, `hardware-token issue --print`, and `skills`) through
   the output layer (`Output`), removing direct `println!` calls from command

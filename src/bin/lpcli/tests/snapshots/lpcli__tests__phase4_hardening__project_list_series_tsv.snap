@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+name	title	status
+trunk	Main series	Active Development

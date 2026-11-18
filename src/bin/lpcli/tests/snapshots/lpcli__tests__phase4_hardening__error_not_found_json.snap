@@ -1,0 +1,12 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: not_found_json
+---
+{
+  "error": {
+    "hint": null,
+    "http_status": 404,
+    "kind": "not_found",
+    "message": "Not found: https://api.launchpad.net/devel/bugs/999999"
+  }
+}

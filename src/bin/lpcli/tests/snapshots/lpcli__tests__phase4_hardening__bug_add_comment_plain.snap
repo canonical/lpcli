@@ -1,0 +1,5 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: clean
+---
+OK: Comment added to bug #42.

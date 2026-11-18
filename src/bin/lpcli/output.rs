@@ -1178,7 +1178,11 @@ pub(crate) fn clean_plain(text: &str) -> String {
             '—' | '–' => out.push('-'),
             '✓' => out.push_str("OK"),
             '✗' => out.push_str("Error"),
-            '\u{2500}'..='\u{257F}' | '\u{1F300}'..='\u{1FAFF}' => {}
+            '●'
+            | 'ℹ'
+            | '\u{2500}'..='\u{257F}'
+            | '\u{2600}'..='\u{27BF}'
+            | '\u{1F300}'..='\u{1FAFF}' => {}
             c if c.is_control() => out.push('\u{FFFD}'),
             c => out.push(c),
         }
@@ -1911,7 +1915,16 @@ pub(crate) mod tests {
         assert!(!rendered.contains('\u{1b}'), "ANSI escape in plain output");
         for c in rendered.chars() {
             assert!(
-                !matches!(c, '\u{2500}'..='\u{257F}' | '✓' | '✗' | '—' | '\u{1F300}'..='\u{1FAFF}'),
+                !matches!(
+                    c,
+                    '\u{2500}'..='\u{257F}'
+                        | '\u{2600}'..='\u{27BF}'
+                        | '\u{1F300}'..='\u{1FAFF}'
+                        | '—'
+                        | '–'
+                        | '●'
+                        | 'ℹ'
+                ),
                 "decorative character {c:?} in plain output:\n{rendered}"
             );
         }

@@ -1,0 +1,11 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+1 source publication found.
+
+Package: hello
+Version: 2.10-3
+Component: main
+Pocket: Release
+Status: Published

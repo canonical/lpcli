@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+id	title	status	importance
+7	Crash\twith tab	New	Undecided

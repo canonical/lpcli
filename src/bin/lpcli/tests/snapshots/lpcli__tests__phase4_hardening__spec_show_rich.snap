@@ -1,0 +1,13 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+a-spec
+────────────────────────────────────────
+  Title: Spec a-spec
+  Priority: High
+  Lifecycle: Started
+  Implementation: Good progress
+  Definition: Approved
+  Summary: Make things better.
+  URL: https://launchpad.net/launchpad/+spec/a-spec

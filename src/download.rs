@@ -127,7 +127,11 @@ fn sanitize_plain_fragment(text: &str) -> String {
             '—' | '–' => out.push('-'),
             '✓' => out.push_str("OK"),
             '✗' => out.push_str("Error"),
-            '\u{2500}'..='\u{257F}' | '\u{1F300}'..='\u{1FAFF}' => {}
+            '●'
+            | 'ℹ'
+            | '\u{2500}'..='\u{257F}'
+            | '\u{2600}'..='\u{27BF}'
+            | '\u{1F300}'..='\u{1FAFF}' => {}
             c if c.is_control() => out.push('\u{FFFD}'),
             c => out.push(c),
         }

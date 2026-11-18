@@ -1,0 +1,24 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+Review comments
+
+Comment: #5
+Author: reviewer
+Date: 2026-03-06 07:08
+Vote: Approve
+Text: Looks good,
+  but see inline.
+
+Inline comments
+
+Location: lib/model.py:5
+Author: reviewer
+Date: 2026-03-06 07:08
+Diff line:     return True
+Text: Why True?
+
+Location: diff line 99
+Author: other
+Text: Unmapped

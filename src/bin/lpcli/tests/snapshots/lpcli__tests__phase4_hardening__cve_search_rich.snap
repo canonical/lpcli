@@ -1,0 +1,11 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+┌───────────┬────────┬───────────────┐
+│ CVE       ┆ Status ┆ Title         │
+╞═══════════╪════════╪═══════════════╡
+│ 2024-1234 ┆ Entry  ┆ Curl overflow │
+│ 2024-9999 ┆ Entry  ┆ Other bug     │
+└───────────┴────────┴───────────────┘
+2 CVEs found.

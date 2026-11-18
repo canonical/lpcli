@@ -2,8 +2,8 @@
 
 - **Date:** 2026-11-16
 - **Status:** Phases 0 and 1 implemented in lpcli 0.5.0 (2026-11-17);
-  Phase 2 implemented pending manual Orca and BRLTTY desktop testing;
-  Phases 3 to 4 proposed
+  Phases 2 to 4 implemented (2026-11-18), with manual Orca and BRLTTY
+  desktop testing tracked in the release checklist
 - **Baseline:** lpcli 0.4.0
 - **Target release:** lpcli 0.5.0 (a SemVer-incompatible release) for
   Phases 0 and 1
@@ -541,6 +541,22 @@ characters, or emoji, and the manual checks pass.
 output layer.
 
 ### Phase 4: Hardening
+
+**Status: complete (2026-11-18); manual Orca and BRLTTY desktop testing documented in the release checklist.**
+
+- Expanded `plain` mode and download-progress sanitization (`clean_plain`,
+  `download`, and `assert_plain_invariants`) to also strip `●`, `ℹ`, and
+  Unicode dingbat/symbol ranges (`U+2600..=U+27BF`) and hyphenate `–`/`—`.
+- Added Phase 4 hardening tests and snapshots in
+  `src/bin/lpcli/tests/phase4_hardening.rs` covering `schema` and structured
+  errors, all remaining `git`/`queue`/`read_domains` TSV list outputs,
+  representative `plain`/`rich` outputs across all command domains and
+  `bug`/`queue`/`package` partial failures, environment resolution (`TERM=dumb`,
+  `NO_COLOR=1`, `display.accessible`, `LPCLI_FORMAT`), and an automated audit of
+  all snapshot files for accessibility invariants and URL/secret redaction.
+- Updated `README.md` (`anstyle`, full global option reference,
+  accessibility/Orca/BRLTTY release checklist, and `0.4.x` migration guide),
+  `SKILL.md` (`--no-pager`, `--progress none`), and `CHANGELOG.md`.
 
 1. Fill any gaps in snapshot coverage.
 2. Complete the documentation and migration guides.

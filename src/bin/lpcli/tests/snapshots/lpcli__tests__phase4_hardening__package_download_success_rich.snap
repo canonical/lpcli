@@ -1,0 +1,8 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: ok_rich
+---
+✓ hello_2.10-3.dsc (3 B)
+✓ hello_2.10.orig.tar.gz (4 B)
+
+✓ Downloaded 2 file(s) to '[output dir]/out'.

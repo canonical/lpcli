@@ -1,0 +1,10 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+Jane Doe
+────────────────────────────────────────
+  Name: jdoe
+  Type: Person
+  Karma: 42
+  URL: https://launchpad.net/~jdoe

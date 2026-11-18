@@ -5027,3 +5027,5 @@ mod phase1_webhook_snap_token;
 mod phase2_accessibility;
 #[path = "tests/phase3_visual_polish.rs"]
 mod phase3_visual_polish;
+#[path = "tests/phase4_hardening.rs"]
+mod phase4_hardening;
