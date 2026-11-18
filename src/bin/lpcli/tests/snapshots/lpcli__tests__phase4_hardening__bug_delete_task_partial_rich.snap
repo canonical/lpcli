@@ -1,0 +1,8 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: clean
+---
+✓ Deleted bug task: curl (Ubuntu)
+
+~ Deleted 1 task(s) on bug #42, 1 error(s).
+warning: Failed: delete_task for 'curl (Ubuntu noble)': Launchpad API error 403: Permission denied. Verify your Launchpad account has the required permissions.

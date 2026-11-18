@@ -2,7 +2,8 @@
 
 - **Date:** 2026-11-16
 - **Status:** Phases 0 and 1 implemented in lpcli 0.5.0 (2026-11-17);
-  Phases 2 to 4 proposed
+  Phases 2 to 4 implemented (2026-11-18), with manual Orca and BRLTTY
+  desktop testing tracked in the release checklist
 - **Baseline:** lpcli 0.4.0
 - **Target release:** lpcli 0.5.0 (a SemVer-incompatible release) for
   Phases 0 and 1
@@ -484,6 +485,23 @@ error variant has a tested exit code, and the documentation examples pass.
 
 ### Phase 2: Accessibility
 
+**Status: implementation and automated checks complete (2026-11-18); manual
+Orca and BRLTTY testing pending human verification.**
+
+- All `bug` commands (`show`, `tasks`, `comments`, `subscriptions`,
+  `attachments`, `watches`, and mutations) render accessible `plain` output
+  with leading counts, `Field: value` records, explicit `Series:` and
+  `Attachment:` fields, and `OK:`/`Warning:`/`Error:` word labels.
+- `PlainRenderer` and error/warning formatting sanitize banned symbols, em/en
+  dashes, box drawing, and emoji in `plain` mode (`clean_plain`).
+- Added `--progress auto|plain|rich|none` and non-redrawing stderr download
+  progress (`ProgressMode::Plain`) with `ProgressMode::None` suppression.
+- Updated security-key choice and grant-secret prompts to state expected input
+  in words without bracketed range notation.
+- Added Phase 2 unit and insta snapshot tests verified under `plain`, `NO_COLOR`,
+  and `TERM=dumb`; manual screen-reader/braille checks with Orca and BRLTTY on
+  Ubuntu 26.04 remain to be run interactively.
+
 1. Implement the `plain` renderer and the accessibility setting.
 2. Replace symbols with words, and add quiet progress reporting.
 3. Review prompt text with assistive technology in mind.
@@ -494,6 +512,27 @@ characters, or emoji, and the manual checks pass.
 
 ### Phase 3: Visual polish
 
+**Status: complete (2026-11-18).**
+
+- Ported every remaining `bug` subcommand to `output.rs` (`Report`/`Block::Table`)
+  and routed remaining stdout writes (`identity`, `webhook`, `snap`,
+  `access-token`, `queue`, `skills`) through `Output`, leaving no `println!`
+  calls outside `output.rs`.
+- Removed `colored` overrides from CLI dispatch and applied the four-color
+  light/dark-safe `anstyle` palette in `RichRenderer` for semantic statuses,
+  importances/priorities, tags, and person/team values when color is enabled,
+  preserving existing uncolored `rich` snapshots.
+- Normalized usernames (`output::link_name`, trimming leading `~`) and
+  timestamps (`output::format_date`, `output::format_datetime`,
+  `output::format_timestamp_str`) across `bug`, `git`, `queue`, `webhook`,
+  `identity`, and `read_domains`.
+- Added `--no-pager` and `$PAGER` paging in `Output` when stdout is a non-dumb
+  terminal, `$PAGER` is non-empty and not `cat`, and rendered lines exceed
+  `$LINES` (24 by default).
+- Added Phase 3 tests and snapshots in
+  `src/bin/lpcli/tests/phase3_visual_polish.rs` and updated `README.md` and
+  `CHANGELOG.md`.
+
 1. Port every remaining command to the output layer.
 2. Show names instead of URLs, add date formatting, and apply the color set.
 3. Add the pager.
@@ -502,6 +541,22 @@ characters, or emoji, and the manual checks pass.
 output layer.
 
 ### Phase 4: Hardening
+
+**Status: complete (2026-11-18); manual Orca and BRLTTY desktop testing documented in the release checklist.**
+
+- Expanded `plain` mode and download-progress sanitization (`clean_plain`,
+  `download`, and `assert_plain_invariants`) to also strip `●`, `ℹ`, and
+  Unicode dingbat/symbol ranges (`U+2600..=U+27BF`) and hyphenate `–`/`—`.
+- Added Phase 4 hardening tests and snapshots in
+  `src/bin/lpcli/tests/phase4_hardening.rs` covering `schema` and structured
+  errors, all remaining `git`/`queue`/`read_domains` TSV list outputs,
+  representative `plain`/`rich` outputs across all command domains and
+  `bug`/`queue`/`package` partial failures, environment resolution (`TERM=dumb`,
+  `NO_COLOR=1`, `display.accessible`, `LPCLI_FORMAT`), and an automated audit of
+  all snapshot files for accessibility invariants and URL/secret redaction.
+- Updated `README.md` (`anstyle`, full global option reference,
+  accessibility/Orca/BRLTTY release checklist, and `0.4.x` migration guide),
+  `SKILL.md` (`--no-pager`, `--progress none`), and `CHANGELOG.md`.
 
 1. Fill any gaps in snapshot coverage.
 2. Complete the documentation and migration guides.

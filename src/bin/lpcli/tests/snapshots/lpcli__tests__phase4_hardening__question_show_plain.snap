@@ -1,0 +1,9 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+Question #7
+Title: Install help
+Status: Open
+Description: How do I do this?
+URL: https://launchpad.net/ubuntu/+question/7

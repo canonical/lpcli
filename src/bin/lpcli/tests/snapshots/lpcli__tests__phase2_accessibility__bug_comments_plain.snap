@@ -1,0 +1,17 @@
+---
+source: src/bin/lpcli/tests/phase2_accessibility.rs
+expression: plain
+---
+2 comments found.
+
+Comment: #0
+Author: commenter
+Date: 2026-01-03 00:00
+Content: Original
+  description
+
+Comment: #1
+Author: commenter
+Date: 2026-01-03 00:00
+Content: See attached trace - thanks.
+Attachment: trace-1.txt [Patch]

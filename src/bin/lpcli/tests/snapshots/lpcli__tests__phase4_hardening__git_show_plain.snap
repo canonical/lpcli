@@ -1,0 +1,10 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+~owner/project/+git/repo
+Description: Repository description
+Type: Hosted
+Access: Public
+Modified: 2026-02-03
+URL: https://code.launchpad.net/~owner/project/+git/repo

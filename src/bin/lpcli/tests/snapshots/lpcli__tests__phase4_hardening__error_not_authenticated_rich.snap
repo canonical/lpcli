@@ -1,0 +1,5 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: unauth_rich
+---
+error: Not authenticated. Run `lpcli login` to authenticate with Launchpad.

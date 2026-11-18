@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: clean
+---
+✓ Bug task added: curl (Ubuntu noble)
+warning: Failed: add_task for 'jammy': Launchpad API error 400: Already requested for Jammy

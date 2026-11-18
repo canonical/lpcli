@@ -38,10 +38,10 @@ impl CommandResult {
     }
 
     fn print(&self, output: &Output, quiet: bool) -> lpcli::error::Result<()> {
-        let mut stdout = std::io::stdout().lock();
-        stdout.write_all(self.render(output, quiet).as_bytes())?;
-        stdout.flush()?;
-        Ok(())
+        match self {
+            Self::Mutation { .. } if quiet => output.write_raw(&self.render(output, true)),
+            Self::Read(report) | Self::Mutation { report, .. } => output.print(report),
+        }
     }
 }
 
@@ -109,7 +109,7 @@ fn ok(text: &str) -> Block {
 }
 
 fn day(timestamp: Option<jiff::Timestamp>) -> Option<String> {
-    timestamp.map(|d| d.strftime("%Y-%m-%d").to_string())
+    output::format_date(timestamp)
 }
 
 // ---------------------------------------------------------------------------
@@ -209,9 +209,7 @@ fn deliveries_report(deliveries: &Raw<Vec<webhooks::WebhookDelivery>>) -> Comman
         .iter()
         .map(|delivery| {
             vec![
-                delivery
-                    .date_sent
-                    .map(|d| d.strftime("%Y-%m-%d %H:%M").to_string()),
+                output::format_datetime(delivery.date_sent),
                 delivery.successful.map(|successful| successful.to_string()),
                 delivery.response_status_code.map(|code| code.to_string()),
                 delivery.pending.map(|pending| pending.to_string()),

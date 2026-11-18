@@ -1,0 +1,17 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+2 merge proposals found. Use the ID value with --id for git comments or git diffs.
+
+ID: 11
+Status: Needs review
+Source Branch: refs/heads/fix
+Target Branch: refs/heads/main
+Date: 2026-03-04
+
+ID: 12
+Status: Approved
+Source Branch: refs/heads/fix
+Target Branch: refs/heads/main
+Date: 2026-03-04

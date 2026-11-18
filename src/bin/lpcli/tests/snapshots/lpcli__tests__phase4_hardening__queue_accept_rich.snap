@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+✓ Accepted curl (8.5.0-2ubuntu10) [source] in ubuntu/noble.
+  Status: Accepted

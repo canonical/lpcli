@@ -730,11 +730,10 @@ async fn package_download_partial_failure_is_partial_after_reporting() {
     let message = error.to_string();
     assert!(message.contains("Downloaded 1 of 2"), "{message}");
     assert!(message.contains("hello_2.10.orig.tar.gz"), "{message}");
-    // The per-file error text comes from the library's download error, which
-    // currently contains an em dash, so only JSON and rich are checked here.
     let json: Value = serde_json::from_str(&render(&report, OutputMode::Json)).unwrap();
     assert_eq!(json, report.json);
     let plain = render(&report, OutputMode::Plain);
+    assert_plain_invariants(&plain);
     assert!(plain.contains("OK: hello_2.10-3.dsc (3 B)\n"), "{plain}");
     assert!(plain.contains("Error: hello_2.10.orig.tar.gz: "), "{plain}");
     assert!(plain.contains("Warning: 1 file(s) downloaded"), "{plain}");

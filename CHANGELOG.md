@@ -10,6 +10,47 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 ## [Unreleased]
 
+### Added
+
+- Complete snapshot coverage across `schema`, structured errors, remaining `git`,
+  `queue`, and domain TSV list outputs, representative `plain` and `rich`
+  reports across all command domains, and `bug`/`queue`/`package` partial
+  failures, verified by an automated snapshot accessibility and redaction audit.
+- Accessibility guarantees and manual Orca/BRLTTY release checklist alongside a
+  `0.4.x` migration guide in `README.md`.
+- A global `--no-pager` option and automatic `$PAGER` support for `rich` and
+  `plain` output when stdout is a non-dumb terminal, `$PAGER` is non-empty and
+  not `cat`, and the rendered output exceeds `$LINES` (`24` lines by default).
+- A global `--progress auto|plain|rich|none` option and non-redrawing download
+  progress reporting on stderr (`plain` mode emits a start line, occasional
+  milestones, per-file results, and a summary; `--progress none` disables
+  progress output).
+
+### Changed
+
+- Expanded `plain` sanitization (`clean_plain`, `download` progress messages,
+  and `assert_plain_invariants`) to also strip bullet (`●`), info (`ℹ`), and
+  dingbat/symbol ranges while normalizing `–` and `—` to `-`.
+- Documented `--no-pager` and `--progress none` in `SKILL.md`.
+- Ported every remaining command (all `bug` subcommands, `queue`, `webhook`,
+  `snap`, `access-token`, `hardware-token issue --print`, and `skills`) through
+  the output layer (`Output`), removing direct `println!` calls from command
+  handlers and replacing `colored` overrides with `anstyle`.
+- Applied a consistent four-color ANSI palette in `rich` mode for status,
+  importance/priority, tag, and person/team values when color is enabled, and
+  normalized Launchpad usernames and timestamps across comment views (`bug
+  comments`, `git comments`, `question messages`).
+
+- Accessible `plain` output across all `bug` commands (`show`, `tasks`,
+  `comments`, `subscriptions`, `attachments`, `watches`, and mutations), with
+  leading result counts, labeled `Field: value` records, explicit `Series:`
+  fields instead of indentation, `Attachment:` labels instead of emoji,
+  `OK:`/`Warning:`/`Error:` word prefixes instead of symbols, and ASCII
+  sanitization for external text in `plain` mode.
+- Clearer assistive-technology wording in the security-key selection prompt
+  (`Choose a ... (enter a number from 1 to N): `) and grant-secret prompt
+  (`Enter grant secret (oauth_token_secret): `).
+
 ## [0.5.0] - 2026-11-17
 
 This is a SemVer-incompatible release that implements Phases 0 and 1 of

@@ -5023,3 +5023,9 @@ mod phase1_queue;
 mod phase1_read_domains;
 #[path = "tests/phase1_webhook_snap_token.rs"]
 mod phase1_webhook_snap_token;
+#[path = "tests/phase2_accessibility.rs"]
+mod phase2_accessibility;
+#[path = "tests/phase3_visual_polish.rs"]
+mod phase3_visual_polish;
+#[path = "tests/phase4_hardening.rs"]
+mod phase4_hardening;

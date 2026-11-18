@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+path	status	date_created
+po/hello.pot	Needs Review	2025-03-04

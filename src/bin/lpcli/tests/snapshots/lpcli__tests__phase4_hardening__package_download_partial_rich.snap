@@ -1,0 +1,8 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: partial_rich
+---
+✓ hello_2.10-3.dsc (3 B)
+✗ hello_2.10.orig.tar.gz: Launchpad API error 404: Failed to download [server]/+files/hello_2.10.orig.tar.gz: HTTP 404 — Missing
+
+~ 1 file(s) downloaded to '[output dir]/out', 1 failed.

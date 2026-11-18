@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+unique_name	repository_type	date_last_modified
+~owner/project/+git/one	Hosted	2026-02-03
+~owner/project/+git/two	Hosted	2026-02-03

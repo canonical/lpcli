@@ -69,6 +69,44 @@ pub enum ColorChoice {
     Never,
 }
 
+/// When and how to report download progress on stderr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum ProgressChoice {
+    /// Follow the output mode and whether stderr is a terminal.
+    #[default]
+    Auto,
+    /// Start line, occasional milestones, and a summary, with no redrawing.
+    Plain,
+    /// Animated progress bars on stderr.
+    Rich,
+    /// Do not report progress.
+    None,
+}
+
+/// Choose the download progress mode for an invocation.
+pub fn resolve_progress(
+    choice: ProgressChoice,
+    mode: OutputMode,
+    stderr_terminal: bool,
+) -> lpcli::download::ProgressMode {
+    match choice {
+        ProgressChoice::None => lpcli::download::ProgressMode::None,
+        ProgressChoice::Plain => lpcli::download::ProgressMode::Plain,
+        ProgressChoice::Rich => lpcli::download::ProgressMode::Rich,
+        ProgressChoice::Auto => {
+            if mode == OutputMode::Plain {
+                lpcli::download::ProgressMode::Plain
+            } else if mode.is_structured() {
+                lpcli::download::ProgressMode::None
+            } else if !stderr_terminal {
+                lpcli::download::ProgressMode::Plain
+            } else {
+                lpcli::download::ProgressMode::Rich
+            }
+        }
+    }
+}
+
 /// The environment variables that affect output, captured once so that
 /// mode and color selection are pure functions of their inputs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -81,6 +119,8 @@ pub struct Environment {
     pub clicolor_force: Option<String>,
     /// `TERM`.
     pub term: Option<String>,
+    /// `PAGER`.
+    pub pager: Option<String>,
 }
 
 impl Environment {
@@ -92,12 +132,135 @@ impl Environment {
             no_color: var("NO_COLOR"),
             clicolor_force: var("CLICOLOR_FORCE"),
             term: var("TERM"),
+            pager: var("PAGER"),
         }
     }
 
     fn term_is_dumb(&self) -> bool {
         self.term.as_deref() == Some("dumb")
     }
+}
+
+/// Default line count threshold above which human output is sent to `$PAGER`
+/// when `LINES` is unset.
+pub const DEFAULT_PAGER_LINES: usize = 24;
+
+/// Resolve the pager command for an invocation, if paging is enabled.
+///
+/// Paging is used only when stdout is a non-dumb terminal, `--no-pager` was
+/// not passed, the mode is human-facing (`rich` or `plain`), and `PAGER` is
+/// set to a non-empty command other than `cat`.
+pub fn resolve_pager(
+    no_pager: bool,
+    mode: OutputMode,
+    env: &Environment,
+    stdout_terminal: bool,
+) -> Option<String> {
+    if no_pager || !stdout_terminal || env.term_is_dumb() || mode.is_structured() {
+        return None;
+    }
+    let pager = env.pager.as_deref()?.trim();
+    if pager.is_empty() || pager == "cat" {
+        return None;
+    }
+    Some(pager.to_string())
+}
+
+/// Whether `rendered` is long enough to be piped through `pager`.
+pub fn should_page(pager: Option<&str>, rendered: &str, max_lines: usize) -> bool {
+    pager.is_some_and(|cmd| !cmd.trim().is_empty() && cmd.trim() != "cat")
+        && rendered.lines().count() > max_lines
+}
+
+/// Split a shell-like command string (such as `less -FRX` or `"/usr/bin/less" -R`)
+/// into program and arguments without invoking a shell.
+fn split_command_words(command: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (None, '\\') => {
+                let next = chars.next()?;
+                current.push(next);
+                in_word = true;
+            }
+            (Some('"'), '\\') => match chars.next() {
+                Some(next @ ('"' | '\\' | '$' | '`')) => current.push(next),
+                Some(next) => {
+                    current.push('\\');
+                    current.push(next);
+                }
+                None => return None,
+            },
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                in_word = true;
+            }
+            (Some(q), c) if c == q => {
+                quote = None;
+            }
+            (None, c) if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            (_, c) => {
+                current.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if in_word {
+        words.push(current);
+    }
+    (!words.is_empty()).then_some(words)
+}
+
+/// Write `rendered` through `pager` when `should_page` holds, or directly to
+/// stdout otherwise. Returns `true` if output was sent to the pager process.
+pub fn write_with_pager(
+    rendered: &str,
+    pager: Option<&str>,
+    max_lines: usize,
+) -> lpcli::error::Result<bool> {
+    if should_page(pager, rendered, max_lines)
+        && let Some(words) = pager.and_then(split_command_words)
+    {
+        let (program, args) = (&words[0], &words[1..]);
+        if let Ok(mut child) = std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                match stdin
+                    .write_all(rendered.as_bytes())
+                    .and_then(|()| stdin.flush())
+                {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {}
+                    Err(err) => {
+                        drop(stdin);
+                        let _ = child.wait();
+                        return Err(err.into());
+                    }
+                }
+            }
+            let _ = child.wait();
+            return Ok(true);
+        }
+    }
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(rendered.as_bytes())?;
+    stdout.flush()?;
+    Ok(false)
 }
 
 /// Where the selected output mode came from.
@@ -248,6 +411,8 @@ pub struct Output {
     pretty_json: bool,
     warning: Option<String>,
     fields: Option<Vec<String>>,
+    progress: lpcli::download::ProgressMode,
+    pager: Option<String>,
 }
 
 impl Output {
@@ -314,6 +479,8 @@ impl Output {
             pretty_json: settings.stdout_terminal,
             warning,
             fields: settings.fields,
+            progress: resolve_progress(ProgressChoice::Auto, mode, settings.stderr_terminal),
+            pager: resolve_pager(false, mode, settings.env, settings.stdout_terminal),
         })
     }
 
@@ -332,7 +499,32 @@ impl Output {
             pretty_json: true,
             warning: None,
             fields: None,
+            progress: lpcli::download::ProgressMode::None,
+            pager: None,
         }
+    }
+
+    /// Select the download progress mode on stderr from `choice` and `stderr_terminal`.
+    pub fn with_progress(mut self, choice: ProgressChoice, stderr_terminal: bool) -> Self {
+        self.progress = resolve_progress(choice, self.mode, stderr_terminal);
+        self
+    }
+
+    /// The resolved download progress mode for stderr.
+    pub fn progress(&self) -> lpcli::download::ProgressMode {
+        self.progress
+    }
+
+    /// Select whether long human output goes through `$PAGER`.
+    pub fn with_pager(mut self, no_pager: bool, env: &Environment, stdout_terminal: bool) -> Self {
+        self.pager = resolve_pager(no_pager, self.mode, env, stdout_terminal);
+        self
+    }
+
+    /// The resolved pager command, if paging is enabled for this invocation.
+    #[cfg(test)]
+    pub fn pager(&self) -> Option<&str> {
+        self.pager.as_deref()
     }
 
     /// Use `--fields` selection, for tests.
@@ -348,12 +540,14 @@ impl Output {
     }
 
     /// Styling for stdout.
+    #[cfg(test)]
     pub fn stdout_style(&self) -> Style {
         self.stdout
     }
 
     /// Prepare legacy, already-formatted text for stdout using this output's
     /// explicit stdout color decision.
+    #[cfg(test)]
     pub fn style_legacy_text(&self, text: &str) -> String {
         if self.stdout.color {
             text.to_string()
@@ -364,6 +558,7 @@ impl Output {
 
     /// Prepare legacy, already-formatted text for stderr using this output's
     /// explicit stderr color decision.
+    #[cfg(test)]
     pub fn style_legacy_stderr_text(&self, text: &str) -> String {
         if self.stderr.color {
             text.to_string()
@@ -395,12 +590,30 @@ impl Output {
         self.renderer().render(report)
     }
 
-    /// Write a report to stdout.
-    pub fn print(&self, report: &Report) -> lpcli::error::Result<()> {
+    /// Write pre-rendered text to stdout, piping through `$PAGER` when enabled
+    /// and the text exceeds the terminal height threshold.
+    pub fn write_paged(&self, rendered: &str) -> lpcli::error::Result<()> {
+        let max_lines = std::env::var("LINES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&lines| lines > 0)
+            .unwrap_or(DEFAULT_PAGER_LINES);
+        write_with_pager(rendered, self.pager.as_deref(), max_lines)?;
+        Ok(())
+    }
+
+    /// Write raw pre-formatted text directly to stdout without paging or
+    /// re-rendering (for `skills`, `--quiet`, and `hardware-token issue --print`).
+    pub fn write_raw(&self, text: &str) -> lpcli::error::Result<()> {
         let mut stdout = std::io::stdout().lock();
-        stdout.write_all(self.render(report).as_bytes())?;
+        stdout.write_all(text.as_bytes())?;
         stdout.flush()?;
         Ok(())
+    }
+
+    /// Write a report to stdout, piping through `$PAGER` when appropriate.
+    pub fn print(&self, report: &Report) -> lpcli::error::Result<()> {
+        self.write_paged(&self.render(report))
     }
 
     /// Write an unchanged Launchpad or lpcli-defined JSON value to stdout.
@@ -434,23 +647,24 @@ impl Output {
 
     /// Format a text runtime error message for stderr.
     pub fn render_error_message(&self, message: &str) -> String {
-        let message = clean(&redact_secrets(message));
+        let redacted = redact_secrets(message);
         if self.mode == OutputMode::Plain {
-            format!("Error: {message}\n")
+            format!("Error: {}\n", clean_plain(&redacted))
         } else {
-            format!("{} {message}\n", error_prefix(self.stderr.color))
+            format!("{} {}\n", error_prefix(self.stderr.color), clean(&redacted))
         }
     }
 
     /// Format a warning for stderr.
     pub fn render_warning(&self, message: &str) -> String {
-        let message = clean(&redact_secrets(message));
+        let redacted = redact_secrets(message);
         if self.mode == OutputMode::Plain {
-            format!("Warning: {message}\n")
+            format!("Warning: {}\n", clean_plain(&redacted))
         } else {
             format!(
-                "{} {message}\n",
-                paint("warning:", WARNING, self.stderr.color)
+                "{} {}\n",
+                paint("warning:", WARNING, self.stderr.color),
+                clean(&redacted)
             )
         }
     }
@@ -617,7 +831,7 @@ pub struct Noun {
 }
 
 impl Noun {
-    fn count(self, n: usize) -> String {
+    pub(crate) fn count(self, n: usize) -> String {
         let noun = if n == 1 { self.singular } else { self.plural };
         format!("{n} {noun} found.")
     }
@@ -656,6 +870,15 @@ pub enum Block {
     /// The report's [`Records`], with a count before (`plain`) or after
     /// (`rich`) them, an optional hint, and a message for an empty list.
     List {
+        noun: Noun,
+        empty: String,
+        hint: Option<String>,
+    },
+    /// A table of records for `rich` and `plain` output whose columns or
+    /// rows are independent of [`Report::records`] (used when a report has
+    /// multiple tables or when `tsv` uses raw Launchpad attributes).
+    Table {
+        records: Records,
         noun: Noun,
         empty: String,
         hint: Option<String>,
@@ -745,12 +968,172 @@ fn paint(text: &str, style: AnsiStyle, color: bool) -> String {
     }
 }
 
-/// Make Launchpad text safe to show on a terminal: control characters other
-/// than newlines (for example, escape sequences in a title) are replaced, and
-/// tabs become spaces.
+/// Extract a Launchpad username or resource name from the final path segment
+/// of a link, stripping any leading `~`.
+pub fn link_name(link: Option<&str>) -> Option<String> {
+    link.and_then(|url| url.rsplit('/').next())
+        .map(|segment| segment.trim_start_matches('~'))
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+}
+
+/// Format an optional Launchpad timestamp as `YYYY-MM-DD`.
+pub fn format_date(timestamp: Option<jiff::Timestamp>) -> Option<String> {
+    timestamp.map(|ts| ts.strftime("%Y-%m-%d").to_string())
+}
+
+/// Format an optional Launchpad timestamp as `YYYY-MM-DD HH:MM`.
+pub fn format_datetime(timestamp: Option<jiff::Timestamp>) -> Option<String> {
+    timestamp.map(|ts| ts.strftime("%Y-%m-%d %H:%M").to_string())
+}
+
+/// Format a raw timestamp string as `YYYY-MM-DD HH:MM` when it parses as RFC 3339,
+/// or return the trimmed input string as-is.
+pub fn format_timestamp_str(raw: &str) -> String {
+    let trimmed = raw.trim();
+    match trimmed.parse::<jiff::Timestamp>() {
+        Ok(ts) => ts.strftime("%Y-%m-%d %H:%M").to_string(),
+        Err(_) => trimmed.to_string(),
+    }
+}
+
+/// Color style for a Launchpad status label, chosen to work on both light and
+/// dark terminal themes.
+pub fn status_style(status: &str) -> Option<AnsiStyle> {
+    match status {
+        "Fix Released"
+        | "Fix Committed"
+        | "Resolved"
+        | "Answered"
+        | "Merged"
+        | "Accepted"
+        | "Done"
+        | "Published"
+        | "Supported"
+        | "Current Stable Release"
+        | "Active"
+        | "active"
+        | "Approved"
+        | "Good progress"
+        | "Beta available"
+        | "Implemented"
+        | "Online"
+        | "Started" => Some(OK),
+        "In Progress" | "Triaged" | "Confirmed" | "Needs review" | "Needs Review"
+        | "Needs Approval" | "Pending" | "Unapproved" | "Incomplete" | "Work in progress"
+        | "Slow progress" | "Blocked" => Some(WARNING),
+        "Rejected" | "Failed" | "Expired" | "Invalid" | "Won't Fix" | "revoked" | "Unreachable"
+        | "Abandoned" | "Superseded" | "Obsolete" | "Deactivated" => Some(ERROR),
+        "New" | "Opinion" | "Open" | "Needs information" | "Unknown" | "open" | "Not started"
+        | "Informational" | "Deferred" | "Entry" | "Development Focus" | "Pre-release Freeze" => {
+            Some(NAME)
+        }
+        _ => None,
+    }
+}
+
+/// Color style for a bug importance or specification priority label.
+pub fn importance_style(importance: &str) -> Option<AnsiStyle> {
+    match importance {
+        "Critical" => Some(ERROR),
+        "High" | "Medium" => Some(WARNING),
+        "Low" | "Wishlist" | "Undecided" => Some(NAME),
+        _ => None,
+    }
+}
+
+/// Map a field/column label and its sanitized value to an optional semantic color style.
+fn field_value_style(label: &str, value: &str) -> Option<AnsiStyle> {
+    match label {
+        "Status" | "Lifecycle" | "Implementation" | "Impl" | "Upload Status" | "Definition" => {
+            status_style(value)
+        }
+        "Importance" | "Priority" => importance_style(value),
+        "Tags" | "Author" | "Person" | "Subscribed By" | "Assignee" | "Member" => {
+            (!matches!(value, "none" | "—" | "unknown" | "(none)")).then_some(NAME)
+        }
+        _ => None,
+    }
+}
+
+/// Colorize matching data cells in a `comfy-table` grid (after the header
+/// separator) or stacked representation without altering layout widths.
+fn colorize_table_cells(rendered: &mut String, columns: &[Column]) {
+    let mut out = String::with_capacity(rendered.len());
+    let mut in_body = false;
+    for line in rendered.split_inclusive('\n') {
+        let (body, newline) = match line.strip_suffix('\n') {
+            Some(stripped) => (stripped, "\n"),
+            None => (line, ""),
+        };
+        if body.starts_with('╞') {
+            in_body = true;
+            out.push_str(line);
+            continue;
+        }
+        if body.starts_with('└') {
+            in_body = false;
+            out.push_str(line);
+            continue;
+        }
+        if in_body
+            && body.starts_with('│')
+            && body.ends_with('│')
+            && body.len() >= 2 * '│'.len_utf8()
+        {
+            let inner = &body['│'.len_utf8()..body.len() - '│'.len_utf8()];
+            let cells: Vec<&str> = inner.split('┆').collect();
+            if cells.len() == columns.len() {
+                out.push('│');
+                for (idx, cell) in cells.iter().enumerate() {
+                    if idx > 0 {
+                        out.push('┆');
+                    }
+                    let trimmed = cell.trim();
+                    if !trimmed.is_empty()
+                        && let Some(style) = field_value_style(columns[idx].label, trimmed)
+                        && let Some(pos) = cell.find(trimmed)
+                    {
+                        out.push_str(&cell[..pos]);
+                        out.push_str(&paint(trimmed, style, true));
+                        out.push_str(&cell[pos + trimmed.len()..]);
+                    } else {
+                        out.push_str(cell);
+                    }
+                }
+                out.push('│');
+                out.push_str(newline);
+                continue;
+            }
+        } else if !in_body
+            && !body.starts_with('┌')
+            && !body.starts_with('├')
+            && !body.starts_with('│')
+            && let Some((label, rest)) = body.split_once(": ")
+        {
+            let trimmed = rest.trim();
+            if !trimmed.is_empty()
+                && let Some(style) = field_value_style(label, trimmed)
+                && let Some(pos) = rest.find(trimmed)
+            {
+                out.push_str(label);
+                out.push_str(": ");
+                out.push_str(&rest[..pos]);
+                out.push_str(&paint(trimmed, style, true));
+                out.push_str(&rest[pos + trimmed.len()..]);
+                out.push_str(newline);
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    *rendered = out;
+}
+
 /// Remove ANSI SGR styling sequences (`ESC [ digits/semicolons m`) emitted
 /// by legacy formatters. Anything else, including other escape sequences,
 /// is kept unchanged for the renderer's own sanitizing.
+#[cfg(test)]
 fn strip_sgr(text: &str) -> String {
     let mut stripped = String::with_capacity(text.len());
     let mut rest = text;
@@ -780,6 +1163,31 @@ fn clean(text: &str) -> String {
             c => c,
         })
         .collect()
+}
+
+/// Sanitize text for `plain` mode: keep ASCII punctuation and words rather than
+/// decorative symbols, em/en dashes, box drawing, or emoji, and neutralize
+/// control characters.
+pub(crate) fn clean_plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' => out.push('\n'),
+            '\r' => {}
+            '\t' => out.push(' '),
+            '—' | '–' => out.push('-'),
+            '✓' => out.push_str("OK"),
+            '✗' => out.push_str("Error"),
+            '●'
+            | 'ℹ'
+            | '\u{2500}'..='\u{257F}'
+            | '\u{2600}'..='\u{27BF}'
+            | '\u{1F300}'..='\u{1FAFF}' => {}
+            c if c.is_control() => out.push('\u{FFFD}'),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 impl RichRenderer {
@@ -829,7 +1237,11 @@ impl RichRenderer {
                     .collect::<Vec<_>>(),
             );
         }
-        out.push_str(&format!("{table}\n"));
+        let mut rendered = format!("{table}\n");
+        if self.style.color {
+            colorize_table_cells(&mut rendered, &records.columns);
+        }
+        out.push_str(&rendered);
         out.push_str(&noun.count(records.rows.len()));
         if let Some(hint) = hint {
             out.push(' ');
@@ -856,10 +1268,26 @@ impl Renderer for RichRenderer {
                 }
                 Block::Note(spans) => out.push_str(&format!("  {}\n", self.spans(spans))),
                 Block::Field(label, value) => {
-                    out.push_str(&format!("  {label}: {}\n", clean(value)));
+                    let cleaned = clean(value);
+                    let formatted = if self.style.color
+                        && let Some(style) = field_value_style(label, &cleaned)
+                    {
+                        paint(&cleaned, style, true)
+                    } else {
+                        cleaned
+                    };
+                    out.push_str(&format!("  {label}: {formatted}\n"));
                 }
                 Block::List { noun, empty, hint } => {
                     self.list(&mut out, &report.records, *noun, empty, hint.as_deref());
+                }
+                Block::Table {
+                    records,
+                    noun,
+                    empty,
+                    hint,
+                } => {
+                    self.list(&mut out, records, *noun, empty, hint.as_deref());
                 }
                 Block::Break => out.push('\n'),
             }
@@ -873,8 +1301,8 @@ impl PlainRenderer {
         spans
             .iter()
             .map(|span| match span {
-                Span::Text(text) | Span::Name(text) => clean(text),
-                Span::Command(command) => format!("\"{}\"", clean(command)),
+                Span::Text(text) | Span::Name(text) => clean_plain(text),
+                Span::Command(command) => format!("\"{}\"", clean_plain(command)),
             })
             .collect()
     }
@@ -882,7 +1310,7 @@ impl PlainRenderer {
     /// `Label: value`, with continuation lines indented so each record stays
     /// one block of lines.
     fn field(out: &mut String, label: &str, value: Option<&str>) {
-        let value = value.map_or_else(|| "none".to_string(), clean);
+        let value = value.map_or_else(|| "none".to_string(), clean_plain);
         out.push_str(label);
         out.push_str(": ");
         out.push_str(&value.replace('\n', "\n  "));
@@ -891,19 +1319,22 @@ impl PlainRenderer {
 
     fn list(out: &mut String, records: &Records, noun: Noun, empty: &str, hint: Option<&str>) {
         if records.rows.is_empty() {
-            out.push_str(&clean(empty));
+            out.push_str(&clean_plain(empty));
             out.push('\n');
             return;
         }
         out.push_str(&noun.count(records.rows.len()));
         if let Some(hint) = hint {
             out.push(' ');
-            out.push_str(&clean(hint));
+            out.push_str(&clean_plain(hint));
         }
         out.push('\n');
         for row in &records.rows {
             out.push('\n');
             for (column, value) in records.columns.iter().zip(row) {
+                if value.as_deref() == Some("") {
+                    continue;
+                }
                 Self::field(out, column.label, value.as_deref());
             }
         }
@@ -916,7 +1347,7 @@ impl Renderer for PlainRenderer {
         for block in &report.blocks {
             match block {
                 Block::Heading(text) => {
-                    out.push_str(&clean(text));
+                    out.push_str(&clean_plain(text));
                     out.push('\n');
                 }
                 Block::Status(level, spans) => {
@@ -931,6 +1362,14 @@ impl Renderer for PlainRenderer {
                 Block::Field(label, value) => Self::field(&mut out, label, Some(value)),
                 Block::List { noun, empty, hint } => {
                     Self::list(&mut out, &report.records, *noun, empty, hint.as_deref());
+                }
+                Block::Table {
+                    records,
+                    noun,
+                    empty,
+                    hint,
+                } => {
+                    Self::list(&mut out, records, *noun, empty, hint.as_deref());
                 }
                 Block::Break => out.push('\n'),
             }
@@ -1476,7 +1915,16 @@ pub(crate) mod tests {
         assert!(!rendered.contains('\u{1b}'), "ANSI escape in plain output");
         for c in rendered.chars() {
             assert!(
-                !matches!(c, '\u{2500}'..='\u{257F}' | '✓' | '✗' | '—' | '\u{1F300}'..='\u{1FAFF}'),
+                !matches!(
+                    c,
+                    '\u{2500}'..='\u{257F}'
+                        | '\u{2600}'..='\u{27BF}'
+                        | '\u{1F300}'..='\u{1FAFF}'
+                        | '—'
+                        | '–'
+                        | '●'
+                        | 'ℹ'
+                ),
                 "decorative character {c:?} in plain output:\n{rendered}"
             );
         }

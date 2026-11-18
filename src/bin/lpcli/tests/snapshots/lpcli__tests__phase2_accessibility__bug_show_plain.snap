@@ -1,0 +1,36 @@
+---
+source: src/bin/lpcli/tests/phase2_accessibility.rs
+expression: "plain.replace(&base, \"[server]\")"
+---
+Bug #42
+Title: curl crashes on "quoted" URLs
+Tags: crash, noble
+Affects: 3 user(s)
+URL: https://bugs.launchpad.net/bugs/42
+Description: Steps:
+  1. curl 'http://x'
+  2. crash
+
+2 bug tasks found.
+
+Target: curl (Ubuntu)
+Status: Confirmed
+Importance: Medium
+Assignee: alice
+
+Target: curl
+Series: noble
+Status: In Progress
+Importance: Medium
+Assignee: none
+
+Attachments
+2 attachments found.
+
+Title: trace-1.txt
+Type: Patch
+URL: https://launchpadlibrarian.net/1/trace-1.txt
+
+Title: trace-2.txt
+Type: Unspecified
+URL: none

@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+name	title	priority	lifecycle_status	implementation_status
+a-spec	Spec a-spec	High	Started	Good progress
+old-spec	Old spec	Low	Complete	Implemented

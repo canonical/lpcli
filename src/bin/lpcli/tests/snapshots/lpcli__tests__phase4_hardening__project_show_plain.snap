@@ -1,0 +1,9 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+Launchpad
+Name: launchpad
+Summary: Collaboration platform.
+Website: https://launchpad.net/
+Launchpad: https://launchpad.net/launchpad

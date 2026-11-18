@@ -270,15 +270,25 @@ impl Interaction for ConsoleInteraction {
     fn choose(&self, kind: &str, labels: &[String]) -> Result<usize> {
         use std::io::Write;
 
-        eprintln!("Several {kind}s are available:");
-        for (index, label) in labels.iter().enumerate() {
-            eprintln!("  {}. {label}", index + 1);
-        }
-        eprint!("Choose a {kind} [1-{}]: ", labels.len());
+        eprint!("{}", format_choice_prompt(kind, labels));
         let _ = std::io::stderr().flush();
 
         read_selection(&mut std::io::stdin().lock(), kind, labels.len())
     }
+}
+
+/// Format a numbered multiple-choice prompt with plain, screen-reader friendly
+/// instructions (no square-bracket range notation).
+pub fn format_choice_prompt(kind: &str, labels: &[String]) -> String {
+    let mut out = format!("Several {kind}s are available:\n");
+    for (index, label) in labels.iter().enumerate() {
+        out.push_str(&format!("  {}. {label}\n", index + 1));
+    }
+    out.push_str(&format!(
+        "Choose a {kind} (enter a number from 1 to {}): ",
+        labels.len()
+    ));
+    out
 }
 
 /// Shown on stderr when the key waits for user presence.
