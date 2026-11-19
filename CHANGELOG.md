@@ -15,13 +15,6 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 - `git list --target` to enumerate the Git repositories of a project,
   distribution source package, or `~person`/`~team`, including personal
   forks.
-
-### Fixed
-
-- `git list-person-repos` queried `~person/+git`, which is a web-UI page
-  that does not exist on the API host, and failed for every name. It now
-  uses the root `/+git` collection's `getRepositories` operation with a
-  `~owner` target, so person and team listings work.
 - Complete snapshot coverage across `schema`, structured errors, remaining `git`,
   `queue`, and domain TSV list outputs, representative `plain` and `rich`
   reports across all command domains, and `bug`/`queue`/`package` partial
@@ -37,6 +30,13 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
   milestones, per-file results, and a summary; `--progress none` disables
   progress output).
 
+### Fixed
+
+- `git list-person-repos` queried `~person/+git`, which is a web-UI page
+  that does not exist on the API host, and failed for every name. It now
+  uses the root `/+git` collection's `getRepositories` operation with a
+  `~owner` target, so person and team listings work.
+
 ### Changed
 
 - Expanded `plain` sanitization (`clean_plain`, `download` progress messages,
@@ -49,8 +49,19 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
   handlers and replacing `colored` overrides with `anstyle`.
 - Applied a consistent four-color ANSI palette in `rich` mode for status,
   importance/priority, tag, and person/team values when color is enabled, and
-  normalized Launchpad usernames and timestamps across comment views (`bug
-  comments`, `git comments`, `question messages`).
+  normalized Launchpad usernames and timestamps across views.
+- Polished `rich` output with heading underlines scaled to display width
+  (capped at terminal width), lightweight borderless tables
+  (`UTF8_LIGHT_TABLE`/`ASCII_LIGHT_TABLE`) with leading result counts before
+  tables and comment threads, `"none"` for missing values instead of `"—"`, and
+  local-timezone timestamps with relative hints (such as `(2 days ago)`) in
+  `rich` mode while keeping `plain` and `tsv` deterministic UTC.
+- Unified `git comments` and `question messages` onto `Block::Comments`
+  (width-aware cards in `rich` and labeled records with leading counts in
+  `plain`).
+- Routed `package download` and `queue download` announcement banners to stderr
+  without paging (`Output::write_stderr_report`), and sanitized interactive
+  `login` and `hardware-token` stderr notices via `Output::write_stderr_line`.
 - Accessible `plain` output across all `bug` commands (`show`, `tasks`,
   `comments`, `subscriptions`, `attachments`, `watches`, and mutations), with
   leading result counts, labeled `Field: value` records, explicit `Series:`
@@ -64,7 +75,7 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 ## [0.5.0] - 2026-11-17
 
 This is a SemVer-incompatible release that implements Phases 0 and 1 of
-[`plans/improve_user_interface_2026-11-16.md`](plans/improve_user_interface_2026-11-16.md).
+[`plans/completed/improve_user_interface_2026-11-16.md`](plans/completed/improve_user_interface_2026-11-16.md).
 The JSON output contract is documented in
 [`docs/json-output.md`](docs/json-output.md).
 

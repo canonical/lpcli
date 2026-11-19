@@ -522,7 +522,7 @@ pub(crate) fn queue_search_report(search: &QueueSearch) -> Report {
                 upload.pocket.clone(),
                 upload.status.clone(),
                 upload.display_arches.clone(),
-                output::format_datetime(upload.date_created),
+                upload.date_created.map(|ts| ts.to_string()),
             ]
         })
         .collect();
@@ -547,34 +547,13 @@ pub(crate) fn queue_search_report(search: &QueueSearch) -> Report {
         json: search.page.raw.clone(),
         records: Records {
             columns: vec![
-                Column {
-                    label: "Package",
-                    key: "package_name",
-                },
-                Column {
-                    label: "Version",
-                    key: "package_version",
-                },
-                Column {
-                    label: "Component",
-                    key: "component_name",
-                },
-                Column {
-                    label: "Pocket",
-                    key: "pocket",
-                },
-                Column {
-                    label: "Status",
-                    key: "status",
-                },
-                Column {
-                    label: "Archs",
-                    key: "display_arches",
-                },
-                Column {
-                    label: "Created",
-                    key: "date_created",
-                },
+                Column::new("Package", "package_name"),
+                Column::new("Version", "package_version"),
+                Column::new("Component", "component_name"),
+                Column::new("Pocket", "pocket"),
+                Column::new("Status", "status"),
+                Column::new("Archs", "display_arches"),
+                Column::datetime("Created", "date_created"),
             ],
             rows,
         },
@@ -900,7 +879,7 @@ pub(crate) async fn handle_queue_download<O: QueueOutput + ?Sized>(
     } else {
         if output.mode() == OutputMode::Rich && output.progress() == download::ProgressMode::Rich {
             let upload = &target.upload.value;
-            output.print(&text_report(vec![Block::Heading(format!(
+            output.write_stderr_report(&text_report(vec![Block::Heading(format!(
                 "Downloading {} file(s) for {} ({})",
                 urls.len(),
                 upload_name(upload),
@@ -1275,30 +1254,12 @@ pub(crate) async fn queue_info(
 fn binary_records(binaries: &[&queue::BinaryProperties]) -> Records {
     Records {
         columns: vec![
-            Column {
-                label: "Package",
-                key: "name",
-            },
-            Column {
-                label: "Version",
-                key: "version",
-            },
-            Column {
-                label: "Architecture",
-                key: "architecture",
-            },
-            Column {
-                label: "Component",
-                key: "component",
-            },
-            Column {
-                label: "Section",
-                key: "section",
-            },
-            Column {
-                label: "Priority",
-                key: "priority",
-            },
+            Column::new("Package", "name"),
+            Column::new("Version", "version"),
+            Column::new("Architecture", "architecture"),
+            Column::new("Component", "component"),
+            Column::new("Section", "section"),
+            Column::new("Priority", "priority"),
         ],
         rows: binaries
             .iter()
@@ -1356,26 +1317,28 @@ impl QueueInfo {
         );
         field("Component", upload.component_name.clone());
         field("Pocket", upload.pocket.clone());
-        field(
-            "Created",
-            upload
-                .date_created
-                .map(|d| d.strftime("%Y-%m-%d %H:%M UTC").to_string()),
-        );
+        if let Some(created) = upload.date_created {
+            blocks.push(Block::Timestamp(
+                "Created",
+                created,
+                TimestampPrecision::DateTime,
+            ));
+        }
         if let Some(log) = self.logs.as_ref().and_then(|logs| {
             logs.value
                 .iter()
                 .find(|log| log.new_status.as_deref() == Some("Rejected"))
         }) {
-            field(
-                "Reason",
-                log.comment.clone().filter(|comment| !comment.is_empty()),
-            );
-            field(
-                "Rejected",
-                log.date_created
-                    .map(|d| d.strftime("%Y-%m-%d %H:%M UTC").to_string()),
-            );
+            if let Some(reason) = log.comment.clone().filter(|comment| !comment.is_empty()) {
+                blocks.push(Block::Field("Reason", reason));
+            }
+            if let Some(rejected) = log.date_created {
+                blocks.push(Block::Timestamp(
+                    "Rejected",
+                    rejected,
+                    TimestampPrecision::DateTime,
+                ));
+            }
         }
         let mut reports = vec![text_report(blocks)];
 

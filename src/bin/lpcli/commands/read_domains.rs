@@ -16,7 +16,7 @@ use serde_json::Value;
 // ---------------------------------------------------------------------------
 
 fn column(label: &'static str, key: &'static str) -> Column {
-    Column { label, key }
+    Column::new(label, key)
 }
 
 fn noun(singular: &'static str, plural: &'static str) -> Noun {
@@ -80,10 +80,6 @@ fn raw_entries(collection: &Value) -> &[Value] {
 
 fn flag(value: Option<bool>) -> Option<String> {
     value.map(|value| value.to_string())
-}
-
-fn day(value: Option<jiff::Timestamp>) -> Option<String> {
-    output::format_date(value)
 }
 
 /// The final path segment of a Launchpad link, without a leading `~`, e.g.
@@ -263,7 +259,7 @@ pub(crate) async fn person_report(
                     vec![
                         link_name(m.member_link.as_deref()),
                         m.status.clone(),
-                        day(m.date_joined),
+                        m.date_joined.map(|ts| ts.to_string()),
                     ]
                 })
                 .collect();
@@ -274,7 +270,7 @@ pub(crate) async fn person_report(
                 vec![
                     column("Member", "member"),
                     column("Status", "status"),
-                    column("Since", "date_joined"),
+                    Column::date("Since", "date_joined"),
                 ],
                 rows,
             )
@@ -641,7 +637,7 @@ pub(crate) async fn project_report(
                 .map(|r| {
                     vec![
                         r.version.clone(),
-                        day(r.date_released),
+                        r.date_released.map(|ts| ts.to_string()),
                         r.release_notes.clone(),
                     ]
                 })
@@ -652,7 +648,7 @@ pub(crate) async fn project_report(
                 "No releases found.",
                 vec![
                     column("Version", "version"),
-                    column("Release Date", "date_released"),
+                    Column::date("Release Date", "date_released"),
                     column("Notes", "release_notes"),
                 ],
                 rows,
@@ -866,47 +862,50 @@ pub(crate) async fn question_report(
     })
 }
 
-/// Messages read as a conversation in `rich` and `plain`, and as one record
-/// per message in `tsv`.
-fn question_messages_report(found: &Raw<Vec<questions::QuestionMessage>>) -> Report {
-    let mut blocks = Vec::new();
-    let mut rows = Vec::new();
+/// Messages read as width-aware cards in `rich`, labeled records in `plain`,
+/// and one record per message in `tsv`.
+pub(crate) fn question_messages_report(found: &Raw<Vec<questions::QuestionMessage>>) -> Report {
+    let mut entries = Vec::with_capacity(found.value.len());
+    let mut rows = Vec::with_capacity(found.value.len());
     for m in &found.value {
         let index = m.index.map(|index| index.to_string());
         let author = link_name(m.owner_link.as_deref());
-        let date = output::format_datetime(m.date_created);
-        blocks.push(Block::Heading(format!(
-            "Message #{}: {}, {}",
-            index.as_deref().unwrap_or("?"),
-            author.as_deref().unwrap_or("unknown"),
-            date.as_deref().unwrap_or("unknown date"),
-        )));
-        if let Some(action) = &m.action {
-            blocks.push(Block::Field("Action", action.clone()));
-        }
-        blocks.push(Block::Note(vec![Span::Text(
-            m.content.clone().unwrap_or_default(),
-        )]));
-        blocks.push(Block::Break);
+        let raw_date = m.date_created.map(|ts| ts.to_string());
+        let content = m.content.clone().unwrap_or_default();
+        entries.push(CommentEntry {
+            label_field: "Message",
+            label: format!("#{}", index.as_deref().unwrap_or("?")),
+            author: author.clone(),
+            date: m.date_created.map(CommentDate::Timestamp),
+            details: m
+                .action
+                .as_ref()
+                .map(|action| vec![("Action", action.clone())])
+                .unwrap_or_default(),
+            content_field: "Content",
+            content: content.clone(),
+            attachments: Vec::new(),
+        });
         rows.push(vec![
             index,
             author,
-            date,
+            raw_date,
             m.action.clone(),
-            m.content.clone(),
+            m.content.is_some().then_some(content),
         ]);
     }
-    if found.value.is_empty() {
-        blocks.push(Block::Note(vec![Span::Text("No messages found.".into())]));
-    }
     Report {
-        blocks,
+        blocks: vec![Block::Comments {
+            entries,
+            noun: noun("message", "messages"),
+            empty: "No messages found.".into(),
+        }],
         json: found.raw.clone(),
         records: Records {
             columns: vec![
                 column("Index", "index"),
                 column("Author", "owner"),
-                column("Date", "date_created"),
+                Column::datetime("Date", "date_created"),
                 column("Action", "action"),
                 column("Content", "content"),
             ],
@@ -942,7 +941,13 @@ pub(crate) async fn translation_report(
             let rows = found
                 .value
                 .iter()
-                .map(|e| vec![e.path.clone(), e.status.clone(), day(e.date_created)])
+                .map(|e| {
+                    vec![
+                        e.path.clone(),
+                        e.status.clone(),
+                        e.date_created.map(|ts| ts.to_string()),
+                    ]
+                })
                 .collect();
             list_report(
                 found.raw,
@@ -951,7 +956,7 @@ pub(crate) async fn translation_report(
                 vec![
                     column("Path", "path"),
                     column("Status", "status"),
-                    column("Date", "date_created"),
+                    Column::date("Date", "date_created"),
                 ],
                 rows,
             )
@@ -1049,7 +1054,7 @@ pub(crate) async fn handle_package_download(
             if output.mode() == OutputMode::Rich
                 && output.progress() == download::ProgressMode::Rich
             {
-                output.print(announcement)
+                output.write_stderr_report(announcement)
             } else {
                 Ok(())
             }

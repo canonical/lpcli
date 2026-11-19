@@ -2,10 +2,9 @@
 source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
 expression: "redact_text(&rendered, base)"
 ---
-┌──────────────┬────────────┬─────────┐
-│ Name         ┆ Store Name ┆ Private │
-╞══════════════╪════════════╪═════════╡
-│ my-snap      ┆ my-snap    ┆ false   │
-│ private-snap ┆ —          ┆ true    │
-└──────────────┴────────────┴─────────┘
 2 snap recipes found.
+
+ Name         ┆ Store Name ┆ Private 
+──────────────┼────────────┼─────────
+ my-snap      ┆ my-snap    ┆ false   
+ private-snap ┆ none       ┆ true

@@ -2,10 +2,9 @@
 source: src/bin/lpcli/tests/phase3_visual_polish.rs
 expression: "render_rich(&outcome, false)"
 ---
-┌───────────────┬─────────────┬───────────────────────────────────────────────────┐
-│ Title         ┆ Type        ┆ URL                                               │
-╞═══════════════╪═════════════╪═══════════════════════════════════════════════════╡
-│ debdiff.patch ┆ Patch       ┆ https://launchpadlibrarian.net/2001/debdiff.patch │
-│ journal.txt   ┆ Unspecified ┆ https://launchpadlibrarian.net/2002/journal.txt   │
-└───────────────┴─────────────┴───────────────────────────────────────────────────┘
 2 attachments found.
+
+ Title         ┆ Type        ┆ URL                                               
+───────────────┼─────────────┼───────────────────────────────────────────────────
+ debdiff.patch ┆ Patch       ┆ https://launchpadlibrarian.net/2001/debdiff.patch 
+ journal.txt   ┆ Unspecified ┆ https://launchpadlibrarian.net/2002/journal.txt

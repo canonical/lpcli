@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-16
 - **Status:** Accepted (Phase 0 of
-  [`improve_user_interface_2026-11-16.md`](improve_user_interface_2026-11-16.md))
+  [`improve_user_interface_2026-11-16.md`](completed/improve_user_interface_2026-11-16.md))
 - **Applies to:** the library's read functions and the `json` output mode
 
 ## Context

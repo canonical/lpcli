@@ -1606,18 +1606,9 @@ fn accessibility_env_modes_end_to_end() {
             Block::Table {
                 records: Records {
                     columns: vec![
-                        Column {
-                            label: "Target",
-                            key: "target",
-                        },
-                        Column {
-                            label: "Series",
-                            key: "series",
-                        },
-                        Column {
-                            label: "Status",
-                            key: "status",
-                        },
+                        Column::new("Target", "target"),
+                        Column::new("Series", "series"),
+                        Column::new("Status", "status"),
                     ],
                     rows: vec![vec![
                         Some("curl".into()),

@@ -2,10 +2,9 @@
 source: src/bin/lpcli/tests/phase3_visual_polish.rs
 expression: "render_rich(&outcome, false)"
 ---
-┌───────────────┬────────┬──────────────┬────────────┬──────────┐
-│ Target        ┆ Series ┆ Status       ┆ Importance ┆ Assignee │
-╞═══════════════╪════════╪══════════════╪════════════╪══════════╡
-│ curl (Ubuntu) ┆        ┆ Fix Released ┆ Medium     ┆ alice    │
-│ curl          ┆ jammy  ┆ Invalid      ┆ Low        ┆ —        │
-└───────────────┴────────┴──────────────┴────────────┴──────────┘
 2 bug tasks found.
+
+ Target        ┆ Series ┆ Status       ┆ Importance ┆ Assignee 
+───────────────┼────────┼──────────────┼────────────┼──────────
+ curl (Ubuntu) ┆        ┆ Fix Released ┆ Medium     ┆ alice    
+ curl          ┆ jammy  ┆ Invalid      ┆ Low        ┆ none

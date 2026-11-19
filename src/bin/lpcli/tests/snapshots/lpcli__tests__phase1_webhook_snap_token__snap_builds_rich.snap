@@ -2,10 +2,9 @@
 source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
 expression: "redact_text(&rendered, base)"
 ---
-┌─────────────────────────────────────────────────────────────┬─────────┬───────┬───────────────┐
-│ Title                                                       ┆ Pocket  ┆ Score ┆ Upload Status │
-╞═════════════════════════════════════════════════════════════╪═════════╪═══════╪═══════════════╡
-│ amd64 build of my-snap snap package in ubuntu noble-updates ┆ Updates ┆ 2510  ┆ Unscheduled   │
-│ arm64 build of my-snap snap package in ubuntu noble-updates ┆ Updates ┆ 2505  ┆ Unscheduled   │
-└─────────────────────────────────────────────────────────────┴─────────┴───────┴───────────────┘
 2 pending builds found.
+
+ Title                                                       ┆ Pocket  ┆ Score ┆ Upload Status 
+─────────────────────────────────────────────────────────────┼─────────┼───────┼───────────────
+ amd64 build of my-snap snap package in ubuntu noble-updates ┆ Updates ┆ 2510  ┆ Unscheduled   
+ arm64 build of my-snap snap package in ubuntu noble-updates ┆ Updates ┆ 2505  ┆ Unscheduled

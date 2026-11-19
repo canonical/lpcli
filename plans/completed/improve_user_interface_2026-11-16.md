@@ -1,9 +1,10 @@
 # Plan: Improving the lpcli Command-Line Interface
 
 - **Date:** 2026-11-16
-- **Status:** Phases 0 and 1 implemented in lpcli 0.5.0 (2026-11-17);
-  Phases 2 to 4 implemented (2026-11-18), with manual Orca and BRLTTY
-  desktop testing tracked in the release checklist
+- **Status:** Complete (2026-11-19): Phases 0 and 1 implemented in lpcli 0.5.0
+  (2026-11-17); Phases 2 to 4, the remaining rich-formatting work, and
+  code-review fixes implemented (2026-11-19), with manual Orca and BRLTTY
+  desktop testing deferred to the standing release checklist in `README.md`.
 - **Baseline:** lpcli 0.4.0
 - **Target release:** lpcli 0.5.0 (a SemVer-incompatible release) for
   Phases 0 and 1
@@ -324,7 +325,7 @@ fail.
 ### Phase 0: Foundation
 
 **Status: implemented.** The decision record is
-[`decision_0001_preserve_launchpad_json.md`](decision_0001_preserve_launchpad_json.md).
+[`decision_0001_preserve_launchpad_json.md`](../decision_0001_preserve_launchpad_json.md).
 Decisions made during Phase 0:
 
 - **Unported commands and structured modes.** An explicit `--format json` or
@@ -384,7 +385,7 @@ in later releases.
 ### Phase 1: Agent efficiency and the public contract
 
 **Status: implemented** in 0.5.0, released 2026-11-17. The contract is
-[`docs/json-output.md`](../docs/json-output.md), version 1. Decisions made
+[`docs/json-output.md`](../../docs/json-output.md), version 1. Decisions made
 during Phase 1:
 
 - **JSON coverage.** `--format json` covers every read and mutation command,
@@ -486,7 +487,8 @@ error variant has a tested exit code, and the documentation examples pass.
 ### Phase 2: Accessibility
 
 **Status: implementation and automated checks complete (2026-11-18); manual
-Orca and BRLTTY testing pending human verification.**
+Orca and BRLTTY desktop testing deferred to the standing release checklist in
+`README.md` (not required to close this plan).**
 
 - All `bug` commands (`show`, `tasks`, `comments`, `subscriptions`,
   `attachments`, `watches`, and mutations) render accessible `plain` output
@@ -500,32 +502,42 @@ Orca and BRLTTY testing pending human verification.**
   in words without bracketed range notation.
 - Added Phase 2 unit and insta snapshot tests verified under `plain`, `NO_COLOR`,
   and `TERM=dumb`; manual screen-reader/braille checks with Orca and BRLTTY on
-  Ubuntu 26.04 remain to be run interactively.
+  Ubuntu 26.04 are deferred to the standing release checklist.
 
 1. Implement the `plain` renderer and the accessibility setting.
 2. Replace symbols with words, and add quiet progress reporting.
 3. Review prompt text with assistive technology in mind.
-4. Test manually with Orca and BRLTTY.
+4. Test manually with Orca and BRLTTY (deferred to the release checklist).
 
 **Done when:** `plain` output contains no ANSI escape codes, box-drawing
-characters, or emoji, and the manual checks pass.
+characters, or emoji (verified automatically), with manual checks tracked on the
+release checklist.
 
 ### Phase 3: Visual polish
 
-**Status: complete (2026-11-18).**
+**Status: complete (2026-11-19).**
 
 - Ported every remaining `bug` subcommand to `output.rs` (`Report`/`Block::Table`)
   and routed remaining stdout writes (`identity`, `webhook`, `snap`,
   `access-token`, `queue`, `skills`) through `Output`, leaving no `println!`
-  calls outside `output.rs`.
+  calls outside `output.rs`. Download announcements (`package download`,
+  `queue download`) route directly to stderr without paging via
+  `Output::write_stderr_report`, and interactive `login`/`hardware-token`
+  stderr notices are sanitized via `Output::write_stderr_line`.
 - Removed `colored` overrides from CLI dispatch and applied the four-color
   light/dark-safe `anstyle` palette in `RichRenderer` for semantic statuses,
-  importances/priorities, tags, and person/team values when color is enabled,
-  preserving existing uncolored `rich` snapshots.
-- Normalized usernames (`output::link_name`, trimming leading `~`) and
-  timestamps (`output::format_date`, `output::format_datetime`,
-  `output::format_timestamp_str`) across `bug`, `git`, `queue`, `webhook`,
-  `identity`, and `read_domains`.
+  importances/priorities, tags, and person/team values when color is enabled.
+- Scaled `Block::Heading` underlines to heading display width capped at terminal
+  width, adopted lightweight borderless tables (`UTF8_LIGHT_TABLE`/
+  `ASCII_LIGHT_TABLE`) and width-aware comment cards across `bug comments`,
+  `git comments`, and `question messages` (`Block::Comments`), placed leading
+  counts before tables and comment threads, and replaced `"—"` missing values
+  with `"none"`.
+- Normalized usernames (`output::link_name`, trimming leading `~`) and formatted
+  timestamps in local system timezone with relative hints (such as
+  `(2 days ago)` on `Block::Timestamp` and `Block::Comments`) in `rich` mode,
+  while keeping `plain`, `tsv`, and fixed test outputs deterministic UTC
+  without a literal `" UTC"` suffix.
 - Added `--no-pager` and `$PAGER` paging in `Output` when stdout is a non-dumb
   terminal, `$PAGER` is non-empty and not `cat`, and rendered lines exceed
   `$LINES` (24 by default).

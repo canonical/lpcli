@@ -2,10 +2,9 @@
 source: src/bin/lpcli/tests/phase4_hardening.rs
 expression: rendered
 ---
-┌────┬──────────────┬────────────────┬─────────────────┬────────────┐
-│ ID ┆ Status       ┆ Source Branch  ┆ Target Branch   ┆ Date       │
-╞════╪══════════════╪════════════════╪═════════════════╪════════════╡
-│ 11 ┆ Needs review ┆ refs/heads/fix ┆ refs/heads/main ┆ 2026-03-04 │
-│ 12 ┆ Approved     ┆ refs/heads/fix ┆ refs/heads/main ┆ 2026-03-04 │
-└────┴──────────────┴────────────────┴─────────────────┴────────────┘
 2 merge proposals found. Use the ID value with --id for git comments or git diffs.
+
+ ID ┆ Status       ┆ Source Branch  ┆ Target Branch   ┆ Date       
+────┼──────────────┼────────────────┼─────────────────┼────────────
+ 11 ┆ Needs review ┆ refs/heads/fix ┆ refs/heads/main ┆ 2026-03-04 
+ 12 ┆ Approved     ┆ refs/heads/fix ┆ refs/heads/main ┆ 2026-03-04

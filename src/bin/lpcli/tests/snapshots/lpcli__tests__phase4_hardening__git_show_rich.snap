@@ -3,7 +3,7 @@ source: src/bin/lpcli/tests/phase4_hardening.rs
 expression: rendered
 ---
 ~owner/project/+git/repo
-────────────────────────────────────────
+────────────────────────
   Description: Repository description
   Type: Hosted
   Access: Public

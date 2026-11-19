@@ -3,6 +3,7 @@ source: src/bin/lpcli/tests/phase4_hardening.rs
 expression: rendered
 ---
 Review comments
+1 review comment found.
 
 Comment: #5
 Author: reviewer
@@ -12,6 +13,7 @@ Text: Looks good,
   but see inline.
 
 Inline comments
+2 inline comments found.
 
 Location: lib/model.py:5
 Author: reviewer
@@ -21,4 +23,5 @@ Text: Why True?
 
 Location: diff line 99
 Author: other
+Date: none
 Text: Unmapped

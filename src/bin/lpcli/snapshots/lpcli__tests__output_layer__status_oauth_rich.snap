@@ -3,10 +3,10 @@ source: src/bin/lpcli/tests.rs
 expression: rendered
 ---
 Authentication
-────────────────────────────────────────
+──────────────
 ✓ Logged in as ~someone
 
 Launchpad API Server
-────────────────────────────────────────
+────────────────────
 ✓ Online
   Endpoint: https://api.launchpad.net/devel/#service-root

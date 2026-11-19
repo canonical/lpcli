@@ -189,7 +189,7 @@ fn collection_json(entries: Vec<serde_json::Value>) -> serde_json::Value {
 }
 
 fn column(label: &'static str, key: &'static str) -> Column {
-    Column { label, key }
+    Column::new(label, key)
 }
 
 /// TSV records taken straight from Launchpad entries, so values are never
@@ -615,9 +615,12 @@ fn bug_comments_blocks(read: &BugCommentsRead, bug_id: u64) -> Vec<Block> {
                 })
                 .collect();
             CommentEntry {
+                label_field: "Comment",
                 label: format!("#{idx}"),
                 author: output::link_name(c.owner_link.as_deref()),
-                date: output::format_datetime(c.date_created),
+                date: c.date_created.map(CommentDate::Timestamp),
+                details: Vec::new(),
+                content_field: "Content",
                 content: c.content.clone().unwrap_or_default(),
                 attachments,
             }
@@ -637,7 +640,7 @@ fn bug_subscriptions_table_block(subs: &[bugs::BugSubscription], bug_id: u64) ->
     let columns = vec![
         column("Person", "person"),
         column("Subscribed By", "subscribed_by"),
-        column("Date", "date_created"),
+        Column::date("Date", "date_created"),
     ];
     let rows = subs
         .iter()
@@ -645,7 +648,7 @@ fn bug_subscriptions_table_block(subs: &[bugs::BugSubscription], bug_id: u64) ->
             vec![
                 output::link_name(s.person_link.as_deref()),
                 output::link_name(s.subscribed_by_link.as_deref()),
-                output::format_date(s.date_created),
+                s.date_created.map(|ts| ts.to_string()),
             ]
         })
         .collect();

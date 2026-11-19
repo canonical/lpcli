@@ -2,9 +2,8 @@
 source: src/bin/lpcli/tests/phase4_hardening.rs
 expression: rendered
 ---
-┌─────────┬─────────┬───────────┬─────────┬───────────┐
-│ Package ┆ Version ┆ Component ┆ Pocket  ┆ Status    │
-╞═════════╪═════════╪═══════════╪═════════╪═══════════╡
-│ hello   ┆ 2.10-3  ┆ main      ┆ Release ┆ Published │
-└─────────┴─────────┴───────────┴─────────┴───────────┘
 1 source publication found.
+
+ Package ┆ Version ┆ Component ┆ Pocket  ┆ Status    
+─────────┼─────────┼───────────┼─────────┼───────────
+ hello   ┆ 2.10-3  ┆ main      ┆ Release ┆ Published
