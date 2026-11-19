@@ -22,6 +22,7 @@ pub(crate) enum CommandResult {
     Mutation {
         report: Report,
         quiet: Option<String>,
+        sensitive: bool,
     },
 }
 
@@ -37,11 +38,29 @@ impl CommandResult {
         }
     }
 
-    fn print(&self, output: &Output, quiet: bool) -> lpcli::error::Result<()> {
-        let mut stdout = std::io::stdout().lock();
-        stdout.write_all(self.render(output, quiet).as_bytes())?;
-        stdout.flush()?;
-        Ok(())
+    pub(crate) fn print(&self, output: &Output, quiet: bool) -> lpcli::error::Result<()> {
+        match self {
+            Self::Mutation {
+                sensitive: true, ..
+            } if quiet => output
+                .write_raw(&self.render(output, true))
+                .map_err(|err| {
+                    lpcli::error::LpError::Partial(format!(
+                        "Launchpad issued an access token, but writing the secret to stdout failed: {err}."
+                    ))
+                }),
+            Self::Mutation {
+                report,
+                sensitive: true,
+                ..
+            } => output.write_raw(&output.render(report)).map_err(|err| {
+                lpcli::error::LpError::Partial(format!(
+                    "Launchpad issued an access token, but writing the secret to stdout failed: {err}."
+                ))
+            }),
+            Self::Mutation { .. } if quiet => output.write_raw(&self.render(output, true)),
+            Self::Read(report) | Self::Mutation { report, .. } => output.print(report),
+        }
     }
 }
 
@@ -89,6 +108,7 @@ fn entry_mutation<T>(entry: &Raw<T>, blocks: Vec<Block>) -> CommandResult {
             blocks,
             ..Report::json(entry.raw.clone())
         },
+        sensitive: false,
     }
 }
 
@@ -101,6 +121,7 @@ fn lpcli_mutation(blocks: Vec<Block>, lpcli: serde_json::Value) -> CommandResult
             blocks,
             ..Report::json(serde_json::json!({ "lpcli": lpcli }))
         },
+        sensitive: false,
     }
 }
 
@@ -109,7 +130,7 @@ fn ok(text: &str) -> Block {
 }
 
 fn day(timestamp: Option<jiff::Timestamp>) -> Option<String> {
-    timestamp.map(|d| d.strftime("%Y-%m-%d").to_string())
+    output::format_date(timestamp)
 }
 
 // ---------------------------------------------------------------------------
@@ -209,9 +230,7 @@ fn deliveries_report(deliveries: &Raw<Vec<webhooks::WebhookDelivery>>) -> Comman
         .iter()
         .map(|delivery| {
             vec![
-                delivery
-                    .date_sent
-                    .map(|d| d.strftime("%Y-%m-%d %H:%M").to_string()),
+                output::format_datetime(delivery.date_sent),
                 delivery.successful.map(|successful| successful.to_string()),
                 delivery.response_status_code.map(|code| code.to_string()),
                 delivery.pending.map(|pending| pending.to_string()),
@@ -255,7 +274,7 @@ fn webhook_pinged_report(delivery: &Raw<webhooks::WebhookDelivery>) -> CommandRe
     entry_mutation(delivery, blocks)
 }
 
-fn webhook_deleted_report(webhook_url: &str) -> CommandResult {
+pub(crate) fn webhook_deleted_report(webhook_url: &str) -> CommandResult {
     lpcli_mutation(
         vec![
             ok("Webhook deleted."),
@@ -491,7 +510,7 @@ pub(crate) async fn access_token_result(
 /// Launchpad returns only the plaintext secret, which is the whole result:
 /// JSON wraps it in an lpcli-defined object, and `--quiet` still prints it,
 /// because there is no `self_link` and the secret cannot be read again.
-fn access_token_issued_report(secret: String) -> CommandResult {
+pub(crate) fn access_token_issued_report(secret: String) -> CommandResult {
     CommandResult::Mutation {
         report: Report {
             blocks: vec![
@@ -507,6 +526,7 @@ fn access_token_issued_report(secret: String) -> CommandResult {
             ..Report::json(serde_json::json!({"lpcli": {"secret": secret}}))
         },
         quiet: Some(secret),
+        sensitive: true,
     }
 }
 

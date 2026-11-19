@@ -1,0 +1,28 @@
+---
+source: src/bin/lpcli/tests/phase3_visual_polish.rs
+expression: "render_rich(&outcome, false)"
+---
+Bug #42
+────────────────────────────────────────
+  Title: Daemon fails when XDG_RUNTIME_DIR is unset
+  Tags: packaging, regression
+  Affects: 14 user(s)
+  URL: https://bugs.launchpad.net/bugs/42
+  Description: Starts with exit code 1 unless runtime dir exists.
+
+┌───────────────┬────────┬─────────────┬────────────┬──────────┬───────┐
+│ Target        ┆ Series ┆ Status      ┆ Importance ┆ Assignee ┆ Watch │
+╞═══════════════╪════════╪═════════════╪════════════╪══════════╪═══════╡
+│ curl (Ubuntu) ┆        ┆ Confirmed   ┆ High       ┆ jdoe     ┆ —     │
+│ curl          ┆ noble  ┆ In Progress ┆ Critical   ┆ —        ┆ #9001 │
+└───────────────┴────────┴─────────────┴────────────┴──────────┴───────┘
+2 bug tasks found.
+
+Attachments
+────────────────────────────────────────
+┌───────────┬───────┬──────────────────────────────────────────────┐
+│ Title     ┆ Type  ┆ URL                                          │
+╞═══════════╪═══════╪══════════════════════════════════════════════╡
+│ fix.patch ┆ Patch ┆ https://launchpadlibrarian.net/999/fix.patch │
+└───────────┴───────┴──────────────────────────────────────────────┘
+1 attachment found.

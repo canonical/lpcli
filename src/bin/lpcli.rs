@@ -3,7 +3,7 @@
 //! Parse command-line arguments with `clap` and dispatch to the `lpcli` library.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -31,10 +31,12 @@ use commands::read_domains::*;
 use commands::webhook_snap_token::*;
 
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
-use colored::Colorize;
 
 use display::Display;
-use output::{Block, ColorChoice, Column, Level, Noun, Output, OutputMode, Records, Report, Span};
+use output::{
+    Block, ColorChoice, Column, Level, Noun, Output, OutputMode, ProgressChoice, Records, Report,
+    Span,
+};
 use ubuntu_info_rust::{Architecture, Pocket, SeriesInfo};
 
 use lpcli::{
@@ -418,6 +420,20 @@ struct Cli {
     )]
     color: ColorChoice,
 
+    /// How downloads report progress on stderr: auto, plain, rich, or none.
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        value_name = "MODE",
+        default_value_t = ProgressChoice::Auto,
+        long_help = "How downloads report progress on stderr. auto uses plain line-by-line \
+                     progress in plain mode or when stderr is not a terminal, none in json and \
+                     tsv modes, and animated progress bars in rich mode on a terminal. \
+                     --progress none turns progress output off."
+    )]
+    progress: ProgressChoice,
+
     /// Select comma-separated Launchpad attributes in JSON entries.
     #[arg(long, global = true, value_name = "FIELDS", value_delimiter = ',', value_parser = parse_field_name)]
     fields: Option<Vec<String>>,
@@ -429,6 +445,10 @@ struct Cli {
     /// Fail instead of prompting; implied when stdin is not a terminal.
     #[arg(long, global = true)]
     no_input: bool,
+
+    /// Do not pipe output through a pager.
+    #[arg(long, global = true)]
+    no_pager: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -2363,12 +2383,11 @@ const SKILL_DOC: &str = include_str!("../../SKILL.md");
 ///
 /// No authentication, network access, or Launchpad API client is involved:
 /// the documentation ships inside the binary itself.
-fn handle_skills() -> lpcli::error::Result<()> {
+fn handle_skills(output: &Output) -> lpcli::error::Result<()> {
     // Write the exact embedded bytes: no added newline, no terminal
     // formatting.  I/O failures (e.g. a closed pipe) propagate through the
     // standard error path instead of panicking.
-    std::io::stdout().lock().write_all(SKILL_DOC.as_bytes())?;
-    Ok(())
+    output.write_raw(SKILL_DOC)
 }
 
 // ---------------------------------------------------------------------------
@@ -2526,6 +2545,11 @@ fn resolve_command_output(
         stdout_terminal,
         stderr_terminal,
     })
+    .map(|output| {
+        output
+            .with_progress(cli.progress, stderr_terminal)
+            .with_pager(cli.no_pager, env, stdout_terminal)
+    })
 }
 
 /// Error styling before configuration is available must not prevent dispatch
@@ -2570,22 +2594,11 @@ async fn run_command(
         return output.print(&clear_cache_report());
     }
     let settings = load_config()?;
-    let display = Display::new(settings.display.width);
     *output = resolve_command_output(&cli, &settings, env, terminals)
         .map_err(lpcli::error::LpError::Usage)?;
     if let Some(warning) = output.warning() {
         output.warn(warning)?;
     }
-    // Commands not yet ported to the output layer print through `colored`,
-    // so apply the resolved stdout color decision to them as well. Ported
-    // renderers receive an explicit style instead. The override is
-    // process-wide, so test builds leave it alone to keep parallel tests
-    // independent.
-    let stdout_color = output.stdout_style().color;
-    #[cfg(not(test))]
-    colored::control::set_override(stdout_color);
-    #[cfg(test)]
-    let _ = stdout_color;
     let cache_timeout = hardware_token_cache_timeout(&settings);
     let policy = read_auth_policy(&cli.command, cli.authenticated, cli.public);
     let (quiet, no_input) = (cli.quiet, cli.no_input);
@@ -2600,9 +2613,7 @@ async fn run_command(
             handle_hardware_token(cmd, output, quiet, no_input, cache_timeout).await?
         }
 
-        Command::Bug(cmd) => {
-            handle_bug(cmd, &display, output, quiet, policy, cache_timeout).await?
-        }
+        Command::Bug(cmd) => handle_bug(cmd, output, quiet, policy, cache_timeout).await?,
         Command::Person(cmd) => handle_person(cmd, output, policy, cache_timeout).await?,
         Command::Package(cmd) => handle_package(cmd, output, policy, cache_timeout).await?,
         Command::Project(cmd) => handle_project(cmd, output, policy, cache_timeout).await?,
@@ -2617,7 +2628,7 @@ async fn run_command(
         Command::AccessToken(cmd) => {
             handle_access_token(cmd, output, cli.quiet, cache_timeout).await?
         }
-        Command::Skills => handle_skills()?,
+        Command::Skills => handle_skills(output)?,
     }
 
     Ok(())
@@ -2917,11 +2928,22 @@ fn read_client_with_auth(
 }
 
 /// Metadata may be signed, but arbitrary file URLs and redirects must not be.
+#[cfg(test)]
 async fn download_public_files(
     urls: &[String],
     output_dir: &std::path::Path,
 ) -> lpcli::error::Result<Vec<download::DownloadOutcome>> {
-    download::download_files(&LaunchpadClient::new(None), urls, output_dir).await
+    download_public_files_with_progress(urls, output_dir, download::ProgressMode::None).await
+}
+
+/// Download public files with an explicit stderr progress reporting mode.
+async fn download_public_files_with_progress(
+    urls: &[String],
+    output_dir: &std::path::Path,
+    progress: download::ProgressMode,
+) -> lpcli::error::Result<Vec<download::DownloadOutcome>> {
+    download::download_files_with_progress(&LaunchpadClient::new(None), urls, output_dir, progress)
+        .await
 }
 
 fn hardware_token_cache_timeout(settings: &config::AppConfig) -> std::time::Duration {
@@ -2973,6 +2995,7 @@ fn usb_authenticator() -> Arc<dyn Authenticator> {
 }
 
 /// Build a [`comfy_table::Table`] with headers and the resolved display width.
+#[cfg(test)]
 fn build_table(display: &Display, headers: Vec<&str>) -> display::DisplayTable {
     display.table(headers)
 }

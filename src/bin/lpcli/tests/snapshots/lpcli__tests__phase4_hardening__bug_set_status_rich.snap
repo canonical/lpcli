@@ -1,0 +1,5 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: clean
+---
+✓ Status updated to 'Triaged' for 1 task(s) on bug #42.

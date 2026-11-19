@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+source_package_name	source_package_version	component_name	pocket	status
+hello	2.10-3ppa1	main	Release	Published

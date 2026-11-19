@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+id	title	status
+7	Install help	Open
+8	Boot help	Open

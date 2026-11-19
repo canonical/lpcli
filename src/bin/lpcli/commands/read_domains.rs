@@ -83,16 +83,13 @@ fn flag(value: Option<bool>) -> Option<String> {
 }
 
 fn day(value: Option<jiff::Timestamp>) -> Option<String> {
-    value.map(|value| value.strftime("%Y-%m-%d").to_string())
+    output::format_date(value)
 }
 
 /// The final path segment of a Launchpad link, without a leading `~`, e.g.
 /// `https://api.launchpad.net/devel/~jdoe` -> `jdoe`.
 fn link_name(link: Option<&str>) -> Option<String> {
-    link.and_then(|url| url.rsplit('/').next())
-        .map(|segment| segment.trim_start_matches('~'))
-        .filter(|segment| !segment.is_empty())
-        .map(str::to_string)
+    output::link_name(link)
 }
 
 /// Whether an account is a person or a team. Launchpad sends `is_team`;
@@ -877,9 +874,7 @@ fn question_messages_report(found: &Raw<Vec<questions::QuestionMessage>>) -> Rep
     for m in &found.value {
         let index = m.index.map(|index| index.to_string());
         let author = link_name(m.owner_link.as_deref());
-        let date = m
-            .date_created
-            .map(|date| date.strftime("%Y-%m-%d %H:%M").to_string());
+        let date = output::format_datetime(m.date_created);
         blocks.push(Block::Heading(format!(
             "Message #{}: {}, {}",
             index.as_deref().unwrap_or("?"),
@@ -1049,14 +1044,17 @@ pub(crate) async fn handle_package_download(
     output: &Output,
     request: &SourceDownloadRequest,
 ) -> lpcli::error::Result<()> {
-    let found = package_download(client, request, |announcement| {
-        if output.mode().is_structured() {
-            Ok(())
-        } else {
-            output.print(announcement)
-        }
-    })
-    .await?;
+    let found =
+        package_download_with_progress(client, request, output.progress(), |announcement| {
+            if output.mode() == OutputMode::Rich
+                && output.progress() == download::ProgressMode::Rich
+            {
+                output.print(announcement)
+            } else {
+                Ok(())
+            }
+        })
+        .await?;
     output.print(&package_download_report(&found))?;
     package_download_result(&found)
 }
@@ -1067,9 +1065,21 @@ pub(crate) async fn handle_package_download(
 /// Metadata failures (no publication, no file list) are returned as errors
 /// before anything is downloaded. Per-file failures are recorded in
 /// [`SourceDownload::outcomes`] instead.
+#[cfg(test)]
 pub(crate) async fn package_download(
     client: &LaunchpadClient,
     request: &SourceDownloadRequest,
+    announce: impl FnOnce(&Report) -> lpcli::error::Result<()>,
+) -> lpcli::error::Result<SourceDownload> {
+    package_download_with_progress(client, request, download::ProgressMode::None, announce).await
+}
+
+/// Find the publication, list its files, and download them with an explicit
+/// stderr [`download::ProgressMode`].
+pub(crate) async fn package_download_with_progress(
+    client: &LaunchpadClient,
+    request: &SourceDownloadRequest,
+    progress: download::ProgressMode,
     announce: impl FnOnce(&Report) -> lpcli::error::Result<()>,
 ) -> lpcli::error::Result<SourceDownload> {
     // Exact match avoids substring hits such as "libtest-valgrind-perl" when
@@ -1126,7 +1136,8 @@ pub(crate) async fn package_download(
         json: Value::Null,
         records: no_records(),
     })?;
-    download.outcomes = download_public_files(&download.urls, &request.output_dir).await?;
+    download.outcomes =
+        download_public_files_with_progress(&download.urls, &request.output_dir, progress).await?;
     Ok(download)
 }
 
@@ -1162,6 +1173,8 @@ pub(crate) fn package_download_report(found: &SourceDownload) -> Report {
                 }));
             }
             download::DownloadOutcome::Failed { filename, error } => {
+                let filename = output::redact_secrets(filename);
+                let error = output::redact_secrets(error);
                 blocks.push(Block::Status(
                     Level::Error,
                     vec![

@@ -1,0 +1,9 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+1 queue entry found.
+
+Path: po/hello.pot
+Status: Needs Review
+Date: 2025-03-04

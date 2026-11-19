@@ -20,7 +20,7 @@ applications can build on the same type-safe API wrappers.
 - **Hardware-bound API tokens** — optionally bind your API access to a USB FIDO2
   security key (e.g. a YubiKey), so exchanging a stored grant requires the key.
 - **Output for people and programs** — coloured text and formatted tables via
-  [`colored`](https://crates.io/crates/colored) and
+  [`anstyle`](https://crates.io/crates/anstyle) and
   [`comfy-table`](https://crates.io/crates/comfy-table), an accessible `plain`
   mode for screen readers, and Launchpad-compatible JSON and TSV for scripts
   and agents (see [Output formats](#output-formats)).
@@ -331,6 +331,10 @@ version (currently 1). In `json` mode:
 
 | Option | Effect |
 |---|---|
+| `--format rich\|plain\|json\|tsv` | Select the output mode (overrides `LPCLI_FORMAT`, `display.format`, and automatic detection). |
+| `--color auto\|always\|never` | Control ANSI color in `rich` stdout and stderr (`auto` honors `CLICOLOR_FORCE`, `NO_COLOR`, `TERM=dumb`, and terminal detection). |
+| `--progress auto\|plain\|rich\|none` | Control download progress reporting on stderr (`plain` uses non-redrawing milestone lines; `none` suppresses progress). |
+| `--no-pager` | Write human-facing output directly to stdout instead of piping long output through `$PAGER`. |
 | `--fields NAME,...` | Keep only the named Launchpad attributes in each JSON entry. Collection keys such as `total_size` and the `lpcli` member are kept. Requires JSON output. |
 | `--quiet` | For mutations only: print just the `self_link` of each resulting entry, one per line, or nothing when there is none. Secrets that cannot be shown again, from `access-token issue` and `hardware-token issue --print`, are still printed. |
 | `--no-input` | Fail instead of prompting. Enabled automatically when stdin is not a terminal. Classic `login` and `hardware-token register` need a terminal; security-key touches cannot be skipped, so lpcli reports on stderr when it waits for one. |
@@ -368,7 +372,59 @@ Color follows `--color auto|always|never`. With `auto`, the default,
 the stream is a terminal. stdout and stderr are decided separately. `plain`,
 `json`, and `tsv` output on stdout is never colored.
 
-### Replacing `--json`
+Download progress on stderr follows `--progress auto|plain|rich|none`. With
+`auto`, `plain` output or a non-terminal stderr reports progress as a start
+line, occasional milestones, and a summary with no redrawing; `json` and `tsv`
+suppress progress output; and `rich` on a terminal shows animated progress
+bars. Passing `--progress none` turns progress reporting off.
+
+Human-facing output (`rich` and `plain`) is piped through `$PAGER` when stdout
+is a non-dumb terminal, `$PAGER` is set to a non-empty command other than
+`cat` (when not running under `sudo`), and the rendered output exceeds the
+terminal height (`$LINES`, detected terminal rows, or 24 lines by default).
+Passing `--no-pager` disables paging and writes directly to stdout.
+
+### Accessibility and screen-reader checklist
+
+Set `display.accessible = true` in `~/.config/lpcli/config.toml` (or export
+`LPCLI_FORMAT=plain` or pass `--format plain`) to make `plain` output the
+default. Setting `TERM=dumb` also selects `plain` automatically and disables
+download progress redrawing and color.
+
+In `plain` mode, lpcli guarantees:
+
+- Result counts appear before list items in words (for example `2 bugs found.`).
+- Records use labeled `Field: value` lines separated by blank lines, with no
+  box-drawing characters or color escapes.
+- Relationships such as `Series:` and `Attachment:` are written as explicit
+  fields instead of indentation or emoji.
+- Status prefixes and missing values use plain words (`OK:`, `Warning:`,
+  `Error:`, `none`).
+- Stderr download progress emits a start line, periodic milestone lines,
+  per-file outcomes, and a summary without carriage-return redraws, and choice
+  prompts list items numerically (`Choose a security key (enter a number from 1 to N): `).
+- External text and error messages strip ANSI escape sequences, box drawing,
+  bullets (`●`), info icons (`ℹ`), dingbats, emoji, and convert em/en dashes to
+  `-`.
+
+Manual release verification checklist with Orca and BRLTTY on Ubuntu 26.04
+(under `display.accessible = true`, `NO_COLOR=1`, and `TERM=dumb`):
+
+- Run `lpcli status`, `lpcli bug show --bug-id 123456`,
+  `lpcli bug tasks --bug-id 123456`, and `lpcli bug comments --bug-id 123456`
+  and verify screen-reader / braille announce leading counts and `Field: value`
+  lines cleanly without symbol noise or truncated cells.
+- Run `lpcli package download --name curl --series noble` and verify progress
+  updates read as discrete lines without cursor redraw interruptions.
+- Exercise multi-key selection (`Choose a security key ...`) and runtime error
+  messages (`Error: ...`) and confirm no timeouts or unclear punctuation.
+
+### Migrating from 0.4.x
+
+The 0.5.0 series introduces deliberate breaking changes alongside the unified
+output modes and versioned JSON contract:
+
+#### Replacing `--json`
 
 `--json` was removed in 0.5.0 and is now rejected as an unexpected argument.
 Use `--format json` instead. The JSON is now Launchpad's collection shape, in
@@ -384,6 +440,34 @@ name:
 Each entry now carries every field Launchpad returns, such as
 `resource_type_link` and `http_etag`, not only the seven fields the old output
 selected. To keep sorting by name, use `jq '.entries | sort_by(.name)'`.
+
+#### Exit codes and partial failures
+
+Before 0.5.0, every failure exited with `1` and partial failures exited with
+`0`. Commands now return exit codes `0`..`7` as listed under
+[Exit codes](#exit-codes); exit code `7` indicates partial success after writing
+succeeded and failed items to stdout/stderr. Scripts checking `$? -eq 1` should
+check for non-zero exit codes or handle specific codes.
+
+#### Non-interactive stdin and prompts
+
+When stdin is not a terminal, lpcli behaves as if `--no-input` were passed.
+Interactive flows such as `lpcli login` and
+`lpcli hardware-token register "My YubiKey"` fail with exit code `2` before
+contacting Launchpad unless run in a terminal. Classic `login` now writes its
+authorisation URL and prompt to stderr rather than stdout, and non-interactive
+hardware grant import
+(`lpcli login --hardware-token --account my-username --grant-token "issued-oauth-token"`)
+reads the secret from `LPCLI_HARDWARE_GRANT_SECRET`.
+
+#### Library crate (`lpcli` 0.5.0)
+
+- Timestamp fields switched from `chrono` to `jiff::Timestamp` and
+  `jiff::civil::Date`.
+- `_raw` wrappers across all domain modules return `client::Raw<T>` (both the
+  typed `value` and unmodified Launchpad `raw` JSON).
+- `LpError` adds `Usage`, `Partial`, and `LocalNotFound`; `auth::login` and
+  `auth::logout` no longer print success lines directly.
 
 ## Usage
 

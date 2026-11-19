@@ -1,0 +1,13 @@
+---
+source: src/bin/lpcli/tests/phase2_accessibility.rs
+expression: attachments
+---
+2 attachments found.
+
+Title: trace-1.txt
+Type: Patch
+URL: https://launchpadlibrarian.net/1/trace-1.txt
+
+Title: trace-2.txt
+Type: Unspecified
+URL: none

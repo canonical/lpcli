@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+id	date_created	diff_lines_count	added_lines_count	removed_lines_count	source_revision_id
+76	2026-03-05 06:07	12	3	1	0123456789abcdef0123456789abcdef01234567
+77	2026-03-05 06:07	12	3	1	0123456789abcdef0123456789abcdef01234567

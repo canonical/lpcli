@@ -1,0 +1,13 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+2 people found.
+
+Name: jdoe
+Display Name: Jane Doe
+Type: Person
+
+Name: ubuntu-dev
+Display Name: Ubuntu Development Team
+Type: Team

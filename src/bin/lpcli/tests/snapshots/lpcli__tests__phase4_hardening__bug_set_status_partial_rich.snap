@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: clean
+---
+✓ Status updated to 'Triaged' for 1 task(s) on bug #42.
+warning: Failed: set_status for 'curl (Ubuntu noble)': Launchpad API error 403: Permission denied. Verify your Launchpad account has the required permissions. not allowed oauth_token=[redacted]

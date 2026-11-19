@@ -1,0 +1,11 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+1 spec found.
+
+Name: a-spec
+Title: Spec a-spec
+Priority: High
+Lifecycle: Started
+Impl: Good progress

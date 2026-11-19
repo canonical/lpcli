@@ -1538,7 +1538,6 @@ dependencies = [
  "cbc 0.2.1",
  "ciborium",
  "clap",
- "colored",
  "comfy-table",
  "dbus-secret-service-keyring-store",
  "dirs",

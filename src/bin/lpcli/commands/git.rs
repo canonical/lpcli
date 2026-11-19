@@ -71,11 +71,11 @@ pub(crate) fn git_supports_tsv(command: &GitCommand) -> bool {
 // ---------------------------------------------------------------------------
 
 fn day(timestamp: Option<jiff::Timestamp>) -> Option<String> {
-    timestamp.map(|t| t.strftime("%Y-%m-%d").to_string())
+    output::format_date(timestamp)
 }
 
 fn minute(timestamp: Option<jiff::Timestamp>) -> Option<String> {
-    timestamp.map(|t| t.strftime("%Y-%m-%d %H:%M").to_string())
+    output::format_datetime(timestamp)
 }
 
 fn records(columns: Vec<Column>, rows: Vec<Vec<Option<String>>>) -> Records {
@@ -399,12 +399,9 @@ pub(crate) fn git_comments_report(comments: &GitComments) -> Report {
             "Comment",
             format!("#{}", c.id.unwrap_or(i as u64)),
         ));
-        let author = c
-            .author_link
-            .as_deref()
-            .and_then(|u| u.rsplit('/').next())
-            .unwrap_or("unknown");
-        blocks.push(Block::Field("Author", author.to_string()));
+        let author =
+            output::link_name(c.author_link.as_deref()).unwrap_or_else(|| "unknown".into());
+        blocks.push(Block::Field("Author", author));
         if let Some(date) = minute(c.date_created) {
             blocks.push(Block::Field("Date", date));
         }
@@ -432,9 +429,12 @@ pub(crate) fn git_comments_report(comments: &GitComments) -> Report {
         };
         blocks.push(Block::Break);
         blocks.push(Block::Field("Location", location));
-        blocks.push(Block::Field("Author", ic.author_display().to_string()));
+        blocks.push(Block::Field(
+            "Author",
+            ic.author_display().trim_start_matches('~').to_string(),
+        ));
         if let Some(date) = &ic.date {
-            blocks.push(Block::Field("Date", date.clone()));
+            blocks.push(Block::Field("Date", output::format_timestamp_str(date)));
         }
         if let Some(ctx) = context {
             blocks.push(Block::Field("Diff line", ctx.content.clone()));

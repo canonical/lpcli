@@ -1,0 +1,7 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+id	queue_status	source_git_path	target_git_path	date_created
+11	Needs review	refs/heads/fix	refs/heads/main	2026-03-04
+12	Approved	refs/heads/fix	refs/heads/main	2026-03-04

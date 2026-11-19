@@ -1,0 +1,12 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: partial_json
+---
+{
+  "error": {
+    "hint": "Check which changes were applied before retrying.",
+    "http_status": null,
+    "kind": "partial",
+    "message": "Updated 1 of 2 task(s) on bug #42; 1 failed: set_status (curl (Ubuntu noble)): Unauthorized: permission denied oauth_token_secret=[redacted]"
+  }
+}

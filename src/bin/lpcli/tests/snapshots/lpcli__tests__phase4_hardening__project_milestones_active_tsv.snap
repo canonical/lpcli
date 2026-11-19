@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+name	title	is_active	date_targeted
+2.0	Launchpad 2.0	true	2025-06-01

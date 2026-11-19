@@ -1,0 +1,13 @@
+---
+source: src/bin/lpcli/tests/phase2_accessibility.rs
+expression: subs
+---
+2 subscriptions found.
+
+Person: reporter
+Subscribed By: reporter
+Date: 2026-01-05
+
+Person: ubuntu-bugs
+Subscribed By: reporter
+Date: 2026-01-05

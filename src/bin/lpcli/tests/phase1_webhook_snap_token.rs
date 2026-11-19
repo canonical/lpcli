@@ -947,9 +947,57 @@ fn quiet_lines_cannot_inject_terminal_controls() {
     let result = CommandResult::Mutation {
         report: Report::json(json!({})),
         quiet: Some("https://example.com/\u{1b}[31mred\nline".into()),
+        sensitive: false,
     };
     assert_eq!(
         render(&result, OutputMode::Rich, true),
         "https://example.com/\u{FFFD}[31mred\u{FFFD}line\n"
+    );
+}
+
+#[test]
+fn secret_issuance_mutations_are_marked_sensitive_and_bypass_pager() {
+    let sensitive_result = access_token_issued_report(TOKEN_SECRET.into());
+    assert!(matches!(
+        sensitive_result,
+        CommandResult::Mutation {
+            sensitive: true,
+            ..
+        }
+    ));
+    let non_sensitive = webhook_deleted_report(WEBHOOK_URL);
+    assert!(matches!(
+        non_sensitive,
+        CommandResult::Mutation {
+            sensitive: false,
+            ..
+        }
+    ));
+
+    // Even with $PAGER set to a failing command and LINES=1, printing a sensitive
+    // mutation writes directly to stdout without spawning `$PAGER`.
+    let env = output::Environment {
+        pager: Some("sh -c 'exit 1'".into()),
+        lines: Some("1".into()),
+        term: Some("xterm-256color".into()),
+        ..Default::default()
+    };
+    let output = Output::resolve(output::Settings {
+        format: Some(OutputMode::Rich),
+        color: ColorChoice::Never,
+        config_format: None,
+        accessible: false,
+        display: Display::from_width(100),
+        json_output: true,
+        tsv_output: false,
+        fields: None,
+        env: &env,
+        stdout_terminal: true,
+        stderr_terminal: true,
+    })
+    .unwrap();
+    assert!(
+        sensitive_result.print(&output, false).is_ok(),
+        "sensitive secret output must bypass $PAGER"
     );
 }

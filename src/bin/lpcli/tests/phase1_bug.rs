@@ -38,7 +38,7 @@ fn bug_command(argv: &[&str]) -> BugCommand {
 
 async fn run(server: &mockito::Server, argv: &[&str]) -> lpcli::error::Result<BugOutcome> {
     let client = mock_read_client(server, true);
-    bug_outcome(&client, bug_command(argv), &Display::from_width(100)).await
+    bug_outcome(&client, bug_command(argv)).await
 }
 
 fn render(outcome: &BugOutcome, mode: OutputMode, quiet: bool) -> String {
@@ -1118,7 +1118,14 @@ fn total_failure_of_several_steps_lists_every_failure() {
     ];
     let json = serde_json::json!({"lpcli": {"failures": ["a", "b"]}});
     let outcome = finish_batch(
-        BugOutcome::mutation(json.clone(), "✓ Updated 0 task(s).\n".into(), Vec::new()),
+        BugOutcome::mutation(
+            json.clone(),
+            vec![Block::Status(
+                Level::Ok,
+                vec![Span::Text("Updated 0 task(s).".into())],
+            )],
+            Vec::new(),
+        ),
         0,
         failures,
         |_| unreachable!("nothing was applied"),
@@ -1147,7 +1154,7 @@ fn total_failure_of_several_steps_lists_every_failure() {
 fn quiet_links_are_terminal_safe() {
     let outcome = BugOutcome::mutation(
         serde_json::json!({}),
-        String::new(),
+        Vec::new(),
         vec!["https://api.launchpad.net/devel/bugs/1\u{1b}[2J".into()],
     );
     assert_eq!(

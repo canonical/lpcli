@@ -1,0 +1,10 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: json
+---
+{
+  "lpcli": {
+    "documentation": "https://github.com/canonical/lpcli/blob/main/docs/json-output.md",
+    "json_contract_version": 1
+  }
+}

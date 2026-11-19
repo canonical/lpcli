@@ -153,7 +153,7 @@ fn print_mutation(
 }
 
 fn day(timestamp: Option<jiff::Timestamp>) -> Option<String> {
-    timestamp.map(|d| d.strftime("%Y-%m-%d").to_string())
+    output::format_date(timestamp)
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +247,7 @@ pub(crate) fn read_grant_secret(
     no_input: bool,
 ) -> lpcli::error::Result<zeroize::Zeroizing<String>> {
     grant_secret_from(std::env::var_os(GRANT_SECRET_ENV), no_input, || {
-        rpassword::prompt_password("Grant secret (oauth_token_secret): ")
+        rpassword::prompt_password("Enter grant secret (oauth_token_secret): ")
     })
 }
 
@@ -867,8 +867,18 @@ pub(crate) async fn handle_hardware_token(
             if print {
                 // The grant is the result, so it is printed even with --quiet,
                 // and in launchpadlib's format whatever the output mode.
-                println!("{}", grant.to_issuance_json().as_str());
-                eprintln!("Warning: this is the grant secret; it will not be shown again.");
+                // Stream the `Zeroizing<String>` directly without copying it into
+                // an unzeroized `String`; Launchpad has already issued it, so any
+                // write failure is partial.
+                let payload = grant.to_issuance_json();
+                output.write_raw_line(payload.as_str()).map_err(|err| {
+                    LpError::Partial(format!(
+                        "Launchpad issued a hardware-bound grant bound to {}, but writing it to \
+                         stdout failed: {err}. Revoke the unused grant at {OAUTH_TOKENS_URL}.",
+                        key_label(&registered)
+                    ))
+                })?;
+                let _ = output.warn("this is the grant secret; it will not be shown again.");
                 return Ok(());
             }
 

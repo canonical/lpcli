@@ -1,0 +1,19 @@
+---
+source: src/bin/lpcli/tests/phase2_accessibility.rs
+expression: watches
+---
+2 bug watches found.
+
+Watch ID: 7
+Tracker: debbugs
+Remote Bug: 1150409
+Status: open
+URL: https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1150409
+Linked Tasks: curl (Ubuntu)
+
+Watch ID: 8
+Tracker: debbugs
+Remote Bug: 1150410
+Status: open
+URL: https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1150410
+Linked Tasks: orphan

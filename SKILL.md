@@ -97,6 +97,10 @@ to stderr. Set `LPCLI_FORMAT=json` to make it the default for a session.
   stdin is not a terminal. `lpcli login` and `hardware-token register` need
   the user's terminal; ask the user to run them. Security-key touches still
   need the user.
+- `--no-pager` disables `$PAGER` paging when running human-facing modes in a
+  terminal.
+- `--progress none` suppresses download progress output on stderr (`--format json`
+  and `--format tsv` already suppress progress output).
 - `lpcli --format json schema` reports the JSON contract version
   (currently 1).
 - `--json` is **no longer accepted**; it fails with an "unexpected argument"

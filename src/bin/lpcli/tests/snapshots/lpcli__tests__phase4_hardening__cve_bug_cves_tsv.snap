@@ -1,0 +1,6 @@
+---
+source: src/bin/lpcli/tests/phase4_hardening.rs
+expression: rendered
+---
+sequence	status	title
+2024-1234	Entry	Curl overflow

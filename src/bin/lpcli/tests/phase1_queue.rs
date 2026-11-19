@@ -611,6 +611,7 @@ async fn queue_download_partial_failures_return_partial_after_printing() {
     assert_eq!(report.json["lpcli"]["downloaded"], 1);
     assert_eq!(report.json["lpcli"]["failed"], 1);
     let plain = render(&report, OutputMode::Plain);
+    assert_plain_invariants(&plain);
     assert!(plain.contains("Error: curl_8.5.0.orig.tar.gz: "), "{plain}");
     assert!(plain.contains("1 file(s) downloaded from ubuntu/noble, 1 failed."));
     assert_json_report!("queue_download_partial_json", stable(&report.json, &base));
@@ -901,4 +902,39 @@ fn quiet_prints_nothing_without_a_self_link_and_neutralises_controls() {
     let line = render_queue_mutation(&output, true, &mutation, &hostile);
     assert_eq!(line.lines().count(), 1, "{line:?}");
     assert!(!line.contains('\u{1b}'), "{line:?}");
+}
+
+#[test]
+fn queue_download_redacts_secrets_in_failed_outcomes() {
+    let upload_val = upload_json(1, "curl", "1.0", "source", "New");
+    let upload: queue::PackageUpload = serde_json::from_value(upload_val.clone()).unwrap();
+    let download = QueueDownload {
+        target: QueueDownloadTarget {
+            target: "ubuntu/noble".into(),
+            archive_label: "ubuntu/noble".into(),
+            series: "noble".into(),
+            upload: Raw {
+                value: upload,
+                raw: upload_val,
+            },
+            source_file_urls: None,
+            binary_file_urls: None,
+        },
+        output_dir: std::path::PathBuf::from("/tmp/out"),
+        outcomes: vec![download::DownloadOutcome::Failed {
+            filename: "curl.dsc?oauth_token=urlsecret".into(),
+            error: "HTTP 403 {'oauth_token_secret': 'pysecret'} Authorization: Bearer hdrsecret"
+                .into(),
+        }],
+    };
+    let report = download.report();
+    for mode in [OutputMode::Rich, OutputMode::Plain, OutputMode::Json] {
+        let rendered = Output::fixed(mode, false, 100).render(&report);
+        for leaked in ["urlsecret", "pysecret", "hdrsecret"] {
+            assert!(
+                !rendered.contains(leaked),
+                "{mode:?} leaked {leaked}: {rendered}"
+            );
+        }
+    }
 }
