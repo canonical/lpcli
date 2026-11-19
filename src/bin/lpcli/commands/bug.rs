@@ -590,48 +590,47 @@ fn bug_show_blocks(read: &BugReportRead) -> Vec<Block> {
 }
 
 fn bug_comments_blocks(read: &BugCommentsRead, bug_id: u64) -> Vec<Block> {
-    let visible: Vec<(usize, &bugs::BugComment)> = read
+    let entries = read
         .comments
         .iter()
         .enumerate()
         .filter(|(_, c)| c.date_deleted.is_none())
+        .map(|(i, c)| {
+            let idx = c.index.unwrap_or(i as u64);
+            let attachments = read
+                .attachments
+                .iter()
+                .zip(&read.download_urls)
+                .filter(|(a, _)| {
+                    c.self_link.is_some() && a.message_link.as_deref() == c.self_link.as_deref()
+                })
+                .map(|(a, url)| CommentAttachment {
+                    title: a.title.as_deref().unwrap_or("attachment").to_string(),
+                    kind: a
+                        .attachment_type
+                        .as_deref()
+                        .unwrap_or("Unspecified")
+                        .to_string(),
+                    url: url.clone(),
+                })
+                .collect();
+            CommentEntry {
+                label: format!("#{idx}"),
+                author: output::link_name(c.owner_link.as_deref()),
+                date: output::format_datetime(c.date_created),
+                content: c.content.clone().unwrap_or_default(),
+                attachments,
+            }
+        })
         .collect();
-    if visible.is_empty() {
-        return vec![note_block(format!("No comments found for bug #{bug_id}."))];
-    }
-    let mut blocks = vec![note_block(
-        Noun {
+    vec![Block::Comments {
+        entries,
+        noun: Noun {
             singular: "comment",
             plural: "comments",
-        }
-        .count(visible.len()),
-    )];
-    for (i, c) in visible {
-        let idx = c.index.unwrap_or(i as u64);
-        let author = output::link_name(c.owner_link.as_deref()).unwrap_or_else(|| "none".into());
-        let date = output::format_datetime(c.date_created).unwrap_or_else(|| "none".into());
-        blocks.push(Block::Break);
-        blocks.push(Block::Field("Comment", format!("#{idx}")));
-        blocks.push(Block::Field("Author", author));
-        blocks.push(Block::Field("Date", date));
-        blocks.push(Block::Field(
-            "Content",
-            c.content.clone().unwrap_or_default(),
-        ));
-        for (a, url) in read.attachments.iter().zip(&read.download_urls) {
-            if c.self_link.is_none() || a.message_link.as_deref() != c.self_link.as_deref() {
-                continue;
-            }
-            let name = a.title.as_deref().unwrap_or("attachment");
-            let kind = a.attachment_type.as_deref().unwrap_or("Unspecified");
-            let attachment = match url {
-                Some(url) => format!("{name} [{kind}] {url}"),
-                None => format!("{name} [{kind}]"),
-            };
-            blocks.push(Block::Field("Attachment", attachment));
-        }
-    }
-    blocks
+        },
+        empty: format!("No comments found for bug #{bug_id}."),
+    }]
 }
 
 fn bug_subscriptions_table_block(subs: &[bugs::BugSubscription], bug_id: u64) -> Block {

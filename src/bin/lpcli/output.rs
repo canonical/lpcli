@@ -18,6 +18,10 @@ use std::io::{IsTerminal, Write};
 
 use anstyle::{AnsiColor, Color, Style as AnsiStyle};
 use clap::ValueEnum;
+use comfy_table::{
+    ColumnConstraint, ContentArrangement, ContentLineStyle, LineStyle, Table, TableStyle, Width,
+    presets::{ASCII_FULL, UTF8_FULL},
+};
 use serde::Deserialize;
 
 use crate::display::Display;
@@ -899,6 +903,33 @@ pub enum Span {
     Command(String),
 }
 
+/// An attachment displayed beneath a [`CommentEntry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentAttachment {
+    /// Attachment title or filename.
+    pub title: String,
+    /// Attachment classification such as `"Patch"` or `"Unspecified"`.
+    pub kind: String,
+    /// Resolved direct download URL when available.
+    pub url: Option<String>,
+}
+
+/// A single comment card rendered as a structured entry list in `plain` mode
+/// and a width-aware table card in `rich` mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentEntry {
+    /// Comment sequence label such as `"#0"`.
+    pub label: String,
+    /// Normalized author account name, if known.
+    pub author: Option<String>,
+    /// Formatted creation timestamp, if known.
+    pub date: Option<String>,
+    /// Raw comment body text.
+    pub content: String,
+    /// Attachments associated with this comment, in Launchpad order.
+    pub attachments: Vec<CommentAttachment>,
+}
+
 /// One piece of `rich` or `plain` content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
@@ -925,6 +956,13 @@ pub enum Block {
         noun: Noun,
         empty: String,
         hint: Option<String>,
+    },
+    /// A sequence of threaded comments rendered as table-like cards in `rich`
+    /// mode and labeled `Field: value` records in `plain` mode.
+    Comments {
+        entries: Vec<CommentEntry>,
+        noun: Noun,
+        empty: String,
     },
     /// A blank line.
     Break,
@@ -1354,6 +1392,434 @@ impl RichRenderer {
         }
         out.push('\n');
     }
+
+    fn prepare_comments(&self, entries: &[CommentEntry], missing: &str) -> Vec<PreparedComment> {
+        entries
+            .iter()
+            .map(|entry| {
+                let label = clean(&entry.label);
+                let author = entry
+                    .author
+                    .as_deref()
+                    .map(clean)
+                    .unwrap_or_else(|| missing.to_string());
+                let author_style = self
+                    .style
+                    .color
+                    .then(|| field_value_style("Author", &author))
+                    .flatten();
+                let date = entry
+                    .date
+                    .as_deref()
+                    .map(clean)
+                    .unwrap_or_else(|| missing.to_string());
+                let normalized = entry.content.replace("\r\n", "\n");
+                let cleaned_body = clean(&normalized);
+                let trimmed_body = cleaned_body.trim_matches('\n');
+                let body = if !trimmed_body.trim().is_empty() {
+                    Some(trimmed_body.to_string())
+                } else if entry.attachments.is_empty() {
+                    Some(missing.to_string())
+                } else {
+                    None
+                };
+                let attachment_lines = entry
+                    .attachments
+                    .iter()
+                    .map(|att| format!("Attachment: {}", clean(&format_attachment_text(att))))
+                    .collect();
+                PreparedComment {
+                    label,
+                    author,
+                    author_style,
+                    date,
+                    body,
+                    attachment_lines,
+                }
+            })
+            .collect()
+    }
+
+    fn render_stacked_comments(
+        &self,
+        out: &mut String,
+        prepared: &[PreparedComment],
+        missing: &str,
+    ) {
+        for (idx, entry) in prepared.iter().enumerate() {
+            if idx > 0 {
+                out.push('\n');
+            }
+            let label = paint_lines(&entry.label, BOLD, self.style.color);
+            let author = entry.author_style.map_or_else(
+                || entry.author.clone(),
+                |style| paint_lines(&entry.author, style, true),
+            );
+            let body = entry.body.as_deref().unwrap_or(missing);
+            out.push_str(&format!("Comment: {label}\n"));
+            out.push_str(&format!("Author: {author}\n"));
+            out.push_str(&format!("Date: {}\n", entry.date));
+            out.push_str(&format!("Content: {body}\n"));
+            for att in &entry.attachment_lines {
+                if let Some(rest) = att.strip_prefix("Attachment:") {
+                    out.push_str(&paint("Attachment:", BOLD, self.style.color));
+                    out.push_str(rest);
+                } else {
+                    out.push_str(att);
+                }
+                out.push('\n');
+            }
+        }
+        out.push('\n');
+    }
+
+    fn render_comment_card(
+        &self,
+        out: &mut String,
+        entry: &PreparedComment,
+        layout: &CommentLayout,
+    ) {
+        let attachments_cell =
+            (!entry.attachment_lines.is_empty()).then(|| entry.attachment_lines.join("\n"));
+        let has_content = entry.body.is_some();
+        let has_attachments = attachments_cell.is_some();
+
+        if layout.three_col_header {
+            let mut header_table = Table::new();
+            header_table.load_style(comment_header_style(self.style.unicode, self.style.color));
+            header_table.force_no_tty();
+            header_table.set_content_arrangement(ContentArrangement::Dynamic);
+            header_table.set_width(layout.box_w);
+            header_table.add_row([
+                entry.label.as_str(),
+                entry.author.as_str(),
+                entry.date.as_str(),
+            ]);
+            header_table.set_constraints([
+                ColumnConstraint::Absolute(Width::Fixed(layout.col0_w)),
+                ColumnConstraint::Absolute(Width::Fixed(layout.col1_w)),
+                ColumnConstraint::Absolute(Width::Fixed(layout.col2_w)),
+            ]);
+            let header_raw = format!("{header_table}\n");
+            if self.style.color {
+                colorize_comment_header_table(
+                    out,
+                    &header_raw,
+                    [Some(BOLD), entry.author_style, None],
+                    self.style.unicode,
+                );
+            } else {
+                out.push_str(&header_raw);
+            }
+
+            let mut body_table = Table::new();
+            body_table.load_style(comment_body_style(self.style.unicode));
+            body_table.force_no_tty();
+            body_table.set_content_arrangement(ContentArrangement::Dynamic);
+            body_table.set_width(layout.box_w);
+            if let Some(body) = &entry.body {
+                body_table.add_row([body.as_str()]);
+            }
+            if let Some(att) = &attachments_cell {
+                body_table.add_row([att.as_str()]);
+            }
+            body_table
+                .set_constraints([ColumnConstraint::Absolute(Width::Fixed(layout.box_w - 2))]);
+            let body_raw = format!("{body_table}\n");
+            if self.style.color {
+                colorize_comment_single_col(
+                    out,
+                    &body_raw,
+                    false,
+                    has_content,
+                    has_attachments,
+                    self.style.unicode,
+                );
+            } else {
+                out.push_str(&body_raw);
+            }
+        } else {
+            let sep = if self.style.unicode { " · " } else { " | " };
+            let mut card = Table::new();
+            card.load_style(if self.style.unicode {
+                UTF8_FULL
+            } else {
+                ASCII_FULL
+            });
+            card.force_no_tty();
+            card.set_content_arrangement(ContentArrangement::Dynamic);
+            card.set_width(layout.box_w);
+            card.set_header([format!(
+                "{}{sep}{}{sep}{}",
+                entry.label, entry.author, entry.date
+            )]);
+            if let Some(body) = &entry.body {
+                card.add_row([body.as_str()]);
+            }
+            if let Some(att) = &attachments_cell {
+                card.add_row([att.as_str()]);
+            }
+            card.set_constraints([ColumnConstraint::Absolute(Width::Fixed(layout.box_w - 2))]);
+            let raw = format!("{card}\n");
+            if self.style.color {
+                colorize_comment_single_col(
+                    out,
+                    &raw,
+                    true,
+                    has_content,
+                    has_attachments,
+                    self.style.unicode,
+                );
+            } else {
+                out.push_str(&raw);
+            }
+        }
+    }
+
+    fn comments(&self, out: &mut String, entries: &[CommentEntry], noun: Noun, empty: &str) {
+        if entries.is_empty() {
+            out.push_str(&clean(empty));
+            out.push('\n');
+            return;
+        }
+        let missing = if self.style.unicode { "—" } else { "none" };
+        let prepared = self.prepare_comments(entries, missing);
+        if self.style.width < 10 {
+            self.render_stacked_comments(out, &prepared, missing);
+        } else {
+            let layout = comment_card_metrics(&prepared, self.style.width);
+            for (idx, entry) in prepared.iter().enumerate() {
+                if idx > 0 {
+                    out.push('\n');
+                }
+                self.render_comment_card(out, entry, &layout);
+            }
+        }
+        out.push_str(&noun.count(entries.len()));
+        out.push('\n');
+    }
+}
+
+struct PreparedComment {
+    label: String,
+    author: String,
+    author_style: Option<AnsiStyle>,
+    date: String,
+    body: Option<String>,
+    attachment_lines: Vec<String>,
+}
+
+struct CommentLayout {
+    box_w: u16,
+    col0_w: u16,
+    col1_w: u16,
+    col2_w: u16,
+    three_col_header: bool,
+}
+
+fn format_attachment_text(attachment: &CommentAttachment) -> String {
+    match &attachment.url {
+        Some(url) => format!("{} [{}] {url}", attachment.title, attachment.kind),
+        None => format!("{} [{}]", attachment.title, attachment.kind),
+    }
+}
+
+fn comment_card_metrics(prepared: &[PreparedComment], max_width: u16) -> CommentLayout {
+    let mut header_measure = Table::new();
+    let mut body_measure = Table::new();
+    for entry in prepared {
+        header_measure.add_row([
+            entry.label.as_str(),
+            entry.author.as_str(),
+            entry.date.as_str(),
+        ]);
+        if let Some(body) = &entry.body {
+            body_measure.add_row([body.as_str()]);
+        }
+        if !entry.attachment_lines.is_empty() {
+            body_measure.add_row([entry.attachment_lines.join("\n")]);
+        }
+    }
+    let header_widths = header_measure.column_max_content_widths();
+    let label_w = header_widths.first().copied().unwrap_or(1);
+    let author_w = header_widths.get(1).copied().unwrap_or(1);
+    let date_w = header_widths.get(2).copied().unwrap_or(1);
+    let body_max_w = body_measure
+        .column_max_content_widths()
+        .first()
+        .copied()
+        .unwrap_or(1);
+
+    // Three columns have 4 vertical borders and 6 padding spaces (10); a single
+    // column has 2 vertical borders and 2 padding spaces (4).
+    let natural_header_w =
+        10usize + usize::from(label_w) + usize::from(author_w) + usize::from(date_w);
+    let natural_body_w = 4usize + usize::from(body_max_w);
+    let box_w = natural_header_w
+        .max(natural_body_w)
+        .min(usize::from(max_width));
+
+    let fixed_chrome = 10usize + usize::from(label_w) + usize::from(date_w);
+    let min_author_col = usize::from(author_w).clamp(1, 12);
+    let three_col_header = box_w >= fixed_chrome.saturating_add(min_author_col);
+    let (col0_w, col1_w, col2_w) = if three_col_header {
+        (
+            u16::try_from(usize::from(label_w) + 2).unwrap_or(u16::MAX),
+            u16::try_from((box_w - fixed_chrome) + 2).unwrap_or(u16::MAX),
+            u16::try_from(usize::from(date_w) + 2).unwrap_or(u16::MAX),
+        )
+    } else {
+        (0, 0, 0)
+    };
+
+    CommentLayout {
+        box_w: u16::try_from(box_w).unwrap_or(u16::MAX),
+        col0_w,
+        col1_w,
+        col2_w,
+        three_col_header,
+    }
+}
+
+fn comment_header_style(unicode: bool, color: bool) -> TableStyle {
+    let junction = if color {
+        '\x1f'
+    } else if unicode {
+        '┆'
+    } else {
+        '|'
+    };
+    if unicode {
+        TableStyle::new()
+            .top_border(LineStyle::new('┌', '─', '┬', '┐'))
+            .content_lines(ContentLineStyle::new('│', junction, '│'))
+            .bottom_border(LineStyle::new('╞', '═', '╧', '╡'))
+    } else {
+        TableStyle::new()
+            .top_border(LineStyle::new('+', '-', '+', '+'))
+            .content_lines(ContentLineStyle::new('|', junction, '|'))
+            .bottom_border(LineStyle::new('+', '=', '=', '+'))
+    }
+}
+
+fn comment_body_style(unicode: bool) -> TableStyle {
+    if unicode {
+        TableStyle::new()
+            .top_border(LineStyle::none())
+            .content_lines(ContentLineStyle::new('│', '┆', '│'))
+            .row_separator(LineStyle::new('├', '╌', '┼', '┤'))
+            .bottom_border(LineStyle::new('└', '─', '┴', '┘'))
+    } else {
+        TableStyle::new()
+            .top_border(LineStyle::none())
+            .content_lines(ContentLineStyle::new('|', '|', '|'))
+            .row_separator(LineStyle::new('|', '-', '+', '|'))
+            .bottom_border(LineStyle::new('+', '-', '+', '+'))
+    }
+}
+
+fn strip_border_line(body: &str, border_v: char) -> Option<&str> {
+    body.strip_prefix(border_v)
+        .and_then(|s| s.strip_suffix(border_v))
+}
+
+fn push_painted_cell(out: &mut String, cell: &str, style: AnsiStyle) {
+    let trimmed = cell.trim();
+    if !trimmed.is_empty()
+        && let Some(pos) = cell.find(trimmed)
+    {
+        out.push_str(&cell[..pos]);
+        out.push_str(&paint(trimmed, style, true));
+        out.push_str(&cell[pos + trimmed.len()..]);
+    } else {
+        out.push_str(cell);
+    }
+}
+
+fn push_attachment_cell(out: &mut String, cell: &str) {
+    let trimmed = cell.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("Attachment:") {
+        let prefix_len = cell.len() - trimmed.len();
+        out.push_str(&cell[..prefix_len]);
+        out.push_str(&paint("Attachment:", BOLD, true));
+        out.push_str(rest);
+    } else {
+        out.push_str(cell);
+    }
+}
+
+fn colorize_comment_header_table(
+    out: &mut String,
+    raw: &str,
+    styles: [Option<AnsiStyle>; 3],
+    unicode: bool,
+) {
+    let border_v = if unicode { '│' } else { '|' };
+    let out_sep = if unicode { '┆' } else { '|' };
+    for line in raw.split_inclusive('\n') {
+        let (body, newline) = line.strip_suffix('\n').map_or((line, ""), |s| (s, "\n"));
+        if let Some(inner) = strip_border_line(body, border_v) {
+            out.push(border_v);
+            for (col_idx, cell) in inner.split('\x1f').enumerate() {
+                if col_idx > 0 {
+                    out.push(out_sep);
+                }
+                if let Some(style) = styles.get(col_idx).copied().flatten() {
+                    push_painted_cell(out, cell, style);
+                } else {
+                    out.push_str(cell);
+                }
+            }
+            out.push(border_v);
+            out.push_str(newline);
+        } else {
+            out.push_str(line);
+        }
+    }
+}
+
+fn colorize_comment_single_col(
+    out: &mut String,
+    raw: &str,
+    has_header: bool,
+    has_content: bool,
+    has_attachments: bool,
+    unicode: bool,
+) {
+    let border_v = if unicode { '│' } else { '|' };
+    let mut in_header = has_header;
+    let mut in_attachments = !has_header && !has_content && has_attachments;
+    for line in raw.split_inclusive('\n') {
+        let (body, newline) = line.strip_suffix('\n').map_or((line, ""), |s| (s, "\n"));
+        if in_header && ((unicode && body.starts_with('╞')) || (!unicode && body.starts_with("+=")))
+        {
+            in_header = false;
+            in_attachments = !has_content && has_attachments;
+            out.push_str(line);
+            continue;
+        }
+        if !in_header
+            && ((unicode && body.starts_with('├')) || (!unicode && body.starts_with("|-")))
+        {
+            in_attachments = has_attachments;
+            out.push_str(line);
+            continue;
+        }
+        if let Some(inner) = strip_border_line(body, border_v) {
+            out.push(border_v);
+            if in_header {
+                push_painted_cell(out, inner, BOLD);
+            } else if in_attachments {
+                push_attachment_cell(out, inner);
+            } else {
+                out.push_str(inner);
+            }
+            out.push(border_v);
+            out.push_str(newline);
+        } else {
+            out.push_str(line);
+        }
+    }
 }
 
 impl Renderer for RichRenderer {
@@ -1393,6 +1859,13 @@ impl Renderer for RichRenderer {
                     hint,
                 } => {
                     self.list(&mut out, records, *noun, empty, hint.as_deref());
+                }
+                Block::Comments {
+                    entries,
+                    noun,
+                    empty,
+                } => {
+                    self.comments(&mut out, entries, *noun, empty);
                 }
                 Block::Break => out.push('\n'),
             }
@@ -1444,6 +1917,27 @@ impl PlainRenderer {
             }
         }
     }
+
+    fn comments(out: &mut String, entries: &[CommentEntry], noun: Noun, empty: &str) {
+        if entries.is_empty() {
+            out.push_str(&clean_plain(empty));
+            out.push('\n');
+            return;
+        }
+        out.push_str(&noun.count(entries.len()));
+        out.push('\n');
+        for entry in entries {
+            out.push('\n');
+            Self::field(out, "Comment", Some(&entry.label));
+            Self::field(out, "Author", entry.author.as_deref());
+            Self::field(out, "Date", entry.date.as_deref());
+            Self::field(out, "Content", Some(&entry.content));
+            for att in &entry.attachments {
+                let attachment = format_attachment_text(att);
+                Self::field(out, "Attachment", Some(&attachment));
+            }
+        }
+    }
 }
 
 impl Renderer for PlainRenderer {
@@ -1475,6 +1969,13 @@ impl Renderer for PlainRenderer {
                     hint,
                 } => {
                     Self::list(&mut out, records, *noun, empty, hint.as_deref());
+                }
+                Block::Comments {
+                    entries,
+                    noun,
+                    empty,
+                } => {
+                    Self::comments(&mut out, entries, *noun, empty);
                 }
                 Block::Break => out.push('\n'),
             }

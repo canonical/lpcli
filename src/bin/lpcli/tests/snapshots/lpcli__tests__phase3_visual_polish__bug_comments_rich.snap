@@ -2,15 +2,17 @@
 source: src/bin/lpcli/tests/phase3_visual_polish.rs
 expression: "render_rich(&outcome, false)"
 ---
-  2 comments found.
+┌────┬───────────────────────────────────────────────────────────┬──────────────────┐
+│ #0 ┆ reporter                                                  ┆ 2026-11-15 08:00 │
+╞════╧═══════════════════════════════════════════════════════════╧══════════════════╡
+│ Initial report with logs attached.                                                │
+└───────────────────────────────────────────────────────────────────────────────────┘
 
-  Comment: #0
-  Author: reporter
-  Date: 2026-11-15 08:00
-  Content: Initial report with logs attached.
-
-  Comment: #1
-  Author: jdoe
-  Date: 2026-11-16 09:15
-  Content: Reproduced cleanly on noble.
-  Attachment: trace.log [Unspecified] https://launchpadlibrarian.net/1000/trace.log
+┌────┬───────────────────────────────────────────────────────────┬──────────────────┐
+│ #1 ┆ jdoe                                                      ┆ 2026-11-16 09:15 │
+╞════╧═══════════════════════════════════════════════════════════╧══════════════════╡
+│ Reproduced cleanly on noble.                                                      │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+│ Attachment: trace.log [Unspecified] https://launchpadlibrarian.net/1000/trace.log │
+└───────────────────────────────────────────────────────────────────────────────────┘
+2 comments found.
