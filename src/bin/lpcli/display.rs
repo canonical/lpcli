@@ -3,7 +3,19 @@
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 
-use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
+use comfy_table::{ContentArrangement, ContentLineStyle, LineStyle, Table, TableStyle};
+
+/// Lightweight borderless table style for `rich` Unicode output.
+pub const UTF8_LIGHT_TABLE: TableStyle = TableStyle::new()
+    .header_lines(ContentLineStyle::none().junction('┆'))
+    .header_separator(LineStyle::none().fill('─').junction('┼'))
+    .content_lines(ContentLineStyle::none().junction('┆'));
+
+/// Lightweight borderless table style for ASCII table output.
+pub const ASCII_LIGHT_TABLE: TableStyle = TableStyle::new()
+    .header_lines(ContentLineStyle::none().junction('|'))
+    .header_separator(LineStyle::none().fill('-').junction('+'))
+    .content_lines(ContentLineStyle::none().junction('|'));
 
 /// Width used when stdout is not a terminal and no preference is supplied.
 pub const DEFAULT_WIDTH: u16 = 100;
@@ -49,7 +61,7 @@ impl Display {
     /// Start a consistently styled, width-aware table.
     pub fn table(self, headers: Vec<&str>) -> DisplayTable {
         let mut table = Table::new();
-        table.load_style(UTF8_FULL_CONDENSED);
+        table.load_style(UTF8_LIGHT_TABLE);
         table.set_content_arrangement(ContentArrangement::Dynamic);
         table.set_width(self.width);
         table.set_header(headers);
@@ -58,6 +70,23 @@ impl Display {
             width: self.width,
         }
     }
+}
+
+/// Measure the maximum single-line terminal display width of `text` using
+/// `comfy-table`'s built-in Unicode width calculation.
+pub fn text_display_width(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let mut table = Table::new();
+    table.add_row([text]);
+    usize::from(
+        table
+            .column_max_content_widths()
+            .first()
+            .copied()
+            .unwrap_or(1),
+    )
 }
 
 /// Detect stdout's terminal width through comfy-table's existing tty support.
@@ -214,7 +243,7 @@ mod tests {
         assert!(rendered.contains("Title: A complete title"));
         assert!(rendered.contains("ID: 2"));
         assert!(rendered.contains("Title: Another title"));
-        assert!(!rendered.contains('┌'));
+        assert!(!rendered.contains('─') && !rendered.contains('┌'));
     }
 
     #[test]

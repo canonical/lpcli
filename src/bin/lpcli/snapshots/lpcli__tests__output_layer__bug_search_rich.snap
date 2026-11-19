@@ -2,11 +2,10 @@
 source: src/bin/lpcli/tests.rs
 expression: rendered
 ---
-┌─────────┬────────────────────┬──────────────┬───────────────┐
-│ ID      ┆ Title              ┆ Status       ┆ Target        │
-╞═════════╪════════════════════╪══════════════╪═══════════════╡
-│ 2000001 ┆ curl crashes on    ┆ New          ┆ curl (Ubuntu) │
-│         ┆ multiline "titles" ┆              ┆               │
-│ 2000002 ┆ Fix released       ┆ Fix Released ┆ curl (Ubuntu) │
-└─────────┴────────────────────┴──────────────┴───────────────┘
 2 bugs found.
+
+ ID      ┆ Title              ┆ Status       ┆ Target        
+─────────┼────────────────────┼──────────────┼───────────────
+ 2000001 ┆ curl crashes on    ┆ New          ┆ curl (Ubuntu) 
+         ┆ multiline "titles" ┆              ┆               
+ 2000002 ┆ Fix released       ┆ Fix Released ┆ curl (Ubuntu)

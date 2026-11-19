@@ -2,10 +2,16 @@
 source: src/bin/lpcli/tests/phase1_read_domains.rs
 expression: "render(&report, OutputMode::Plain)"
 ---
-Message #1: helper, 2025-01-01 13:00
-Action: Answer
-Try this.
-Then that.
+2 messages found.
 
-Message #2: jdoe, 2025-01-01 14:00
-Thanks!
+Message: #1
+Author: helper
+Date: 2025-01-01 13:00
+Action: Answer
+Content: Try this.
+  Then that.
+
+Message: #2
+Author: jdoe
+Date: 2025-01-01 14:00
+Content: Thanks!

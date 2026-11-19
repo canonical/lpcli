@@ -2,10 +2,9 @@
 source: src/bin/lpcli/tests/phase3_visual_polish.rs
 expression: "render_rich(&outcome, false)"
 ---
-┌───────────────┬───────────────┬────────────┐
-│ Person        ┆ Subscribed By ┆ Date       │
-╞═══════════════╪═══════════════╪════════════╡
-│ jdoe          ┆ alice         ┆ 2026-11-14 │
-│ ubuntu-server ┆ ubuntu-server ┆ 2026-11-15 │
-└───────────────┴───────────────┴────────────┘
 2 subscriptions found.
+
+ Person        ┆ Subscribed By ┆ Date       
+───────────────┼───────────────┼────────────
+ jdoe          ┆ alice         ┆ 2026-11-14 
+ ubuntu-server ┆ ubuntu-server ┆ 2026-11-15

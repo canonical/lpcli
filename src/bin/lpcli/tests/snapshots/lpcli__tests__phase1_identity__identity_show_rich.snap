@@ -3,7 +3,7 @@ source: src/bin/lpcli/tests/phase1_identity.rs
 expression: rendered
 ---
 Hardware-bound grant
-────────────────────────────────────────
+────────────────────
   Consumer: lpcli-hardware
   Credential ID: AAEC
   Service root: https://api.launchpad.net/

@@ -2,14 +2,11 @@
 source: src/bin/lpcli/tests/phase1_webhook_snap_token.rs
 expression: "redact_text(&rendered, base)"
 ---
-┌─────────────┬─────────────────────────────┬────────────┬────────────┬────────────────────────────┐
-│ Description ┆ Scopes                      ┆ Created    ┆ Last Used  ┆ Token URL                  │
-╞═════════════╪═════════════════════════════╪════════════╪════════════╪════════════════════════════╡
-│ CI token 1  ┆ repository:build_status,    ┆ 2026-01-02 ┆ 2026-01-02 ┆ https://api.launchpad.net/ │
-│             ┆ repository:push             ┆            ┆            ┆ devel/launchpad/+access-to │
-│             ┆                             ┆            ┆            ┆ ken/1                      │
-│ CI token 2  ┆ repository:build_status,    ┆ 2026-01-02 ┆ —          ┆ https://api.launchpad.net/ │
-│             ┆ repository:push             ┆            ┆            ┆ devel/launchpad/+access-to │
-│             ┆                             ┆            ┆            ┆ ken/2                      │
-└─────────────┴─────────────────────────────┴────────────┴────────────┴────────────────────────────┘
 2 access tokens found. Use the Token URL value with --token-url.
+
+ Description ┆ Scopes                   ┆ Created    ┆ Last Used  ┆ Token URL                       
+─────────────┼──────────────────────────┼────────────┼────────────┼─────────────────────────────────
+ CI token 1  ┆ repository:build_status, ┆ 2026-01-02 ┆ 2026-01-02 ┆ https://api.launchpad.net/devel 
+             ┆ repository:push          ┆            ┆            ┆ /launchpad/+access-token/1      
+ CI token 2  ┆ repository:build_status, ┆ 2026-01-02 ┆ none       ┆ https://api.launchpad.net/devel 
+             ┆ repository:push          ┆            ┆            ┆ /launchpad/+access-token/2

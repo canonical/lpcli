@@ -152,10 +152,6 @@ fn print_mutation(
     }
 }
 
-fn day(timestamp: Option<jiff::Timestamp>) -> Option<String> {
-    output::format_date(timestamp)
-}
-
 // ---------------------------------------------------------------------------
 // Login and logout
 // ---------------------------------------------------------------------------
@@ -176,7 +172,7 @@ pub(crate) async fn handle_login(
     if no_input {
         return Err(no_input_error("Classic login"));
     }
-    eprintln!("Logging in to Launchpad...");
+    let _ = output.write_stderr_line("Logging in to Launchpad...");
     auth::login().await?;
     let grant_stored = matches!(GrantStore::from_env().load(), Ok(Some(_)));
     output.print(&classic_login_report(grant_stored))
@@ -234,7 +230,7 @@ pub(crate) async fn handle_hardware_login(
         login = login.credential_id(credential_id);
     }
 
-    eprintln!("Logging in to Launchpad with a hardware-bound grant...");
+    let _ = output.write_stderr_line("Logging in to Launchpad with a hardware-bound grant...");
     let outcome = hardware_tokens::login_with_hardware_token(login, usb_authenticator()).await?;
     output.print(&hardware_login_report(
         &outcome.account,
@@ -496,13 +492,12 @@ pub(crate) fn hardware_keys_report(keys: &Raw<Vec<RegisteredAuthenticator>>) -> 
             vec![
                 key.id.map(|id| id.to_string()),
                 key.name.clone(),
-                day(key.date_created),
-                day(key.date_last_used),
+                key.date_created.map(|ts| ts.to_string()),
+                key.date_last_used.map(|ts| ts.to_string()),
                 Some(if key.is_active() { "active" } else { "revoked" }.to_string()),
             ]
         })
         .collect();
-    let column = |label, key| Column { label, key };
     Report {
         blocks: vec![Block::List {
             noun: Noun {
@@ -517,11 +512,11 @@ pub(crate) fn hardware_keys_report(keys: &Raw<Vec<RegisteredAuthenticator>>) -> 
         json: keys.raw.clone(),
         records: Records {
             columns: vec![
-                column("ID", "id"),
-                column("Name", "name"),
-                column("Registered", "date_created"),
-                column("Last Used", "date_last_used"),
-                column("Status", "status"),
+                Column::new("ID", "id"),
+                Column::new("Name", "name"),
+                Column::date("Registered", "date_created"),
+                Column::date("Last Used", "date_last_used"),
+                Column::new("Status", "status"),
             ],
             rows,
         },
@@ -810,14 +805,18 @@ pub(crate) async fn handle_hardware_token(
             } else {
                 authenticated_client(cache_timeout)?
             };
-            eprintln!("Registering a security key with Launchpad...");
+            let _ = output.write_stderr_line("Registering a security key with Launchpad...");
             if client.is_hardware_bound() {
-                eprintln!("First authenticate with the key bound to your stored grant.");
-                eprintln!(
-                    "To use an existing OAuth session instead, rerun registration with --classic."
+                let _ = output.write_stderr_line(
+                    "First authenticate with the key bound to your stored grant.",
+                );
+                let _ = output.write_stderr_line(
+                    "To use an existing OAuth session instead, rerun registration with --classic.",
                 );
             } else {
-                eprintln!("Authenticating API requests with the stored classic OAuth session.");
+                let _ = output.write_stderr_line(
+                    "Authenticating API requests with the stored classic OAuth session.",
+                );
             }
             let key =
                 hardware_tokens::register_hardware_key_raw(&client, &name, usb_authenticator())
@@ -882,10 +881,10 @@ pub(crate) async fn handle_hardware_token(
                 return Ok(());
             }
 
-            eprintln!(
+            let _ = output.write_stderr_line(&format!(
                 "Issued a hardware-bound grant bound to {}. Logging in with it...",
                 key_label(&registered)
-            );
+            ));
             let login = login.grant(grant).consumer(consumer);
             // A failed login is partial: Launchpad has already issued the
             // grant, and its secret is lost with this process.

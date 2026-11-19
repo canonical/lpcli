@@ -20,11 +20,10 @@ use anstyle::{AnsiColor, Color, Style as AnsiStyle};
 use clap::ValueEnum;
 use comfy_table::{
     ColumnConstraint, ContentArrangement, ContentLineStyle, LineStyle, Table, TableStyle, Width,
-    presets::{ASCII_FULL, UTF8_FULL},
 };
 use serde::Deserialize;
 
-use crate::display::Display;
+use crate::display::{ASCII_LIGHT_TABLE, Display};
 
 /// Name of the environment variable that selects the output mode.
 pub const FORMAT_ENV: &str = "LPCLI_FORMAT";
@@ -503,6 +502,20 @@ pub struct Settings<'a> {
     pub stderr_terminal: bool,
 }
 
+/// How relative timestamp hints (such as `2 days ago`) are attached to `rich`
+/// single-value timestamps and comments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelativeTime {
+    /// Use `jiff::Timestamp::now()`.
+    System,
+    /// Use an injected timestamp (for deterministic tests).
+    #[cfg(test)]
+    Fixed(jiff::Timestamp),
+    /// Omit relative hints (default for `Output::fixed`).
+    #[cfg(test)]
+    Disabled,
+}
+
 /// The resolved output mode and styling for one invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output {
@@ -515,6 +528,8 @@ pub struct Output {
     progress: lpcli::download::ProgressMode,
     pager: Option<String>,
     pager_lines: usize,
+    time_zone: jiff::tz::TimeZone,
+    relative_time: RelativeTime,
 }
 
 impl Output {
@@ -588,6 +603,8 @@ impl Output {
             progress: resolve_progress(ProgressChoice::Auto, mode, settings.stderr_terminal),
             pager: resolve_pager(false, mode, settings.env, settings.stdout_terminal),
             pager_lines: resolve_pager_lines(settings.env.lines.as_deref(), terminal_rows),
+            time_zone: jiff::tz::TimeZone::try_system().unwrap_or(jiff::tz::TimeZone::UTC),
+            relative_time: RelativeTime::System,
         })
     }
 
@@ -609,7 +626,23 @@ impl Output {
             progress: lpcli::download::ProgressMode::None,
             pager: None,
             pager_lines: DEFAULT_PAGER_LINES,
+            time_zone: jiff::tz::TimeZone::UTC,
+            relative_time: RelativeTime::Disabled,
         }
+    }
+
+    /// Override the time zone used for `rich` timestamp formatting, for tests.
+    #[cfg(test)]
+    pub fn with_time_zone(mut self, time_zone: jiff::tz::TimeZone) -> Self {
+        self.time_zone = time_zone;
+        self
+    }
+
+    /// Override relative timestamp hints for `rich` rendering, for tests.
+    #[cfg(test)]
+    pub fn with_relative_time(mut self, relative_time: RelativeTime) -> Self {
+        self.relative_time = relative_time;
+        self
     }
 
     /// Select the download progress mode on stderr from `choice` and `stderr_terminal`.
@@ -689,7 +722,11 @@ impl Output {
     /// The renderer for the effective mode.
     pub fn renderer(&self) -> Box<dyn Renderer> {
         match self.mode {
-            OutputMode::Rich => Box::new(RichRenderer { style: self.stdout }),
+            OutputMode::Rich => Box::new(RichRenderer {
+                style: self.stdout,
+                time_zone: self.time_zone.clone(),
+                relative_time: self.relative_time,
+            }),
             OutputMode::Plain => Box::new(PlainRenderer),
             OutputMode::Json => Box::new(JsonRenderer {
                 pretty: self.pretty_json,
@@ -702,6 +739,52 @@ impl Output {
     /// Render a report for stdout.
     pub fn render(&self, report: &Report) -> String {
         self.renderer().render(report)
+    }
+
+    /// Render a human-facing report using stderr styling, or an empty string
+    /// in structured (`json`/`tsv`) modes.
+    pub fn render_stderr_report(&self, report: &Report) -> String {
+        match self.mode {
+            OutputMode::Rich => RichRenderer {
+                style: self.stderr,
+                time_zone: self.time_zone.clone(),
+                relative_time: self.relative_time,
+            }
+            .render(report),
+            OutputMode::Plain => PlainRenderer.render(report),
+            OutputMode::Json | OutputMode::Tsv => String::new(),
+        }
+    }
+
+    /// Write a human-facing report directly to stderr without paging.
+    pub fn write_stderr_report(&self, report: &Report) -> lpcli::error::Result<()> {
+        let rendered = self.render_stderr_report(report);
+        if rendered.is_empty() {
+            return Ok(());
+        }
+        let mut stderr = std::io::stderr().lock();
+        stderr.write_all(rendered.as_bytes())?;
+        stderr.flush()?;
+        Ok(())
+    }
+
+    /// Format a redacted, mode-sanitized diagnostic line for stderr.
+    pub fn render_stderr_line(&self, message: &str) -> String {
+        let redacted = redact_secrets(message);
+        if self.mode == OutputMode::Plain {
+            format!("{}\n", clean_plain(&redacted))
+        } else {
+            format!("{}\n", clean(&redacted))
+        }
+    }
+
+    /// Write a redacted, mode-sanitized diagnostic line to stderr.
+    pub fn write_stderr_line(&self, message: &str) -> lpcli::error::Result<()> {
+        let rendered = self.render_stderr_line(message);
+        let mut stderr = std::io::stderr().lock();
+        stderr.write_all(rendered.as_bytes())?;
+        stderr.flush()?;
+        Ok(())
     }
 
     /// Write pre-rendered text to stdout, piping through `$PAGER` when enabled
@@ -861,6 +944,32 @@ pub struct Records {
     pub rows: Vec<Vec<Option<String>>>,
 }
 
+/// How a column's cell value should be formatted for display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColumnFormat {
+    /// Display the stored text as-is.
+    #[default]
+    Text,
+    /// Parse RFC 3339 timestamps and format as `YYYY-MM-DD` (local in `rich`, UTC in `plain`/`tsv`).
+    Date,
+    /// Parse RFC 3339 timestamps and format as `YYYY-MM-DD HH:MM` (local in `rich`, UTC in `plain`/`tsv`).
+    DateTime,
+}
+
+/// Precision for a single [`Block::Timestamp`] value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimestampPrecision {
+    Date,
+    DateTime,
+}
+
+/// A comment timestamp, either a parsed `Timestamp` or a raw timestamp string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommentDate {
+    Timestamp(jiff::Timestamp),
+    Text(String),
+}
+
 /// A record column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Column {
@@ -868,6 +977,37 @@ pub struct Column {
     pub label: &'static str,
     /// The `tsv` header, a Launchpad attribute name where one exists.
     pub key: &'static str,
+    /// Optional timestamp formatting applied per renderer.
+    pub format: ColumnFormat,
+}
+
+impl Column {
+    /// Construct a plain text column.
+    pub const fn new(label: &'static str, key: &'static str) -> Self {
+        Self {
+            label,
+            key,
+            format: ColumnFormat::Text,
+        }
+    }
+
+    /// Construct a `YYYY-MM-DD` date column backed by raw RFC 3339 timestamps.
+    pub const fn date(label: &'static str, key: &'static str) -> Self {
+        Self {
+            label,
+            key,
+            format: ColumnFormat::Date,
+        }
+    }
+
+    /// Construct a `YYYY-MM-DD HH:MM` timestamp column backed by raw RFC 3339 timestamps.
+    pub const fn datetime(label: &'static str, key: &'static str) -> Self {
+        Self {
+            label,
+            key,
+            format: ColumnFormat::DateTime,
+        }
+    }
 }
 
 /// The singular and plural names of the records in a list.
@@ -918,12 +1058,18 @@ pub struct CommentAttachment {
 /// and a width-aware table card in `rich` mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentEntry {
-    /// Comment sequence label such as `"#0"`.
+    /// Primary record field label in `plain` and stacked modes (e.g. `"Comment"`, `"Message"`, `"Location"`).
+    pub label_field: &'static str,
+    /// Comment sequence or location label such as `"#0"` or `"lib/model.py:5"`.
     pub label: String,
     /// Normalized author account name, if known.
     pub author: Option<String>,
-    /// Formatted creation timestamp, if known.
-    pub date: Option<String>,
+    /// Comment timestamp, if known.
+    pub date: Option<CommentDate>,
+    /// Additional structured fields shown below the header in `rich` and after `Date` in `plain`.
+    pub details: Vec<(&'static str, String)>,
+    /// Content field label in `plain` and stacked modes (e.g. `"Content"`, `"Text"`).
+    pub content_field: &'static str,
     /// Raw comment body text.
     pub content: String,
     /// Attachments associated with this comment, in Launchpad order.
@@ -941,8 +1087,11 @@ pub enum Block {
     Note(Vec<Span>),
     /// A labeled detail that belongs to the preceding status.
     Field(&'static str, String),
-    /// The report's [`Records`], with a count before (`plain`) or after
-    /// (`rich`) them, an optional hint, and a message for an empty list.
+    /// A labeled timestamp rendered in local time with an optional relative hint
+    /// in `rich` mode and UTC in `plain` mode.
+    Timestamp(&'static str, jiff::Timestamp, TimestampPrecision),
+    /// The report's [`Records`], with a leading count in both `rich` and `plain`,
+    /// an optional hint, and a message for an empty list.
     List {
         noun: Noun,
         empty: String,
@@ -980,6 +1129,8 @@ pub trait Renderer {
 /// Color, Unicode tables, and headings.
 pub struct RichRenderer {
     pub style: Style,
+    pub time_zone: jiff::tz::TimeZone,
+    pub relative_time: RelativeTime,
 }
 
 /// Labeled records with ASCII punctuation, no color, and no box drawing.
@@ -1074,23 +1225,104 @@ pub fn link_name(link: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Format an optional Launchpad timestamp as `YYYY-MM-DD`.
-pub fn format_date(timestamp: Option<jiff::Timestamp>) -> Option<String> {
-    timestamp.map(|ts| ts.strftime("%Y-%m-%d").to_string())
-}
-
-/// Format an optional Launchpad timestamp as `YYYY-MM-DD HH:MM`.
-pub fn format_datetime(timestamp: Option<jiff::Timestamp>) -> Option<String> {
-    timestamp.map(|ts| ts.strftime("%Y-%m-%d %H:%M").to_string())
-}
-
-/// Format a raw timestamp string as `YYYY-MM-DD HH:MM` when it parses as RFC 3339,
-/// or return the trimmed input string as-is.
+/// Format a raw timestamp string as UTC `YYYY-MM-DD HH:MM` when it parses as
+/// RFC 3339, or return the trimmed input string as-is.
 pub fn format_timestamp_str(raw: &str) -> String {
     let trimmed = raw.trim();
     match trimmed.parse::<jiff::Timestamp>() {
-        Ok(ts) => ts.strftime("%Y-%m-%d %H:%M").to_string(),
+        Ok(ts) => format_utc_timestamp(ts, TimestampPrecision::DateTime),
         Err(_) => trimmed.to_string(),
+    }
+}
+
+/// Format a concise relative-time hint (such as `2 days ago` or `in 3 hours`)
+/// relative to `now`.
+pub fn format_relative_hint(timestamp: jiff::Timestamp, now: jiff::Timestamp) -> String {
+    let delta = now.as_second() - timestamp.as_second();
+    let abs = delta.unsigned_abs();
+    if abs < 60 {
+        return "just now".to_string();
+    }
+    let unit = |count: u64, singular: &str, plural: &str| {
+        if count == 1 {
+            format!("1 {singular}")
+        } else {
+            format!("{count} {plural}")
+        }
+    };
+    let amount = if abs < 3_600 {
+        unit(abs / 60, "minute", "minutes")
+    } else if abs < 86_400 {
+        unit(abs / 3_600, "hour", "hours")
+    } else if abs < 30 * 86_400 {
+        unit(abs / 86_400, "day", "days")
+    } else if abs < 365 * 86_400 {
+        unit(abs / (30 * 86_400), "month", "months")
+    } else {
+        unit(abs / (365 * 86_400), "year", "years")
+    };
+    if delta >= 0 {
+        format!("{amount} ago")
+    } else {
+        format!("in {amount}")
+    }
+}
+
+/// Format `timestamp` in `tz` at `precision`, appending `(relative hint)` when
+/// `now` is provided.
+pub fn format_local_timestamp(
+    timestamp: jiff::Timestamp,
+    precision: TimestampPrecision,
+    tz: &jiff::tz::TimeZone,
+    now: Option<jiff::Timestamp>,
+) -> String {
+    let fmt = match precision {
+        TimestampPrecision::Date => "%Y-%m-%d",
+        TimestampPrecision::DateTime => "%Y-%m-%d %H:%M",
+    };
+    let base = timestamp
+        .to_zoned_datetime(tz.clone())
+        .strftime(fmt)
+        .to_string();
+    match now {
+        Some(now) => format!("{base} ({})", format_relative_hint(timestamp, now)),
+        None => base,
+    }
+}
+
+fn format_utc_timestamp(timestamp: jiff::Timestamp, precision: TimestampPrecision) -> String {
+    let fmt = match precision {
+        TimestampPrecision::Date => "%Y-%m-%d",
+        TimestampPrecision::DateTime => "%Y-%m-%d %H:%M",
+    };
+    timestamp.strftime(fmt).to_string()
+}
+
+fn format_column_value(
+    value: &str,
+    format: ColumnFormat,
+    tz: Option<&jiff::tz::TimeZone>,
+) -> String {
+    let precision = match format {
+        ColumnFormat::Text => return value.to_string(),
+        ColumnFormat::Date => TimestampPrecision::Date,
+        ColumnFormat::DateTime => TimestampPrecision::DateTime,
+    };
+    let Ok(ts) = value.trim().parse::<jiff::Timestamp>() else {
+        return value.to_string();
+    };
+    match tz {
+        Some(tz) => format_local_timestamp(ts, precision, tz, None),
+        None => format_utc_timestamp(ts, precision),
+    }
+}
+
+impl CommentDate {
+    fn format_utc(&self) -> String {
+        match self {
+            Self::Timestamp(ts) => format_utc_timestamp(*ts, TimestampPrecision::DateTime),
+            Self::Text(raw) => format_timestamp_str(raw),
+        }
     }
 }
 
@@ -1153,16 +1385,20 @@ fn field_value_style(label: &str, value: &str) -> Option<AnsiStyle> {
     }
 }
 
-/// Render a colored `comfy-table` grid whose body rows are delimited by
-/// sentinel `cell_sep` (`\x1f`) and `row_sep` (`\x1e`) control characters,
-/// using pure `anstyle` SGR codes without post-hoc splitting on visible text.
+/// Render a colored lightweight `comfy-table` grid whose columns and logical
+/// rows are delimited by sentinel `cell_sep` (`\x1f`) and `row_sep` (`\x1e`)
+/// control characters, painting bold headers and semantic body cells with
+/// pure `anstyle` SGR codes.
 fn colorize_grid_with_sentinels(
     out: &mut String,
     raw: &str,
     row_styles: &[Vec<Option<AnsiStyle>>],
     cell_sep: char,
     row_sep: char,
+    unicode: bool,
 ) {
+    let out_sep = if unicode { '┆' } else { '|' };
+    let (sep_fill, sep_j) = if unicode { ('─', '┼') } else { ('-', '+') };
     let mut in_body = false;
     let mut row_idx = 0usize;
     for line in raw.split_inclusive('\n') {
@@ -1170,14 +1406,9 @@ fn colorize_grid_with_sentinels(
             Some(stripped) => (stripped, "\n"),
             None => (line, ""),
         };
-        if body.starts_with('╞') {
+        if !in_body && !body.is_empty() && body.chars().all(|c| c == sep_fill || c == sep_j) {
             in_body = true;
             row_idx = 0;
-            out.push_str(line);
-            continue;
-        }
-        if body.starts_with('└') {
-            in_body = false;
             out.push_str(line);
             continue;
         }
@@ -1185,31 +1416,19 @@ fn colorize_grid_with_sentinels(
             row_idx += 1;
             continue;
         }
-        if in_body && let Some(inner) = body.strip_prefix('│').and_then(|s| s.strip_suffix('│'))
-        {
-            out.push('│');
-            let styles = row_styles.get(row_idx).map(Vec::as_slice).unwrap_or(&[]);
-            for (col_idx, cell) in inner.split(cell_sep).enumerate() {
-                if col_idx > 0 {
-                    out.push('┆');
-                }
-                let trimmed = cell.trim();
-                if !trimmed.is_empty()
-                    && let Some(Some(style)) = styles.get(col_idx)
-                    && let Some(pos) = cell.find(trimmed)
-                {
-                    out.push_str(&cell[..pos]);
-                    out.push_str(&paint(trimmed, *style, true));
-                    out.push_str(&cell[pos + trimmed.len()..]);
-                } else {
-                    out.push_str(cell);
-                }
+        let styles = if in_body {
+            row_styles.get(row_idx).map(Vec::as_slice).unwrap_or(&[])
+        } else {
+            &[]
+        };
+        push_delimited_row(out, body, cell_sep, out_sep, |col_idx| {
+            if in_body {
+                styles.get(col_idx).copied().flatten()
+            } else {
+                Some(BOLD)
             }
-            out.push('│');
-            out.push_str(newline);
-            continue;
-        }
-        out.push_str(line);
+        });
+        out.push_str(newline);
     }
 }
 
@@ -1307,6 +1526,16 @@ impl RichRenderer {
         paint(symbol, style, self.style.color)
     }
 
+    fn resolved_now(&self) -> Option<jiff::Timestamp> {
+        match self.relative_time {
+            RelativeTime::System => Some(jiff::Timestamp::now()),
+            #[cfg(test)]
+            RelativeTime::Fixed(now) => Some(now),
+            #[cfg(test)]
+            RelativeTime::Disabled => None,
+        }
+    }
+
     fn list(
         &self,
         out: &mut String,
@@ -1320,7 +1549,14 @@ impl RichRenderer {
             out.push('\n');
             return;
         }
-        let missing = if self.style.unicode { "—" } else { "none" };
+        out.push_str(&noun.count(records.rows.len()));
+        if let Some(hint) = hint {
+            out.push(' ');
+            out.push_str(&clean(hint));
+        }
+        out.push_str("\n\n");
+
+        let missing = "none";
         let display = Display::from_width(self.style.width);
         if display.is_stacked(records.columns.len()) {
             for (row_index, row) in records.rows.iter().enumerate() {
@@ -1331,7 +1567,9 @@ impl RichRenderer {
                     let cleaned = row
                         .get(index)
                         .and_then(Option::as_deref)
-                        .map_or_else(|| missing.to_string(), clean);
+                        .map(|raw| format_column_value(raw, column.format, Some(&self.time_zone)))
+                        .map(|val| clean(&val))
+                        .unwrap_or_else(|| missing.to_string());
                     let formatted = if self.style.color
                         && let Some(style) = field_value_style(column.label, &cleaned)
                     {
@@ -1345,26 +1583,31 @@ impl RichRenderer {
                     out.push('\n');
                 }
             }
-            out.push('\n');
         } else {
             let mut table =
                 display.table(records.columns.iter().map(|column| column.label).collect());
+            if !self.style.unicode {
+                table.load_style(ASCII_LIGHT_TABLE);
+            }
             table.force_no_tty();
             let mut row_styles = Vec::with_capacity(records.rows.len());
             for row in &records.rows {
                 let mut cells = Vec::with_capacity(records.columns.len());
                 let mut styles = Vec::with_capacity(records.columns.len());
                 for (col_idx, value) in row.iter().enumerate() {
-                    let cleaned = value.as_deref().map_or_else(|| missing.to_string(), clean);
+                    let column = records.columns.get(col_idx);
+                    let cleaned = value
+                        .as_deref()
+                        .map(|raw| {
+                            let format = column.map_or(ColumnFormat::Text, |c| c.format);
+                            format_column_value(raw, format, Some(&self.time_zone))
+                        })
+                        .map(|val| clean(&val))
+                        .unwrap_or_else(|| missing.to_string());
                     let style = self
                         .style
                         .color
-                        .then(|| {
-                            records
-                                .columns
-                                .get(col_idx)
-                                .and_then(|column| field_value_style(column.label, &cleaned))
-                        })
+                        .then(|| column.and_then(|c| field_value_style(c.label, &cleaned)))
                         .flatten();
                     cells.push(cleaned);
                     styles.push(style);
@@ -1376,24 +1619,26 @@ impl RichRenderer {
                 const CELL_SEP: char = '\x1f';
                 const ROW_SEP: char = '\x1e';
                 let style = table.style_mut();
+                style.header_lines.junction = Some(CELL_SEP);
                 style.content_lines.junction = Some(CELL_SEP);
-                style.row_separator =
-                    comfy_table::LineStyle::new(ROW_SEP, ROW_SEP, ROW_SEP, ROW_SEP);
+                style.row_separator = LineStyle::none().fill(ROW_SEP).junction(ROW_SEP);
                 let raw = format!("{table}\n");
-                colorize_grid_with_sentinels(out, &raw, &row_styles, CELL_SEP, ROW_SEP);
+                colorize_grid_with_sentinels(
+                    out,
+                    &raw,
+                    &row_styles,
+                    CELL_SEP,
+                    ROW_SEP,
+                    self.style.unicode,
+                );
             } else {
                 out.push_str(&format!("{table}\n"));
             }
         }
-        out.push_str(&noun.count(records.rows.len()));
-        if let Some(hint) = hint {
-            out.push(' ');
-            out.push_str(&clean(hint));
-        }
-        out.push('\n');
     }
 
     fn prepare_comments(&self, entries: &[CommentEntry], missing: &str) -> Vec<PreparedComment> {
+        let now = self.resolved_now();
         entries
             .iter()
             .map(|entry| {
@@ -1408,20 +1653,49 @@ impl RichRenderer {
                     .color
                     .then(|| field_value_style("Author", &author))
                     .flatten();
-                let date = entry
-                    .date
-                    .as_deref()
-                    .map(clean)
-                    .unwrap_or_else(|| missing.to_string());
+                let date = match &entry.date {
+                    Some(CommentDate::Timestamp(ts)) => format_local_timestamp(
+                        *ts,
+                        TimestampPrecision::DateTime,
+                        &self.time_zone,
+                        now,
+                    ),
+                    Some(CommentDate::Text(raw)) => {
+                        let trimmed = raw.trim();
+                        if let Ok(ts) = trimmed.parse::<jiff::Timestamp>() {
+                            format_local_timestamp(
+                                ts,
+                                TimestampPrecision::DateTime,
+                                &self.time_zone,
+                                now,
+                            )
+                        } else {
+                            let cleaned = clean(trimmed);
+                            if cleaned.is_empty() {
+                                missing.to_string()
+                            } else {
+                                cleaned
+                            }
+                        }
+                    }
+                    None => missing.to_string(),
+                };
+                let details: Vec<(&'static str, String)> = entry
+                    .details
+                    .iter()
+                    .map(|(k, v)| (*k, clean(&v.replace("\r\n", "\n"))))
+                    .collect();
+                let detail_lines: Vec<String> =
+                    details.iter().map(|(k, v)| format!("{k}: {v}")).collect();
                 let normalized = entry.content.replace("\r\n", "\n");
                 let cleaned_body = clean(&normalized);
                 let trimmed_body = cleaned_body.trim_matches('\n');
-                let body = if !trimmed_body.trim().is_empty() {
-                    Some(trimmed_body.to_string())
-                } else if entry.attachments.is_empty() {
-                    Some(missing.to_string())
-                } else {
-                    None
+                let content = (!trimmed_body.trim().is_empty()).then(|| trimmed_body.to_string());
+                let box_body = match (detail_lines.is_empty(), &content) {
+                    (true, None) => entry.attachments.is_empty().then(|| missing.to_string()),
+                    (true, Some(text)) => Some(text.clone()),
+                    (false, None) => Some(detail_lines.join("\n")),
+                    (false, Some(text)) => Some(format!("{}\n\n{text}", detail_lines.join("\n"))),
                 };
                 let attachment_lines = entry
                     .attachments
@@ -1429,11 +1703,15 @@ impl RichRenderer {
                     .map(|att| format!("Attachment: {}", clean(&format_attachment_text(att))))
                     .collect();
                 PreparedComment {
+                    label_field: entry.label_field,
                     label,
                     author,
                     author_style,
                     date,
-                    body,
+                    details,
+                    content_field: entry.content_field,
+                    content,
+                    box_body,
                     attachment_lines,
                 }
             })
@@ -1455,11 +1733,14 @@ impl RichRenderer {
                 || entry.author.clone(),
                 |style| paint_lines(&entry.author, style, true),
             );
-            let body = entry.body.as_deref().unwrap_or(missing);
-            out.push_str(&format!("Comment: {label}\n"));
+            let body = entry.content.as_deref().unwrap_or(missing);
+            out.push_str(&format!("{}: {label}\n", entry.label_field));
             out.push_str(&format!("Author: {author}\n"));
             out.push_str(&format!("Date: {}\n", entry.date));
-            out.push_str(&format!("Content: {body}\n"));
+            for (k, v) in &entry.details {
+                out.push_str(&format!("{k}: {v}\n"));
+            }
+            out.push_str(&format!("{}: {body}\n", entry.content_field));
             for att in &entry.attachment_lines {
                 if let Some(rest) = att.strip_prefix("Attachment:") {
                     out.push_str(&paint("Attachment:", BOLD, self.style.color));
@@ -1470,7 +1751,6 @@ impl RichRenderer {
                 out.push('\n');
             }
         }
-        out.push('\n');
     }
 
     fn render_comment_card(
@@ -1481,7 +1761,7 @@ impl RichRenderer {
     ) {
         let attachments_cell =
             (!entry.attachment_lines.is_empty()).then(|| entry.attachment_lines.join("\n"));
-        let has_content = entry.body.is_some();
+        let has_content = entry.box_body.is_some();
         let has_attachments = attachments_cell.is_some();
 
         if layout.three_col_header {
@@ -1513,18 +1793,17 @@ impl RichRenderer {
             }
 
             let mut body_table = Table::new();
-            body_table.load_style(comment_body_style(self.style.unicode));
+            body_table.load_style(comment_body_style(self.style.unicode, self.style.color));
             body_table.force_no_tty();
             body_table.set_content_arrangement(ContentArrangement::Dynamic);
             body_table.set_width(layout.box_w);
-            if let Some(body) = &entry.body {
+            if let Some(body) = &entry.box_body {
                 body_table.add_row([body.as_str()]);
             }
             if let Some(att) = &attachments_cell {
                 body_table.add_row([att.as_str()]);
             }
-            body_table
-                .set_constraints([ColumnConstraint::Absolute(Width::Fixed(layout.box_w - 2))]);
+            body_table.set_constraints([ColumnConstraint::Absolute(Width::Fixed(layout.box_w))]);
             let body_raw = format!("{body_table}\n");
             if self.style.color {
                 colorize_comment_single_col(
@@ -1541,11 +1820,10 @@ impl RichRenderer {
         } else {
             let sep = if self.style.unicode { " · " } else { " | " };
             let mut card = Table::new();
-            card.load_style(if self.style.unicode {
-                UTF8_FULL
-            } else {
-                ASCII_FULL
-            });
+            card.load_style(comment_fallback_card_style(
+                self.style.unicode,
+                self.style.color,
+            ));
             card.force_no_tty();
             card.set_content_arrangement(ContentArrangement::Dynamic);
             card.set_width(layout.box_w);
@@ -1553,13 +1831,13 @@ impl RichRenderer {
                 "{}{sep}{}{sep}{}",
                 entry.label, entry.author, entry.date
             )]);
-            if let Some(body) = &entry.body {
+            if let Some(body) = &entry.box_body {
                 card.add_row([body.as_str()]);
             }
             if let Some(att) = &attachments_cell {
                 card.add_row([att.as_str()]);
             }
-            card.set_constraints([ColumnConstraint::Absolute(Width::Fixed(layout.box_w - 2))]);
+            card.set_constraints([ColumnConstraint::Absolute(Width::Fixed(layout.box_w))]);
             let raw = format!("{card}\n");
             if self.style.color {
                 colorize_comment_single_col(
@@ -1582,7 +1860,9 @@ impl RichRenderer {
             out.push('\n');
             return;
         }
-        let missing = if self.style.unicode { "—" } else { "none" };
+        out.push_str(&noun.count(entries.len()));
+        out.push_str("\n\n");
+        let missing = "none";
         let prepared = self.prepare_comments(entries, missing);
         if self.style.width < 10 {
             self.render_stacked_comments(out, &prepared, missing);
@@ -1595,17 +1875,19 @@ impl RichRenderer {
                 self.render_comment_card(out, entry, &layout);
             }
         }
-        out.push_str(&noun.count(entries.len()));
-        out.push('\n');
     }
 }
 
 struct PreparedComment {
+    label_field: &'static str,
     label: String,
     author: String,
     author_style: Option<AnsiStyle>,
     date: String,
-    body: Option<String>,
+    details: Vec<(&'static str, String)>,
+    content_field: &'static str,
+    content: Option<String>,
+    box_body: Option<String>,
     attachment_lines: Vec<String>,
 }
 
@@ -1633,7 +1915,7 @@ fn comment_card_metrics(prepared: &[PreparedComment], max_width: u16) -> Comment
             entry.author.as_str(),
             entry.date.as_str(),
         ]);
-        if let Some(body) = &entry.body {
+        if let Some(body) = &entry.box_body {
             body_measure.add_row([body.as_str()]);
         }
         if !entry.attachment_lines.is_empty() {
@@ -1650,16 +1932,16 @@ fn comment_card_metrics(prepared: &[PreparedComment], max_width: u16) -> Comment
         .copied()
         .unwrap_or(1);
 
-    // Three columns have 4 vertical borders and 6 padding spaces (10); a single
-    // column has 2 vertical borders and 2 padding spaces (4).
+    // Borderless sides: three columns have 2 inner junctions and 6 padding
+    // spaces (8); a single column has 2 padding spaces (2).
     let natural_header_w =
-        10usize + usize::from(label_w) + usize::from(author_w) + usize::from(date_w);
-    let natural_body_w = 4usize + usize::from(body_max_w);
+        8usize + usize::from(label_w) + usize::from(author_w) + usize::from(date_w);
+    let natural_body_w = 2usize + usize::from(body_max_w);
     let box_w = natural_header_w
         .max(natural_body_w)
         .min(usize::from(max_width));
 
-    let fixed_chrome = 10usize + usize::from(label_w) + usize::from(date_w);
+    let fixed_chrome = 8usize + usize::from(label_w) + usize::from(date_w);
     let min_author_col = usize::from(author_w).clamp(1, 12);
     let three_col_header = box_w >= fixed_chrome.saturating_add(min_author_col);
     let (col0_w, col1_w, col2_w) = if three_col_header {
@@ -1691,36 +1973,69 @@ fn comment_header_style(unicode: bool, color: bool) -> TableStyle {
     };
     if unicode {
         TableStyle::new()
-            .top_border(LineStyle::new('┌', '─', '┬', '┐'))
-            .content_lines(ContentLineStyle::new('│', junction, '│'))
-            .bottom_border(LineStyle::new('╞', '═', '╧', '╡'))
+            .top_border(LineStyle::none().fill('─').junction('┬'))
+            .content_lines(ContentLineStyle::none().junction(junction))
+            .bottom_border(LineStyle::none().fill('─').junction('┴'))
     } else {
         TableStyle::new()
-            .top_border(LineStyle::new('+', '-', '+', '+'))
-            .content_lines(ContentLineStyle::new('|', junction, '|'))
-            .bottom_border(LineStyle::new('+', '=', '=', '+'))
+            .top_border(LineStyle::none().fill('-').junction('+'))
+            .content_lines(ContentLineStyle::none().junction(junction))
+            .bottom_border(LineStyle::none().fill('-').junction('+'))
     }
 }
 
-fn comment_body_style(unicode: bool) -> TableStyle {
-    if unicode {
-        TableStyle::new()
-            .top_border(LineStyle::none())
-            .content_lines(ContentLineStyle::new('│', '┆', '│'))
-            .row_separator(LineStyle::new('├', '╌', '┼', '┤'))
-            .bottom_border(LineStyle::new('└', '─', '┴', '┘'))
+fn comment_body_style(unicode: bool, color: bool) -> TableStyle {
+    let h = if unicode { '─' } else { '-' };
+    let row_sep = if color {
+        '\x1e'
+    } else if unicode {
+        '╌'
     } else {
-        TableStyle::new()
-            .top_border(LineStyle::none())
-            .content_lines(ContentLineStyle::new('|', '|', '|'))
-            .row_separator(LineStyle::new('|', '-', '+', '|'))
-            .bottom_border(LineStyle::new('+', '-', '+', '+'))
-    }
+        '-'
+    };
+    TableStyle::new()
+        .top_border(LineStyle::none())
+        .content_lines(ContentLineStyle::none())
+        .row_separator(LineStyle::none().fill(row_sep))
+        .bottom_border(LineStyle::none().fill(h))
 }
 
-fn strip_border_line(body: &str, border_v: char) -> Option<&str> {
-    body.strip_prefix(border_v)
-        .and_then(|s| s.strip_suffix(border_v))
+fn comment_fallback_card_style(unicode: bool, color: bool) -> TableStyle {
+    let h = if unicode { '─' } else { '-' };
+    let header_sep = if color { '\x1d' } else { h };
+    let row_sep = if color {
+        '\x1e'
+    } else if unicode {
+        '╌'
+    } else {
+        '-'
+    };
+    TableStyle::new()
+        .top_border(LineStyle::none().fill(h))
+        .header_lines(ContentLineStyle::none())
+        .header_separator(LineStyle::none().fill(header_sep))
+        .content_lines(ContentLineStyle::none())
+        .row_separator(LineStyle::none().fill(row_sep))
+        .bottom_border(LineStyle::none().fill(h))
+}
+
+fn push_delimited_row(
+    out: &mut String,
+    row: &str,
+    in_sep: char,
+    out_sep: char,
+    style_for_col: impl Fn(usize) -> Option<AnsiStyle>,
+) {
+    for (col_idx, cell) in row.split(in_sep).enumerate() {
+        if col_idx > 0 {
+            out.push(out_sep);
+        }
+        if let Some(style) = style_for_col(col_idx) {
+            push_painted_cell(out, cell, style);
+        } else {
+            out.push_str(cell);
+        }
+    }
 }
 
 fn push_painted_cell(out: &mut String, cell: &str, style: AnsiStyle) {
@@ -1754,27 +2069,19 @@ fn colorize_comment_header_table(
     styles: [Option<AnsiStyle>; 3],
     unicode: bool,
 ) {
-    let border_v = if unicode { '│' } else { '|' };
     let out_sep = if unicode { '┆' } else { '|' };
-    for line in raw.split_inclusive('\n') {
-        let (body, newline) = line.strip_suffix('\n').map_or((line, ""), |s| (s, "\n"));
-        if let Some(inner) = strip_border_line(body, border_v) {
-            out.push(border_v);
-            for (col_idx, cell) in inner.split('\x1f').enumerate() {
-                if col_idx > 0 {
-                    out.push(out_sep);
-                }
-                if let Some(style) = styles.get(col_idx).copied().flatten() {
-                    push_painted_cell(out, cell, style);
-                } else {
-                    out.push_str(cell);
-                }
-            }
-            out.push(border_v);
-            out.push_str(newline);
-        } else {
+    let lines: Vec<&str> = raw.split_inclusive('\n').collect();
+    let last_idx = lines.len().saturating_sub(1);
+    for (idx, line) in lines.iter().enumerate() {
+        if idx == 0 || idx == last_idx {
             out.push_str(line);
+            continue;
         }
+        let (body, newline) = line.strip_suffix('\n').map_or((*line, ""), |s| (s, "\n"));
+        push_delimited_row(out, body, '\x1f', out_sep, |col_idx| {
+            styles.get(col_idx).copied().flatten()
+        });
+        out.push_str(newline);
     }
 }
 
@@ -1786,35 +2093,36 @@ fn colorize_comment_single_col(
     has_attachments: bool,
     unicode: bool,
 ) {
-    let border_v = if unicode { '│' } else { '|' };
+    let header_fill = if unicode { "─" } else { "-" };
+    let row_fill = if unicode { "╌" } else { "-" };
+    let lines: Vec<&str> = raw.split_inclusive('\n').collect();
+    let last_idx = lines.len().saturating_sub(1);
     let mut in_header = has_header;
     let mut in_attachments = !has_header && !has_content && has_attachments;
-    for line in raw.split_inclusive('\n') {
-        let (body, newline) = line.strip_suffix('\n').map_or((line, ""), |s| (s, "\n"));
-        if in_header && ((unicode && body.starts_with('╞')) || (!unicode && body.starts_with("+=")))
-        {
+    for (idx, line) in lines.iter().enumerate() {
+        if (has_header && idx == 0) || idx == last_idx {
+            out.push_str(line);
+            continue;
+        }
+        let (body, newline) = line.strip_suffix('\n').map_or((*line, ""), |s| (s, "\n"));
+        if in_header && body.starts_with('\x1d') {
             in_header = false;
             in_attachments = !has_content && has_attachments;
-            out.push_str(line);
+            out.push_str(&header_fill.repeat(body.chars().count()));
+            out.push_str(newline);
             continue;
         }
-        if !in_header
-            && ((unicode && body.starts_with('├')) || (!unicode && body.starts_with("|-")))
-        {
+        if !in_header && body.starts_with('\x1e') {
             in_attachments = has_attachments;
-            out.push_str(line);
+            out.push_str(&row_fill.repeat(body.chars().count()));
+            out.push_str(newline);
             continue;
         }
-        if let Some(inner) = strip_border_line(body, border_v) {
-            out.push(border_v);
-            if in_header {
-                push_painted_cell(out, inner, BOLD);
-            } else if in_attachments {
-                push_attachment_cell(out, inner);
-            } else {
-                out.push_str(inner);
-            }
-            out.push(border_v);
+        if in_header {
+            push_painted_cell(out, body, BOLD);
+            out.push_str(newline);
+        } else if in_attachments {
+            push_attachment_cell(out, body);
             out.push_str(newline);
         } else {
             out.push_str(line);
@@ -1826,12 +2134,16 @@ impl Renderer for RichRenderer {
     fn render(&self, report: &Report) -> String {
         let mut out = String::new();
         let rule = if self.style.unicode { "─" } else { "-" };
+        let now = self.resolved_now();
         for block in &report.blocks {
             match block {
                 Block::Heading(text) => {
-                    out.push_str(&paint(&clean(text), BOLD, self.style.color));
+                    let cleaned = clean(text);
+                    let rule_w = crate::display::text_display_width(&cleaned)
+                        .clamp(1, usize::from(self.style.width).max(1));
+                    out.push_str(&paint(&cleaned, BOLD, self.style.color));
                     out.push('\n');
-                    out.push_str(&rule.repeat(40));
+                    out.push_str(&rule.repeat(rule_w));
                     out.push('\n');
                 }
                 Block::Status(level, spans) => {
@@ -1847,6 +2159,11 @@ impl Renderer for RichRenderer {
                     } else {
                         cleaned
                     };
+                    out.push_str(&format!("  {label}: {formatted}\n"));
+                }
+                Block::Timestamp(label, timestamp, precision) => {
+                    let formatted =
+                        format_local_timestamp(*timestamp, *precision, &self.time_zone, now);
                     out.push_str(&format!("  {label}: {formatted}\n"));
                 }
                 Block::List { noun, empty, hint } => {
@@ -1913,7 +2230,10 @@ impl PlainRenderer {
                 if value.as_deref() == Some("") {
                     continue;
                 }
-                Self::field(out, column.label, value.as_deref());
+                let formatted = value
+                    .as_deref()
+                    .map(|raw| format_column_value(raw, column.format, None));
+                Self::field(out, column.label, formatted.as_deref());
             }
         }
     }
@@ -1928,10 +2248,14 @@ impl PlainRenderer {
         out.push('\n');
         for entry in entries {
             out.push('\n');
-            Self::field(out, "Comment", Some(&entry.label));
+            Self::field(out, entry.label_field, Some(&entry.label));
             Self::field(out, "Author", entry.author.as_deref());
-            Self::field(out, "Date", entry.date.as_deref());
-            Self::field(out, "Content", Some(&entry.content));
+            let date = entry.date.as_ref().map(CommentDate::format_utc);
+            Self::field(out, "Date", date.as_deref());
+            for (label, value) in &entry.details {
+                Self::field(out, label, Some(value));
+            }
+            Self::field(out, entry.content_field, Some(&entry.content));
             for att in &entry.attachments {
                 let attachment = format_attachment_text(att);
                 Self::field(out, "Attachment", Some(&attachment));
@@ -1959,6 +2283,10 @@ impl Renderer for PlainRenderer {
                 }
                 Block::Note(spans) => out.push_str(&format!("{}\n", Self::spans(spans))),
                 Block::Field(label, value) => Self::field(&mut out, label, Some(value)),
+                Block::Timestamp(label, timestamp, precision) => {
+                    let formatted = format_utc_timestamp(*timestamp, *precision);
+                    Self::field(&mut out, label, Some(&formatted));
+                }
                 Block::List { noun, empty, hint } => {
                     Self::list(&mut out, &report.records, *noun, empty, hint.as_deref());
                 }
@@ -2035,9 +2363,16 @@ impl Renderer for TsvRenderer {
             .join("\t");
         out.push('\n');
         for row in &records.rows {
-            let line = row
+            let line = records
+                .columns
                 .iter()
-                .map(|value| value.as_deref().map(escape_tsv).unwrap_or_default())
+                .zip(row.iter())
+                .map(|(column, value)| {
+                    value
+                        .as_deref()
+                        .map(|raw| escape_tsv(&format_column_value(raw, column.format, None)))
+                        .unwrap_or_default()
+                })
                 .collect::<Vec<_>>()
                 .join("\t");
             out.push_str(&line);
@@ -2101,14 +2436,8 @@ pub(crate) mod tests {
             json: serde_json::json!({"total_size": 2, "start": 0, "entries": []}),
             records: Records {
                 columns: vec![
-                    Column {
-                        label: "Name",
-                        key: "name",
-                    },
-                    Column {
-                        label: "Summary",
-                        key: "summary",
-                    },
+                    Column::new("Name", "name"),
+                    Column::new("Summary", "summary"),
                 ],
                 rows: vec![
                     vec![Some("first".into()), Some("tab\there\nnew \\ line".into())],
@@ -2675,6 +3004,169 @@ pub(crate) mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn headings_scale_with_text_and_terminal_width() {
+        let report = Report {
+            blocks: vec![
+                Block::Heading("Short".into()),
+                Block::Heading("A heading much wider than twenty columns".into()),
+                Block::Heading("日本語".into()),
+            ],
+            json: serde_json::Value::Null,
+            records: Records {
+                columns: Vec::new(),
+                rows: Vec::new(),
+            },
+        };
+        let wide = Output::fixed(OutputMode::Rich, false, 100).render(&report);
+        assert_eq!(
+            wide,
+            concat!(
+                "Short\n─────\n",
+                "A heading much wider than twenty columns\n",
+                "────────────────────────────────────────\n",
+                "日本語\n──────\n",
+            )
+        );
+        let narrow = Output::fixed(OutputMode::Rich, false, 15).render(&report);
+        let lines: Vec<&str> = narrow.lines().collect();
+        assert_eq!(lines[1], "─────");
+        assert_eq!(lines[3], "───────────────");
+        assert_eq!(lines[5], "──────");
+    }
+
+    #[test]
+    fn timestamps_format_in_local_time_with_relative_hints_in_rich_and_utc_in_plain_and_tsv() {
+        let ts: jiff::Timestamp = "2026-11-16T02:30:00Z".parse().unwrap();
+        let now: jiff::Timestamp = "2026-11-18T02:30:00Z".parse().unwrap();
+
+        assert_eq!(
+            format_relative_hint(
+                "2026-11-18T02:29:30Z".parse().unwrap(),
+                "2026-11-18T02:30:00Z".parse().unwrap()
+            ),
+            "just now"
+        );
+        assert_eq!(
+            format_relative_hint("2026-11-18T02:25:00Z".parse().unwrap(), now),
+            "5 minutes ago"
+        );
+        assert_eq!(
+            format_relative_hint("2026-11-17T23:30:00Z".parse().unwrap(), now),
+            "3 hours ago"
+        );
+        assert_eq!(format_relative_hint(ts, now), "2 days ago");
+        assert_eq!(
+            format_relative_hint("2026-08-15T02:30:00Z".parse().unwrap(), now),
+            "3 months ago"
+        );
+        assert_eq!(
+            format_relative_hint("2024-11-10T02:30:00Z".parse().unwrap(), now),
+            "2 years ago"
+        );
+        assert_eq!(
+            format_relative_hint("2026-11-20T02:30:00Z".parse().unwrap(), now),
+            "in 2 days"
+        );
+
+        let report = Report {
+            blocks: vec![
+                Block::Timestamp("Created", ts, TimestampPrecision::DateTime),
+                Block::List {
+                    noun: Noun {
+                        singular: "item",
+                        plural: "items",
+                    },
+                    empty: "None.".into(),
+                    hint: None,
+                },
+            ],
+            json: serde_json::Value::Null,
+            records: Records {
+                columns: vec![
+                    Column::date("Day", "date_created"),
+                    Column::datetime("Exact", "exact"),
+                ],
+                rows: vec![vec![Some(ts.to_string()), Some(ts.to_string())]],
+            },
+        };
+
+        // UTC-5 rolls 2026-11-16T02:30:00Z back to 2026-11-15 21:30.
+        let tz_minus5 = jiff::tz::TimeZone::fixed(jiff::tz::Offset::constant(-5));
+        let rich = Output::fixed(OutputMode::Rich, false, 100)
+            .with_time_zone(tz_minus5)
+            .with_relative_time(RelativeTime::Fixed(now))
+            .render(&report);
+        assert!(
+            rich.contains("Created: 2026-11-15 21:30 (2 days ago)"),
+            "{rich}"
+        );
+        assert!(rich.contains("2026-11-15 ┆ 2026-11-15 21:30"), "{rich}");
+
+        // Plain and TSV stay deterministic UTC without relative hints even with local tz set.
+        let plain = Output::fixed(OutputMode::Plain, false, 100)
+            .with_time_zone(jiff::tz::TimeZone::fixed(jiff::tz::Offset::constant(-5)))
+            .with_relative_time(RelativeTime::Fixed(now))
+            .render(&report);
+        assert!(plain.contains("Created: 2026-11-16 02:30\n"), "{plain}");
+        assert!(
+            plain.contains("Day: 2026-11-16\nExact: 2026-11-16 02:30\n"),
+            "{plain}"
+        );
+
+        let tsv = Output::fixed(OutputMode::Tsv, false, 100)
+            .with_time_zone(jiff::tz::TimeZone::fixed(jiff::tz::Offset::constant(-5)))
+            .render(&report);
+        assert_eq!(tsv, "date_created\texact\n2026-11-16\t2026-11-16 02:30\n");
+    }
+
+    #[test]
+    fn stderr_helpers_render_reports_for_stderr_and_sanitize_lines() {
+        let env = env();
+        let report = Report {
+            blocks: vec![Block::Heading("Downloading 2 file(s)".into())],
+            json: serde_json::json!({"ok": true}),
+            records: Records {
+                columns: Vec::new(),
+                rows: Vec::new(),
+            },
+        };
+        let rich_stderr = Output::resolve(Settings {
+            stdout_terminal: false,
+            stderr_terminal: true,
+            ..settings(&env)
+        })
+        .unwrap();
+        let rendered = rich_stderr.render_stderr_report(&report);
+        assert!(
+            rendered.contains("\u{1b}[1mDownloading 2 file(s)\u{1b}[0m"),
+            "{rendered:?}"
+        );
+        assert!(rendered.contains("─────────────────────"), "{rendered}");
+
+        let plain_stderr = Output::fixed(OutputMode::Plain, false, 80);
+        assert_eq!(
+            plain_stderr.render_stderr_report(&report),
+            "Downloading 2 file(s)\n"
+        );
+        for mode in [OutputMode::Json, OutputMode::Tsv] {
+            assert_eq!(
+                Output::fixed(mode, false, 80).render_stderr_report(&report),
+                ""
+            );
+        }
+
+        let hostile = "Issued to 'key\u{1b}[31m\u{202E}\rname' oauth_token_secret=topsecret";
+        let line_rich = Output::fixed(OutputMode::Rich, true, 80).render_stderr_line(hostile);
+        assert!(!line_rich.contains('\u{1b}'), "{line_rich:?}");
+        assert!(!line_rich.contains('\u{202E}'), "{line_rich:?}");
+        assert!(!line_rich.contains('\r'), "{line_rich:?}");
+        assert!(!line_rich.contains("topsecret"), "{line_rich:?}");
+        let line_plain = plain_stderr.render_stderr_line(hostile);
+        assert_plain_invariants(&line_plain);
+        assert!(!line_plain.contains("topsecret"), "{line_plain:?}");
     }
 
     /// `plain` output: ASCII decoration only, no ANSI codes, no box drawing,

@@ -34,8 +34,8 @@ use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 
 use display::Display;
 use output::{
-    Block, ColorChoice, Column, CommentAttachment, CommentEntry, Level, Noun, Output, OutputMode,
-    ProgressChoice, Records, Report, Span,
+    Block, ColorChoice, Column, CommentAttachment, CommentDate, CommentEntry, Level, Noun, Output,
+    OutputMode, ProgressChoice, Records, Report, Span, TimestampPrecision,
 };
 use ubuntu_info_rust::{Architecture, Pocket, SeriesInfo};
 
@@ -2768,7 +2768,7 @@ fn status_report(server: &status::ServerStatus, auth: &status::AuthStatus) -> Re
             },
         }
     });
-    let column = |key| Column { label: key, key };
+    let column = |key| Column::new(key, key);
     let records = Records {
         columns: [
             "credentials",
@@ -3153,22 +3153,10 @@ fn bug_search_report(page: &Raw<Collection<bugs::BugTask>>) -> Report {
         json: page.raw.clone(),
         records: Records {
             columns: vec![
-                Column {
-                    label: "ID",
-                    key: "id",
-                },
-                Column {
-                    label: "Title",
-                    key: "title",
-                },
-                Column {
-                    label: "Status",
-                    key: "status",
-                },
-                Column {
-                    label: "Target",
-                    key: "bug_target_display_name",
-                },
+                Column::new("ID", "id"),
+                Column::new("Title", "title"),
+                Column::new("Status", "status"),
+                Column::new("Target", "bug_target_display_name"),
             ],
             rows,
         },
@@ -3225,22 +3213,10 @@ fn remote_bug_trackers_report(found: &bugs::BugTrackerSearch, searched: bool) ->
         json: json.into(),
         records: Records {
             columns: vec![
-                Column {
-                    label: "Name",
-                    key: "name",
-                },
-                Column {
-                    label: "Title",
-                    key: "title",
-                },
-                Column {
-                    label: "Type",
-                    key: "bug_tracker_type",
-                },
-                Column {
-                    label: "Base URL",
-                    key: "base_url",
-                },
+                Column::new("Name", "name"),
+                Column::new("Title", "title"),
+                Column::new("Type", "bug_tracker_type"),
+                Column::new("Base URL", "base_url"),
             ],
             rows,
         },

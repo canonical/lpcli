@@ -3,11 +3,11 @@ source: src/bin/lpcli/tests.rs
 expression: rendered
 ---
 Authentication
-────────────────────────────────────────
+──────────────
 ✗ Not logged in. Run `lpcli login` to authenticate.
 
 Launchpad API Server
-────────────────────────────────────────
+────────────────────
 ✗ Unreachable
   HTTP status: 503
   Reason: HTTP 503: Service Unavailable

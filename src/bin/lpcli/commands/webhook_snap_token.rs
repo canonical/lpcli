@@ -73,7 +73,7 @@ fn terminal_safe(text: &str) -> String {
 }
 
 fn column(label: &'static str, key: &'static str) -> Column {
-    Column { label, key }
+    Column::new(label, key)
 }
 
 fn list_report(
@@ -127,10 +127,6 @@ fn lpcli_mutation(blocks: Vec<Block>, lpcli: serde_json::Value) -> CommandResult
 
 fn ok(text: &str) -> Block {
     Block::Status(Level::Ok, vec![Span::Text(text.into())])
-}
-
-fn day(timestamp: Option<jiff::Timestamp>) -> Option<String> {
-    output::format_date(timestamp)
 }
 
 // ---------------------------------------------------------------------------
@@ -200,7 +196,7 @@ fn webhooks_report(hooks: &Raw<Vec<webhooks::Webhook>>) -> CommandResult {
                 hook.delivery_url.clone(),
                 hook.active.map(|active| active.to_string()),
                 hook.event_types.as_ref().map(|types| types.join(", ")),
-                day(hook.date_created),
+                hook.date_created.map(|ts| ts.to_string()),
                 hook.self_link.clone(),
             ]
         })
@@ -216,7 +212,7 @@ fn webhooks_report(hooks: &Raw<Vec<webhooks::Webhook>>) -> CommandResult {
             column("Delivery URL", "delivery_url"),
             column("Active", "active"),
             column("Events", "event_types"),
-            column("Created", "date_created"),
+            Column::date("Created", "date_created"),
             column("Webhook URL", "self_link"),
         ],
         rows,
@@ -230,7 +226,7 @@ fn deliveries_report(deliveries: &Raw<Vec<webhooks::WebhookDelivery>>) -> Comman
         .iter()
         .map(|delivery| {
             vec![
-                output::format_datetime(delivery.date_sent),
+                delivery.date_sent.map(|ts| ts.to_string()),
                 delivery.successful.map(|successful| successful.to_string()),
                 delivery.response_status_code.map(|code| code.to_string()),
                 delivery.pending.map(|pending| pending.to_string()),
@@ -245,7 +241,7 @@ fn deliveries_report(deliveries: &Raw<Vec<webhooks::WebhookDelivery>>) -> Comman
         "No deliveries found.",
         None,
         vec![
-            column("Sent", "date_sent"),
+            Column::datetime("Sent", "date_sent"),
             column("Successful", "successful"),
             column("Status Code", "response_status_code"),
             column("Pending", "pending"),
@@ -538,8 +534,8 @@ fn access_tokens_report(tokens: &Raw<Vec<access_tokens::AccessToken>>) -> Comman
             vec![
                 token.description.clone(),
                 token.scopes.as_ref().map(|scopes| scopes.join(", ")),
-                day(token.date_created),
-                day(token.date_last_used),
+                token.date_created.map(|ts| ts.to_string()),
+                token.date_last_used.map(|ts| ts.to_string()),
                 token.self_link.clone(),
             ]
         })
@@ -554,8 +550,8 @@ fn access_tokens_report(tokens: &Raw<Vec<access_tokens::AccessToken>>) -> Comman
         vec![
             column("Description", "description"),
             column("Scopes", "scopes"),
-            column("Created", "date_created"),
-            column("Last Used", "date_last_used"),
+            Column::date("Created", "date_created"),
+            Column::date("Last Used", "date_last_used"),
             column("Token URL", "self_link"),
         ],
         rows,

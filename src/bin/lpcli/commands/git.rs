@@ -70,14 +70,6 @@ pub(crate) fn git_supports_tsv(command: &GitCommand) -> bool {
 // Reports
 // ---------------------------------------------------------------------------
 
-fn day(timestamp: Option<jiff::Timestamp>) -> Option<String> {
-    output::format_date(timestamp)
-}
-
-fn minute(timestamp: Option<jiff::Timestamp>) -> Option<String> {
-    output::format_datetime(timestamp)
-}
-
 fn records(columns: Vec<Column>, rows: Vec<Vec<Option<String>>>) -> Records {
     Records { columns, rows }
 }
@@ -91,18 +83,25 @@ pub(crate) fn git_repository_report(repo: &Raw<git::GitRepository>) -> Report {
         .or_else(|| value.name.clone())
         .unwrap_or_else(|| "Git repository".to_string());
     let mut blocks = vec![Block::Heading(heading)];
-    let fields = [
+    for (label, field) in [
         ("Description", value.description.clone()),
         ("Type", value.repository_type.clone()),
         ("Access", value.information_type.clone()),
-        ("Modified", day(value.date_last_modified)),
-        ("URL", value.web_link.clone()),
-    ];
-    blocks.extend(
-        fields
-            .into_iter()
-            .filter_map(|(label, value)| value.map(|value| Block::Field(label, value))),
-    );
+    ] {
+        if let Some(val) = field {
+            blocks.push(Block::Field(label, val));
+        }
+    }
+    if let Some(modified) = value.date_last_modified {
+        blocks.push(Block::Timestamp(
+            "Modified",
+            modified,
+            TimestampPrecision::Date,
+        ));
+    }
+    if let Some(url) = &value.web_link {
+        blocks.push(Block::Field("URL", url.clone()));
+    }
     Report {
         blocks,
         json: repo.raw.clone(),
@@ -119,7 +118,7 @@ pub(crate) fn git_repositories_report(repos: &Raw<Vec<git::GitRepository>>) -> R
             vec![
                 repo.unique_name.clone().or_else(|| repo.name.clone()),
                 repo.repository_type.clone(),
-                day(repo.date_last_modified),
+                repo.date_last_modified.map(|ts| ts.to_string()),
             ]
         })
         .collect();
@@ -135,18 +134,9 @@ pub(crate) fn git_repositories_report(repos: &Raw<Vec<git::GitRepository>>) -> R
         json: repos.raw.clone(),
         records: records(
             vec![
-                Column {
-                    label: "Repository",
-                    key: "unique_name",
-                },
-                Column {
-                    label: "Type",
-                    key: "repository_type",
-                },
-                Column {
-                    label: "Modified",
-                    key: "date_last_modified",
-                },
+                Column::new("Repository", "unique_name"),
+                Column::new("Type", "repository_type"),
+                Column::date("Modified", "date_last_modified"),
             ],
             rows,
         ),
@@ -178,18 +168,9 @@ pub(crate) fn git_refs_report(refs: &Raw<Vec<git::GitRef>>) -> Report {
         json: refs.raw.clone(),
         records: records(
             vec![
-                Column {
-                    label: "Ref",
-                    key: "path",
-                },
-                Column {
-                    label: "Display Name",
-                    key: "display_name",
-                },
-                Column {
-                    label: "SHA1",
-                    key: "commit_sha1",
-                },
+                Column::new("Ref", "path"),
+                Column::new("Display Name", "display_name"),
+                Column::new("SHA1", "commit_sha1"),
             ],
             rows,
         ),
@@ -210,7 +191,7 @@ pub(crate) fn git_proposals_report(proposals: &Raw<Vec<git::MergeProposal>>) -> 
                 p.queue_status.clone(),
                 p.source_git_path.clone(),
                 p.target_git_path.clone(),
-                day(p.date_created),
+                p.date_created.map(|ts| ts.to_string()),
             ]
         })
         .collect();
@@ -226,26 +207,11 @@ pub(crate) fn git_proposals_report(proposals: &Raw<Vec<git::MergeProposal>>) -> 
         json: proposals.raw.clone(),
         records: records(
             vec![
-                Column {
-                    label: "ID",
-                    key: "id",
-                },
-                Column {
-                    label: "Status",
-                    key: "queue_status",
-                },
-                Column {
-                    label: "Source Branch",
-                    key: "source_git_path",
-                },
-                Column {
-                    label: "Target Branch",
-                    key: "target_git_path",
-                },
-                Column {
-                    label: "Date",
-                    key: "date_created",
-                },
+                Column::new("ID", "id"),
+                Column::new("Status", "queue_status"),
+                Column::new("Source Branch", "source_git_path"),
+                Column::new("Target Branch", "target_git_path"),
+                Column::date("Date", "date_created"),
             ],
             rows,
         ),
@@ -260,7 +226,7 @@ pub(crate) fn git_diffs_report(diffs: &Raw<Vec<git::PreviewDiff>>) -> Report {
         .map(|d| {
             vec![
                 d.id.map(|id| id.to_string()),
-                minute(d.date_created),
+                d.date_created.map(|ts| ts.to_string()),
                 d.diff_lines_count.map(|n| n.to_string()),
                 d.added_lines_count.map(|n| n.to_string()),
                 d.removed_lines_count.map(|n| n.to_string()),
@@ -280,30 +246,12 @@ pub(crate) fn git_diffs_report(diffs: &Raw<Vec<git::PreviewDiff>>) -> Report {
         json: diffs.raw.clone(),
         records: records(
             vec![
-                Column {
-                    label: "ID",
-                    key: "id",
-                },
-                Column {
-                    label: "Created",
-                    key: "date_created",
-                },
-                Column {
-                    label: "Lines",
-                    key: "diff_lines_count",
-                },
-                Column {
-                    label: "Added",
-                    key: "added_lines_count",
-                },
-                Column {
-                    label: "Removed",
-                    key: "removed_lines_count",
-                },
-                Column {
-                    label: "Source Revision",
-                    key: "source_revision_id",
-                },
+                Column::new("ID", "id"),
+                Column::datetime("Created", "date_created"),
+                Column::new("Lines", "diff_lines_count"),
+                Column::new("Added", "added_lines_count"),
+                Column::new("Removed", "removed_lines_count"),
+                Column::new("Source Revision", "source_revision_id"),
             ],
             rows,
         ),
@@ -381,65 +329,87 @@ pub(crate) fn git_comments_json(comments: &GitComments) -> serde_json::Value {
     })
 }
 
-/// The `git comments` report: review comments, then inline comments, each
-/// as labeled fields. Its JSON is [`git_comments_json()`].
+/// The `git comments` report: review comments and inline comments, rendered as
+/// width-aware cards in `rich` and labeled records in `plain`. Its JSON is
+/// [`git_comments_json()`].
 pub(crate) fn git_comments_report(comments: &GitComments) -> Report {
     let GitComments {
         comments: review,
         inline,
         diff_map,
     } = comments;
-    let mut blocks = vec![Block::Heading("Review comments".into())];
-    if review.value.is_empty() {
-        blocks.push(Block::Note(vec![Span::Text("No review comments.".into())]));
-    }
-    for (i, c) in review.value.iter().enumerate() {
-        blocks.push(Block::Break);
-        blocks.push(Block::Field(
-            "Comment",
-            format!("#{}", c.id.unwrap_or(i as u64)),
-        ));
-        let author =
-            output::link_name(c.author_link.as_deref()).unwrap_or_else(|| "unknown".into());
-        blocks.push(Block::Field("Author", author));
-        if let Some(date) = minute(c.date_created) {
-            blocks.push(Block::Field("Date", date));
-        }
-        if let Some(vote) = &c.vote {
-            blocks.push(Block::Field("Vote", vote.clone()));
-        }
-        blocks.push(Block::Field("Text", c.content.clone().unwrap_or_default()));
-    }
+    let review_entries = review
+        .value
+        .iter()
+        .enumerate()
+        .map(|(i, c)| CommentEntry {
+            label_field: "Comment",
+            label: format!("#{}", c.id.unwrap_or(i as u64)),
+            author: output::link_name(c.author_link.as_deref()),
+            date: c.date_created.map(CommentDate::Timestamp),
+            details: c
+                .vote
+                .as_ref()
+                .map(|vote| vec![("Vote", vote.clone())])
+                .unwrap_or_default(),
+            content_field: "Text",
+            content: c.content.clone().unwrap_or_default(),
+            attachments: Vec::new(),
+        })
+        .collect();
+    let mut blocks = vec![
+        Block::Heading("Review comments".into()),
+        Block::Comments {
+            entries: review_entries,
+            noun: Noun {
+                singular: "review comment",
+                plural: "review comments",
+            },
+            empty: "No review comments.".into(),
+        },
+    ];
 
     if !inline.value.is_empty() {
+        let inline_entries = inline
+            .value
+            .iter()
+            .map(|ic| {
+                let context = inline_context(ic, diff_map);
+                let location = match context {
+                    Some(ctx) => match ctx.new_line {
+                        Some(line) => format!("{}:{line}", ctx.file),
+                        None => ctx.file.clone(),
+                    },
+                    None => ic
+                        .line_number
+                        .as_deref()
+                        .map_or_else(|| "unknown".to_string(), |n| format!("diff line {n}")),
+                };
+                let author = ic.author_display().trim_start_matches('~').to_string();
+                CommentEntry {
+                    label_field: "Location",
+                    label: location,
+                    author: (!author.is_empty() && author != "unknown").then_some(author),
+                    date: ic.date.clone().map(CommentDate::Text),
+                    details: context
+                        .map(|ctx| vec![("Diff line", ctx.content.clone())])
+                        .unwrap_or_default(),
+                    content_field: "Text",
+                    content: ic.text.clone().unwrap_or_default(),
+                    attachments: Vec::new(),
+                }
+            })
+            .collect();
         blocks.push(Block::Break);
         blocks.push(Block::Heading("Inline comments".into()));
-    }
-    for ic in &inline.value {
-        let context = inline_context(ic, diff_map);
-        let location = match context {
-            Some(ctx) => match ctx.new_line {
-                Some(line) => format!("{}:{line}", ctx.file),
-                None => ctx.file.clone(),
+        blocks.push(Block::Comments {
+            entries: inline_entries,
+            noun: Noun {
+                singular: "inline comment",
+                plural: "inline comments",
             },
-            None => ic
-                .line_number
-                .as_deref()
-                .map_or_else(|| "unknown".to_string(), |n| format!("diff line {n}")),
-        };
-        blocks.push(Block::Break);
-        blocks.push(Block::Field("Location", location));
-        blocks.push(Block::Field(
-            "Author",
-            ic.author_display().trim_start_matches('~').to_string(),
-        ));
-        if let Some(date) = &ic.date {
-            blocks.push(Block::Field("Date", output::format_timestamp_str(date)));
-        }
-        if let Some(ctx) = context {
-            blocks.push(Block::Field("Diff line", ctx.content.clone()));
-        }
-        blocks.push(Block::Field("Text", ic.text.clone().unwrap_or_default()));
+            empty: "No inline comments.".into(),
+        });
     }
 
     Report {
