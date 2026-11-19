@@ -838,6 +838,7 @@ fn private_inclusive_collections_and_identity_require_auth() {
         vec!["project", "search", "--query", "test"],
         vec!["project", "list-series", "--project", "test"],
         vec!["git", "list-person-repos", "--name", "ubuntu"],
+        vec!["git", "list", "--target", "launchpad"],
         vec!["git", "refs", "--path", "~ubuntu/test/+git/test"],
         vec!["git", "proposals", "--path", "~ubuntu/test/+git/test"],
         vec![

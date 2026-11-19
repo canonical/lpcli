@@ -1544,7 +1544,7 @@ async fn bug_mutation_and_partial_failure_snapshots() {
 
 #[test]
 fn plain_sanitization_strips_all_banned_symbols_and_controls() {
-    let sample = "Status: ─ ┌─┐ ✓ OK ✗ Err ● dot ℹ info — em – en 📎🚀 ☀ ✂ \t\r\n\u{1b}[31mred";
+    let sample = "Status: ─ ┌─┐ ✓ OK ✗ Err ● dot ℹ info \u{2139}\u{FE0F}\u{200D} — em – en \u{202E}bidi\u{2028}sep 📎🚀 ☀ ✂ \t\r\n\u{1b}[31mred";
     let cleaned = output::clean_plain(sample);
     assert_plain_invariants(&cleaned);
     assert!(cleaned.contains("OK OK Error Err"), "{cleaned}");
@@ -1555,6 +1555,10 @@ fn plain_sanitization_strips_all_banned_symbols_and_controls() {
     assert!(!cleaned.contains('☀'), "{cleaned}");
     assert!(!cleaned.contains('✂'), "{cleaned}");
     assert!(!cleaned.contains('📎'), "{cleaned}");
+    assert!(!cleaned.contains('\u{202E}'), "{cleaned}");
+    assert!(!cleaned.contains('\u{2028}'), "{cleaned}");
+    assert!(!cleaned.contains('\u{FE0F}'), "{cleaned}");
+    assert!(!cleaned.contains('\u{200D}'), "{cleaned}");
 
     let dl_err = lpcli::download::DownloadOutcome::Failed {
         filename: "curl.dsc".into(),
@@ -1714,16 +1718,33 @@ fn all_snapshots_pass_accessibility_and_redaction_audit() {
                 "oauth_signature=",
                 "refresh_token_secret=",
                 "oauth_token=",
+                "oauth_verifier=",
+                "consumer_secret=",
+                "oauth_consumer_key=",
+                "access_token=",
+                "refresh_token=",
+                "\"oauth_token_secret\":",
+                "\"oauth_token\":",
+                "\"oauth_signature\":",
+                "\"refresh_token_secret\":",
+                "\"refresh_token\":",
+                "\"access_token\":",
             ] {
                 for (idx, _) in body.match_indices(secret_key) {
-                    let tail = &body[idx + secret_key.len()..];
+                    let tail = body[idx + secret_key.len()..].trim_start();
                     assert!(
-                        tail.starts_with("[redacted]"),
+                        tail.starts_with("[redacted]") || tail.starts_with("\"[redacted]\""),
                         "unredacted credential marker {secret_key:?} in {}",
                         path.display()
                     );
                 }
             }
+            assert_eq!(
+                output::redact_secrets(body),
+                body,
+                "unredacted credential or Authorization header in {}",
+                path.display()
+            );
             if path
                 .file_name()
                 .and_then(|name| name.to_str())

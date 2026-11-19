@@ -39,6 +39,13 @@ impl Display {
         self.width
     }
 
+    /// Whether a table with `columns` columns cannot fit even 1 content char,
+    /// 2 padding chars, and borders per column and should use stacked rows.
+    pub fn is_stacked(self, columns: usize) -> bool {
+        let minimum_grid_width = columns.saturating_mul(3).saturating_add(1);
+        columns > 0 && usize::from(self.width) < minimum_grid_width
+    }
+
     /// Start a consistently styled, width-aware table.
     pub fn table(self, headers: Vec<&str>) -> DisplayTable {
         let mut table = Table::new();
@@ -56,6 +63,27 @@ impl Display {
 /// Detect stdout's terminal width through comfy-table's existing tty support.
 fn terminal_width() -> Option<u16> {
     Table::new().width()
+}
+
+/// Detect stdout's terminal height in rows when stdout is a Linux tty.
+#[cfg(target_os = "linux")]
+pub fn terminal_height() -> Option<u16> {
+    // SAFETY: `ws` is zero-initialized plain-old-data and `TIOCGWINSZ` writes a
+    // `libc::winsize` into the non-null aligned pointer when stdout is a tty.
+    unsafe {
+        let mut ws: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &raw mut ws) == 0 && ws.ws_row > 0 {
+            Some(ws.ws_row)
+        } else {
+            None
+        }
+    }
+}
+
+/// Detect stdout's terminal height in rows when supported on this platform.
+#[cfg(not(target_os = "linux"))]
+pub fn terminal_height() -> Option<u16> {
+    None
 }
 
 /// A table with a compact stacked representation for widths that cannot fit
@@ -95,8 +123,7 @@ impl fmt::Display for DisplayTable {
         // Each column needs at least one content character, two padding
         // characters, and a border. Below that, a grid would be wider than
         // the requested output or unreadably fragmented.
-        let minimum_grid_width = columns.saturating_mul(3).saturating_add(1);
-        if columns > 0 && usize::from(self.width) < minimum_grid_width {
+        if Display::from_width(self.width).is_stacked(columns) {
             return self.fmt_stacked(f);
         }
         write!(f, "{}", self.table)

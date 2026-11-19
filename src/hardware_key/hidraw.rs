@@ -66,15 +66,15 @@ pub(crate) fn list_fido_devices() -> io::Result<Vec<DeviceInfo>> {
     Ok(devices)
 }
 
-/// Read `HID_NAME` from a device's `uevent` file.
+/// Read `HID_NAME` from a device's `uevent` file, sanitizing terminal controls.
 fn read_product_name(uevent: &Path) -> Option<String> {
     std::fs::read_to_string(uevent)
         .ok()?
         .lines()
         .find_map(|line| line.strip_prefix("HID_NAME="))
-        .map(str::trim)
+        .map(super::sanitize_prompt_text)
+        .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
-        .map(str::to_string)
 }
 
 /// Whether a HID report descriptor describes a FIDO CTAPHID interface.
@@ -254,5 +254,17 @@ mod tests {
             product: Some("Yubico YubiKey FIDO".to_string()),
         };
         assert_eq!(info.label(), "Yubico YubiKey FIDO (/dev/hidraw3)");
+    }
+
+    #[test]
+    fn read_product_name_sanitizes_terminal_controls_and_bidi() {
+        let dir = tempfile::tempdir().unwrap();
+        let uevent = dir.path().join("uevent");
+        std::fs::write(&uevent, "HID_NAME=Bad\u{1b}[31mKey\t\u{202E}Name\n").unwrap();
+        let name = read_product_name(&uevent).unwrap();
+        assert!(!name.contains('\u{1b}'), "{name:?}");
+        assert!(!name.contains('\u{202E}'), "{name:?}");
+        assert!(!name.contains('\t'), "{name:?}");
+        assert_eq!(name, "Bad\u{FFFD}[31mKey \u{FFFD}Name");
     }
 }

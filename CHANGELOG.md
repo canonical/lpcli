@@ -12,6 +12,16 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 ### Added
 
+- `git list --target` to enumerate the Git repositories of a project,
+  distribution source package, or `~person`/`~team`, including personal
+  forks.
+
+### Fixed
+
+- `git list-person-repos` queried `~person/+git`, which is a web-UI page
+  that does not exist on the API host, and failed for every name. It now
+  uses the root `/+git` collection's `getRepositories` operation with a
+  `~owner` target, so person and team listings work.
 - Complete snapshot coverage across `schema`, structured errors, remaining `git`,
   `queue`, and domain TSV list outputs, representative `plain` and `rich`
   reports across all command domains, and `bug`/`queue`/`package` partial
@@ -20,7 +30,8 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
   `0.4.x` migration guide in `README.md`.
 - A global `--no-pager` option and automatic `$PAGER` support for `rich` and
   `plain` output when stdout is a non-dumb terminal, `$PAGER` is non-empty and
-  not `cat`, and the rendered output exceeds `$LINES` (`24` lines by default).
+  not `cat` (and not running under `sudo`), and the rendered output exceeds the
+  terminal height (`$LINES`, detected terminal rows, or `24` lines by default).
 - A global `--progress auto|plain|rich|none` option and non-redrawing download
   progress reporting on stderr (`plain` mode emits a start line, occasional
   milestones, per-file results, and a summary; `--progress none` disables
@@ -40,7 +51,6 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
   importance/priority, tag, and person/team values when color is enabled, and
   normalized Launchpad usernames and timestamps across comment views (`bug
   comments`, `git comments`, `question messages`).
-
 - Accessible `plain` output across all `bug` commands (`show`, `tasks`,
   `comments`, `subscriptions`, `attachments`, `watches`, and mutations), with
   leading result counts, labeled `Field: value` records, explicit `Series:`

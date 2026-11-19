@@ -867,8 +867,18 @@ pub(crate) async fn handle_hardware_token(
             if print {
                 // The grant is the result, so it is printed even with --quiet,
                 // and in launchpadlib's format whatever the output mode.
-                output.write_raw(&format!("{}\n", grant.to_issuance_json().as_str()))?;
-                eprintln!("Warning: this is the grant secret; it will not be shown again.");
+                // Stream the `Zeroizing<String>` directly without copying it into
+                // an unzeroized `String`; Launchpad has already issued it, so any
+                // write failure is partial.
+                let payload = grant.to_issuance_json();
+                output.write_raw_line(payload.as_str()).map_err(|err| {
+                    LpError::Partial(format!(
+                        "Launchpad issued a hardware-bound grant bound to {}, but writing it to \
+                         stdout failed: {err}. Revoke the unused grant at {OAUTH_TOKENS_URL}.",
+                        key_label(&registered)
+                    ))
+                })?;
+                let _ = output.warn("this is the grant secret; it will not be shown again.");
                 return Ok(());
             }
 

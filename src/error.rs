@@ -236,6 +236,140 @@ impl LpError {
 /// Convenience alias used throughout the library.
 pub type Result<T> = std::result::Result<T, LpError>;
 
+/// Replace credential-like values in error or status text with `[redacted]`.
+///
+/// Redacts double- or single-quoted and unquoted values for OAuth and bearer
+/// token keys (`oauth_token_secret`, `oauth_token`, `oauth_signature`,
+/// `oauth_consumer_key`, `oauth_verifier`, `consumer_secret`,
+/// `refresh_token_secret`, `refresh_token`, `access_token`, and quoted
+/// `authorization`), as well as `Authorization:` HTTP header lines.
+pub fn redact_secrets(message: &str) -> String {
+    const KEYS: [&str; 9] = [
+        "oauth_token_secret",
+        "oauth_token",
+        "oauth_signature",
+        "oauth_consumer_key",
+        "oauth_verifier",
+        "consumer_secret",
+        "refresh_token_secret",
+        "refresh_token",
+        "access_token",
+    ];
+    let mut redacted = message.to_string();
+    // Maintain `lower` in lockstep with `redacted`: every edit replaces a slice
+    // at valid UTF-8 boundaries with pure lowercase/mixed ASCII, so byte offsets
+    // remain identical without re-lowercasing the entire string per match.
+    let mut lower = redacted.to_ascii_lowercase();
+
+    for key in KEYS {
+        redact_key_values(&mut redacted, &mut lower, key, false);
+    }
+    redact_key_values(&mut redacted, &mut lower, "authorization", true);
+
+    let mut search = 0;
+    while let Some(offset) = lower
+        .get(search..)
+        .and_then(|tail| tail.find("authorization"))
+    {
+        let start = search + offset;
+        let bytes = redacted.as_bytes();
+        if start > 0 && bytes[start - 1].is_ascii_alphanumeric() {
+            search = start + "authorization".len();
+            continue;
+        }
+        let mut cursor = start + "authorization".len();
+        while matches!(bytes.get(cursor), Some(b' ' | b'\t')) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b':') {
+            search = start + "authorization".len();
+            continue;
+        }
+        let end = redacted[start..]
+            .find(['\r', '\n'])
+            .map_or(redacted.len(), |off| start + off);
+        redacted.replace_range(start..end, "Authorization: [redacted]");
+        lower.replace_range(start..end, "authorization: [redacted]");
+        search = start + "Authorization: [redacted]".len();
+    }
+
+    redacted
+}
+
+fn redact_key_values(redacted: &mut String, lower: &mut String, key: &str, require_quote: bool) {
+    let mut search = 0;
+    while let Some(offset) = lower.get(search..).and_then(|tail| tail.find(key)) {
+        let key_start = search + offset;
+        let mut cursor = key_start + key.len();
+        let bytes = redacted.as_bytes();
+        let had_quote = if matches!(bytes.get(cursor), Some(b'"' | b'\'')) {
+            cursor += 1;
+            true
+        } else {
+            false
+        };
+        if require_quote && !had_quote {
+            search = key_start + key.len();
+            continue;
+        }
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if !matches!(bytes.get(cursor), Some(b':' | b'=')) {
+            search = key_start + key.len();
+            continue;
+        }
+        cursor += 1;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if matches!(bytes.get(cursor), Some(b'"' | b'\'')) {
+            let quote = char::from(bytes[cursor]);
+            let value_start = cursor + 1;
+            let mut escaped = false;
+            let mut value_end = redacted.len();
+            for (rel_idx, ch) in redacted[value_start..].char_indices() {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    escaped = true;
+                } else if ch == quote {
+                    value_end = value_start + rel_idx;
+                    break;
+                }
+            }
+            redacted.replace_range(value_start..value_end, "[redacted]");
+            lower.replace_range(value_start..value_end, "[redacted]");
+            search = value_start + "[redacted]".len();
+        } else {
+            let value_start = cursor;
+            let is_delim = |c: char| {
+                c.is_whitespace() || matches!(c, '&' | ',' | ';' | '}' | ')' | ']' | '"' | '\'')
+            };
+            if let Some(after) = redacted
+                .get(value_start..)
+                .and_then(|s| s.strip_prefix("[redacted]"))
+                && after.chars().next().is_none_or(is_delim)
+            {
+                search = value_start + "[redacted]".len();
+                continue;
+            }
+            let value_end = redacted[value_start..]
+                .find(is_delim)
+                .map_or(redacted.len(), |off| value_start + off);
+            if value_start == value_end {
+                search = key_start + key.len();
+            } else {
+                redacted.replace_range(value_start..value_end, "[redacted]");
+                lower.replace_range(value_start..value_end, "[redacted]");
+                search = value_start + "[redacted]".len();
+            }
+        }
+    }
+}
+
 impl From<reqwest::Error> for LpError {
     fn from(err: reqwest::Error) -> Self {
         if err.is_timeout() {
@@ -444,5 +578,51 @@ mod tests {
     fn config_error_display() {
         let err = LpError::Config("missing consumer_key".to_string());
         assert!(err.to_string().contains("missing consumer_key"));
+    }
+
+    #[test]
+    fn redact_secrets_covers_single_quotes_quoted_auth_and_verifier() {
+        let input = concat!(
+            "{'oauth_token_secret': 'py-secret', 'access_token': 'py-access', ",
+            "\"Authorization\": \"Bearer quoted-bearer\", ",
+            "'Authorization': 'Basic quoted-basic', ",
+            "\"oauth_verifier\":\"ver-123\"}\n",
+            "oauth_verifier=ver-form&refresh_token='café-é'\n",
+            "Authorization: Bearer header-secret\r\n",
+            "trailing"
+        );
+        let redacted = redact_secrets(input);
+        for leaked in [
+            "py-secret",
+            "py-access",
+            "quoted-bearer",
+            "quoted-basic",
+            "ver-123",
+            "ver-form",
+            "café-é",
+            "header-secret",
+        ] {
+            assert!(!redacted.contains(leaked), "{leaked} leaked: {redacted}");
+        }
+        assert!(redacted.contains("'oauth_token_secret': '[redacted]'"));
+        assert!(redacted.contains("'access_token': '[redacted]'"));
+        assert!(redacted.contains("\"Authorization\": \"[redacted]\""));
+        assert!(redacted.contains("'Authorization': '[redacted]'"));
+        assert!(redacted.contains("Authorization: [redacted]\r\ntrailing"));
+        // Redaction is idempotent, including inside JSON string literals.
+        assert_eq!(redact_secrets(&redacted), redacted);
+        let embedded = "{\"message\": \"not allowed oauth_token=rawsecret\"}";
+        let embedded_redacted = redact_secrets(embedded);
+        assert_eq!(
+            embedded_redacted,
+            "{\"message\": \"not allowed oauth_token=[redacted]\"}"
+        );
+        assert_eq!(redact_secrets(&embedded_redacted), embedded_redacted);
+
+        // Truncated quoted secret and backslash + multi-byte UTF-8 stay valid.
+        let truncated = "{\"oauth_token_secret\": \"partial\\é-secret";
+        let out = redact_secrets(truncated);
+        assert!(!out.contains("partial"));
+        assert!(out.ends_with("\"[redacted]"));
     }
 }

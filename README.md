@@ -380,8 +380,9 @@ bars. Passing `--progress none` turns progress reporting off.
 
 Human-facing output (`rich` and `plain`) is piped through `$PAGER` when stdout
 is a non-dumb terminal, `$PAGER` is set to a non-empty command other than
-`cat`, and the rendered output exceeds `$LINES` (24 lines by default). Passing
-`--no-pager` disables paging and writes directly to stdout.
+`cat` (when not running under `sudo`), and the rendered output exceeds the
+terminal height (`$LINES`, detected terminal rows, or 24 lines by default).
+Passing `--no-pager` disables paging and writes directly to stdout.
 
 ### Accessibility and screen-reader checklist
 
@@ -736,8 +737,14 @@ lpcli git show --path "~my-username/launchpad/+git/myrepo"
 # Show the default repository for a project
 lpcli git default --target launchpad
 
-# List repositories owned by a person
+# List repositories owned by a person or team
 lpcli git list-person-repos --name my-username
+
+# List repositories for a project (includes personal forks)
+lpcli git list --target launchpad
+
+# List repositories for a distribution source package
+lpcli git list --target "ubuntu/+source/apt"
 
 # List branches and tags in a repository
 lpcli git refs --path "~my-username/launchpad/+git/myrepo"

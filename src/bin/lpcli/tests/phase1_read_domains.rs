@@ -824,6 +824,39 @@ fn package_download_is_not_a_read_only_report() {
     assert_eq!(error.exit_code(), 2);
 }
 
+#[test]
+fn package_download_report_redacts_secrets_in_failed_outcomes() {
+    let pub_val = rebase(source_json("hello", "2.10-3", 1), LP);
+    let publication: packages::SourcePackagePublishingHistory =
+        serde_json::from_value(pub_val.clone()).unwrap();
+    let found = SourceDownload {
+        request: SourceDownloadRequest {
+            name: "hello".into(),
+            version: None,
+            series: "noble".into(),
+            distro: "ubuntu".into(),
+            output_dir: std::path::PathBuf::from("/tmp/out"),
+        },
+        publication,
+        publication_json: pub_val,
+        urls: vec!["https://example.com/hello.dsc".into()],
+        outcomes: vec![download::DownloadOutcome::Failed {
+            filename: "hello.dsc?oauth_token=urlsecret".into(),
+            error: "HTTP 403 {'access_token': 'pysecret'} Authorization: Bearer hdrsecret".into(),
+        }],
+    };
+    let report = package_download_report(&found);
+    for mode in [OutputMode::Rich, OutputMode::Plain, OutputMode::Json] {
+        let rendered = Output::fixed(mode, false, 100).render(&report);
+        for leaked in ["urlsecret", "pysecret", "hdrsecret"] {
+            assert!(
+                !rendered.contains(leaked),
+                "{mode:?} leaked {leaked}: {rendered}"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // project
 // ---------------------------------------------------------------------------

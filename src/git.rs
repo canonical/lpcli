@@ -7,6 +7,7 @@
 //! | [`get_git_repository`] | Fetch a Git repository by its Launchpad path |
 //! | [`get_git_repository_by_unique_name`] | Fetch a repo by its unique name |
 //! | [`get_default_git_repository`] | Fetch the default repo for a target |
+//! | [`list_git_repositories`] | List repos for a target (incl. forks) |
 //! | [`list_person_git_repositories`] | List repos owned by a person |
 //! | [`list_git_refs`] | List branches and tags in a repository |
 //! | [`list_merge_proposals`] | List merge proposals for a repository |
@@ -23,7 +24,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Collection, LaunchpadClient, Raw};
-use crate::error::Result;
+use crate::error::{LpError, Result};
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -365,12 +366,40 @@ fn default_repository_url(client: &LaunchpadClient, target: &str) -> String {
     client.url(&format!("/+git?ws.op=getDefaultRepository&target={enc}"))
 }
 
+/// List Git repositories for a target, including personal forks.
+///
+/// `target` is a project name (e.g. `"launchpad"`), a distribution source
+/// package slug (e.g. `"ubuntu/+source/apt"`), or a person or team name
+/// with a leading `~` (e.g. `"~desktop-snappers"`, which lists only that
+/// owner's repositories). Bare distribution names and distribution series
+/// are rejected by the API, as are non-existent targets.
+pub async fn list_git_repositories(
+    client: &LaunchpadClient,
+    target: &str,
+) -> Result<Vec<GitRepository>> {
+    Collection::fetch_all(client, &repositories_target_url(client, target)?).await
+}
+
+/// Like [`list_git_repositories()`], but return Launchpad's collection
+/// shape with every page's entries unmodified.
+pub async fn list_git_repositories_raw(
+    client: &LaunchpadClient,
+    target: &str,
+) -> Result<Raw<Vec<GitRepository>>> {
+    Collection::fetch_all_raw(client, &repositories_target_url(client, target)?).await
+}
+
 /// List Git repositories owned by a Launchpad person or team.
+///
+/// `person_name` is the person or team name, with or without the leading
+/// `~` (e.g. `"desktop-snappers"`). Only repositories owned by that
+/// person or team are returned; results reflect the caller's visibility,
+/// so authenticated requests can include private repositories.
 pub async fn list_person_git_repositories(
     client: &LaunchpadClient,
     person_name: &str,
 ) -> Result<Vec<GitRepository>> {
-    Collection::fetch_all(client, &person_repositories_url(client, person_name)).await
+    Collection::fetch_all(client, &person_repositories_url(client, person_name)?).await
 }
 
 /// Like [`list_person_git_repositories()`], but return Launchpad's
@@ -379,12 +408,43 @@ pub async fn list_person_git_repositories_raw(
     client: &LaunchpadClient,
     person_name: &str,
 ) -> Result<Raw<Vec<GitRepository>>> {
-    Collection::fetch_all_raw(client, &person_repositories_url(client, person_name)).await
+    Collection::fetch_all_raw(client, &person_repositories_url(client, person_name)?).await
 }
 
-fn person_repositories_url(client: &LaunchpadClient, person_name: &str) -> String {
-    let enc: String = url::form_urlencoded::byte_serialize(person_name.as_bytes()).collect();
-    client.url(&format!("/~{enc}/+git"))
+/// URL for the root `/+git` collection's `getRepositories` operation with
+/// `target` expressed as an API URL (the only owner-filtered form Launchpad
+/// offers; `~person/+git` itself is a web-only page that 404s on the API).
+///
+/// Blank targets and bare `/` are rejected so an empty target can never
+/// drift into an unfiltered listing.
+fn repositories_target_url(client: &LaunchpadClient, target: &str) -> Result<String> {
+    let clean = target.trim().trim_matches('/');
+    if clean.is_empty() {
+        return Err(LpError::Other(
+            "Git repository target must not be empty; pass a project name, \
+             a distribution source package slug (e.g. \"ubuntu/+source/apt\"), \
+             or a person/team name with a leading '~'"
+                .to_string(),
+        ));
+    }
+    let target_url = client.url(&format!("/{clean}"));
+    let enc: String = url::form_urlencoded::byte_serialize(target_url.as_bytes()).collect();
+    Ok(client.url(&format!("/+git?ws.op=getRepositories&target={enc}")))
+}
+
+/// URL for [`list_person_git_repositories()`]: the caller's name
+/// normalised to a `~owner` API URL and passed as a `getRepositories`
+/// target. Blank names are rejected before any request is made.
+fn person_repositories_url(client: &LaunchpadClient, person_name: &str) -> Result<String> {
+    let owner = person_name.trim().trim_start_matches('~');
+    if owner.is_empty() {
+        return Err(LpError::Other(
+            "person name must not be empty; pass a Launchpad person or team \
+             name, with or without the leading '~'"
+                .to_string(),
+        ));
+    }
+    repositories_target_url(client, &format!("~{owner}"))
 }
 
 /// List references (branches and tags) in a Git repository.
@@ -795,5 +855,118 @@ diff --git a/lib/model.py b/lib/model.py
         assert_eq!(ctx8.file, "lib/model.py");
         assert_eq!(ctx8.new_line, Some(13));
         assert_eq!(ctx8.content, "    def new_method(self):");
+    }
+
+    /// The listing functions must query the root `/+git` collection's
+    /// `getRepositories` operation with the target expressed as an API URL.
+    /// The bug this guards against: `~person/+git` is a web-only page and
+    /// 404s on the API, and a bare person name is not a valid target. The
+    /// matchers compare the decoded parameter values, so an encoding or
+    /// parameter-name regression fails the mock assertion.
+    #[tokio::test]
+    async fn list_git_repositories_queries_target_collection() {
+        let mut server = mockito::Server::new_async().await;
+        let body = r#"{
+            "start": 0,
+            "total_size": 1,
+            "entries": [{
+                "name": "launchpad",
+                "unique_name": "~ikoruk/launchpad/+git/launchpad",
+                "repository_type": "Hosted",
+                "date_last_modified": "2024-06-15T10:30:00Z"
+            }]
+        }"#;
+        let mock = server
+            .mock("GET", "/+git")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getRepositories".into()),
+                mockito::Matcher::UrlEncoded(
+                    "target".into(),
+                    format!("{}/launchpad", server.url()),
+                ),
+            ]))
+            .with_status(200)
+            .with_body(body)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = LaunchpadClient::new(None).with_base_url(server.url());
+        let repos = list_git_repositories(&client, "launchpad")
+            .await
+            .expect("listing repositories for a target should succeed");
+
+        mock.assert_async().await;
+        assert_eq!(repos.len(), 1);
+        assert_eq!(
+            repos[0].unique_name.as_deref(),
+            Some("~ikoruk/launchpad/+git/launchpad")
+        );
+        assert_eq!(repos[0].repository_type.as_deref(), Some("Hosted"));
+        assert_eq!(
+            repos[0]
+                .date_last_modified
+                .map(|t| t.strftime("%Y-%m-%d").to_string()),
+            Some("2024-06-15".to_string())
+        );
+    }
+
+    /// `list_person_git_repositories` must send a `~person` target URL
+    /// (with the `~` preserved and any caller-supplied `~` normalised);
+    /// a bare person name is not a valid API target.
+    #[tokio::test]
+    async fn list_person_git_repositories_uses_person_target() {
+        let mut server = mockito::Server::new_async().await;
+        let body = r#"{
+            "start": 0,
+            "total_size": 1,
+            "entries": [{
+                "name": "snaps",
+                "unique_name": "~desktop-snappers/snappy/+git/snaps"
+            }]
+        }"#;
+        let mock = server
+            .mock("GET", "/+git")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getRepositories".into()),
+                mockito::Matcher::UrlEncoded(
+                    "target".into(),
+                    format!("{}/~desktop-snappers", server.url()),
+                ),
+            ]))
+            .with_status(200)
+            .with_body(body)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = LaunchpadClient::new(None).with_base_url(server.url());
+        let repos = list_person_git_repositories(&client, "desktop-snappers")
+            .await
+            .expect("listing repositories owned by a person should succeed");
+
+        mock.assert_async().await;
+        assert_eq!(repos.len(), 1);
+        assert_eq!(
+            repos[0].unique_name.as_deref(),
+            Some("~desktop-snappers/snappy/+git/snaps")
+        );
+    }
+
+    #[tokio::test]
+    async fn list_repositories_reject_empty_targets() {
+        let client = LaunchpadClient::new(None);
+        for bad in ["", "   ", "/", "//"] {
+            assert!(
+                list_git_repositories(&client, bad).await.is_err(),
+                "empty target {bad:?} must be rejected"
+            );
+        }
+        for bad in ["", "   ", "~~", "~"] {
+            assert!(
+                list_person_git_repositories(&client, bad).await.is_err(),
+                "empty person name {bad:?} must be rejected"
+            );
+        }
     }
 }

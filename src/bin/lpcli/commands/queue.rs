@@ -738,9 +738,9 @@ impl QueueDownload {
                     "size": file.size,
                 }),
                 download::DownloadOutcome::Failed { filename, error } => serde_json::json!({
-                    "filename": filename,
+                    "filename": output::redact_secrets(filename),
                     "status": "failed",
-                    "error": error,
+                    "error": output::redact_secrets(error),
                 }),
             })
             .collect();
@@ -794,8 +794,8 @@ impl QueueDownload {
                     blocks.push(Block::Status(
                         Level::Error,
                         vec![
-                            Span::Name(filename.clone()),
-                            Span::Text(format!(": {error}")),
+                            Span::Name(output::redact_secrets(filename)),
+                            Span::Text(format!(": {}", output::redact_secrets(error))),
                         ],
                     ))
                 }
@@ -1186,7 +1186,7 @@ pub(crate) async fn print_queue_mutation(
                         .collect::<String>()
                 ))?;
             } else if output.mode() == crate::output::OutputMode::Json {
-                output.write_raw(&format!("{result}\n"))?;
+                output.print_json(&result)?;
             } else {
                 output.warn(&format!(
                     "{action} succeeded for {}, but the updated entry could not be read back.",

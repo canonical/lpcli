@@ -270,6 +270,13 @@ impl Interaction for ConsoleInteraction {
     fn choose(&self, kind: &str, labels: &[String]) -> Result<usize> {
         use std::io::Write;
 
+        if labels.is_empty() {
+            return Err(LpError::HardwareKey(format!(
+                "No {}s are available.",
+                sanitize_prompt_text(kind)
+            )));
+        }
+
         eprint!("{}", format_choice_prompt(kind, labels));
         let _ = std::io::stderr().flush();
 
@@ -277,15 +284,43 @@ impl Interaction for ConsoleInteraction {
     }
 }
 
+pub(crate) fn sanitize_prompt_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\r' => {}
+            '\n' | '\t' => out.push(' '),
+            c if c.is_control()
+                || matches!(
+                    c,
+                    '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+                ) =>
+            {
+                out.push('\u{FFFD}');
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Format a numbered multiple-choice prompt with plain, screen-reader friendly
 /// instructions (no square-bracket range notation).
 pub fn format_choice_prompt(kind: &str, labels: &[String]) -> String {
-    let mut out = format!("Several {kind}s are available:\n");
+    let safe_kind = sanitize_prompt_text(kind);
+    if labels.is_empty() {
+        return format!("No {safe_kind}s are available.\n");
+    }
+    let mut out = format!("Several {safe_kind}s are available:\n");
     for (index, label) in labels.iter().enumerate() {
-        out.push_str(&format!("  {}. {label}\n", index + 1));
+        out.push_str(&format!(
+            "  {}. {}\n",
+            index + 1,
+            sanitize_prompt_text(label)
+        ));
     }
     out.push_str(&format!(
-        "Choose a {kind} (enter a number from 1 to {}): ",
+        "Choose a {safe_kind} (enter a number from 1 to {}): ",
         labels.len()
     ));
     out
@@ -338,7 +373,9 @@ fn read_selection(input: &mut impl std::io::BufRead, kind: &str, count: usize) -
         .ok()
         .filter(|choice| (1..=count).contains(choice))
         .map(|choice| choice - 1)
-        .ok_or_else(|| LpError::HardwareKey(format!("Invalid {kind} selection.")))
+        .ok_or_else(|| {
+            LpError::HardwareKey(format!("Invalid {} selection.", sanitize_prompt_text(kind)))
+        })
 }
 
 fn wait_for_registration_key(input: &mut impl std::io::BufRead) -> Result<()> {
@@ -775,6 +812,30 @@ mod tests {
                 .choose("security key", &["a".into()])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn choice_prompt_sanitizes_controls_and_handles_empty_labels() {
+        let prompt = format_choice_prompt(
+            "security\nkey",
+            &[
+                "Key\u{1b}[31mOne\r\nFake".into(),
+                "Two\u{202E}\tLabel".into(),
+            ],
+        );
+        assert!(!prompt.contains('\u{1b}'), "{prompt:?}");
+        assert!(!prompt.contains('\r'), "{prompt:?}");
+        assert!(!prompt.contains('\u{202E}'), "{prompt:?}");
+        assert!(!prompt.contains("\nFake"), "{prompt:?}");
+        assert!(prompt.contains("Several security keys are available:"));
+
+        let empty_prompt = format_choice_prompt("security key", &[]);
+        assert_eq!(empty_prompt, "No security keys are available.\n");
+        assert!(!empty_prompt.contains("1 to 0"));
+
+        let err = ConsoleInteraction.choose("security key", &[]).unwrap_err();
+        assert!(matches!(err, LpError::HardwareKey(_)), "{err:?}");
+        assert!(err.to_string().contains("No security keys are available."));
     }
 
     #[test]

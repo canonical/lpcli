@@ -1173,6 +1173,8 @@ pub(crate) fn package_download_report(found: &SourceDownload) -> Report {
                 }));
             }
             download::DownloadOutcome::Failed { filename, error } => {
+                let filename = output::redact_secrets(filename);
+                let error = output::redact_secrets(error);
                 blocks.push(Block::Status(
                     Level::Error,
                     vec![

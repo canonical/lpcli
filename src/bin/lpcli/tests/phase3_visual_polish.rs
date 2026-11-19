@@ -762,4 +762,187 @@ fn should_page_and_write_with_pager_behave_as_documented() {
     let paged = output::write_with_pager(four_lines, Some(&pager_cmd), 3).unwrap();
     assert!(paged, "output longer than max_lines must be piped to pager");
     assert_eq!(std::fs::read_to_string(&dest).unwrap(), four_lines);
+
+    // Pager disabling also handles `/usr/bin/cat` and `sudo` contexts.
+    for cmd in ["/bin/cat", "/usr/bin/cat", "cat -u"] {
+        assert!(!output::should_page(Some(cmd), four_lines, 3), "{cmd}");
+    }
+    let sudo_env = output::Environment {
+        pager: Some("less -FRX".into()),
+        term: Some("xterm-256color".into()),
+        sudo: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        output::resolve_pager(false, OutputMode::Rich, &sudo_env, true),
+        None
+    );
+
+    // Failing pager returns Err instead of silently losing output.
+    assert!(output::write_with_pager(four_lines, Some("sh -c 'exit 2'"), 3).is_err());
+}
+
+#[test]
+fn table_and_field_coloring_handles_delimiters_wrapping_stacking_and_no_color_override() {
+    let ok = "\x1b[1m\x1b[32m";
+    let name = "\x1b[1m\x1b[36m";
+    let reset = "\x1b[0m";
+
+    // 1. Literal `'┆'` inside a cell must not break column alignment or colorization.
+    let bar_report = Report {
+        blocks: vec![Block::Table {
+            records: Records {
+                columns: vec![
+                    Column {
+                        label: "Title",
+                        key: "title",
+                    },
+                    Column {
+                        label: "Status",
+                        key: "status",
+                    },
+                ],
+                rows: vec![vec![
+                    Some("left ┆ right".into()),
+                    Some("Fix Released".into()),
+                ]],
+            },
+            noun: Noun {
+                singular: "bug",
+                plural: "bugs",
+            },
+            empty: "None.".into(),
+            hint: None,
+        }],
+        json: Value::Null,
+        records: Records {
+            columns: Vec::new(),
+            rows: Vec::new(),
+        },
+    };
+    let colored_bar = Output::fixed(OutputMode::Rich, true, 120).render(&bar_report);
+    assert!(colored_bar.contains("left ┆ right"), "{colored_bar:?}");
+    assert!(
+        colored_bar.contains(&format!("{ok}Fix Released{reset}")),
+        "{colored_bar:?}"
+    );
+
+    // 2. Narrow tables wrapping multi-word statuses paint every wrapped fragment.
+    let wrap_report = Report {
+        blocks: vec![Block::Table {
+            records: Records {
+                columns: vec![
+                    Column {
+                        label: "Id",
+                        key: "id",
+                    },
+                    Column {
+                        label: "Status",
+                        key: "status",
+                    },
+                ],
+                rows: vec![vec![Some("1".into()), Some("Fix Released".into())]],
+            },
+            noun: Noun {
+                singular: "bug",
+                plural: "bugs",
+            },
+            empty: "None.".into(),
+            hint: None,
+        }],
+        json: Value::Null,
+        records: Records {
+            columns: Vec::new(),
+            rows: Vec::new(),
+        },
+    };
+    let wrapped = Output::fixed(OutputMode::Rich, true, 20).render(&wrap_report);
+    assert!(wrapped.contains(&format!("{ok}Fix{reset}")), "{wrapped:?}");
+    assert!(
+        wrapped.contains(&format!("{ok}Released{reset}")),
+        "{wrapped:?}"
+    );
+
+    // 3. Stacked tables color only real semantic columns, not continuation lines containing `: `.
+    let stacked_report = Report {
+        blocks: vec![Block::Table {
+            records: Records {
+                columns: vec![
+                    Column {
+                        label: "Summary",
+                        key: "summary",
+                    },
+                    Column {
+                        label: "Status",
+                        key: "status",
+                    },
+                ],
+                rows: vec![vec![
+                    Some("first line\nAuthor: fake".into()),
+                    Some("Fix Released".into()),
+                ]],
+            },
+            noun: Noun {
+                singular: "item",
+                plural: "items",
+            },
+            empty: "None.".into(),
+            hint: None,
+        }],
+        json: Value::Null,
+        records: Records {
+            columns: Vec::new(),
+            rows: Vec::new(),
+        },
+    };
+    let stacked = Output::fixed(OutputMode::Rich, true, 5).render(&stacked_report);
+    assert!(
+        stacked.contains(&format!("Status: {ok}Fix Released{reset}")),
+        "{stacked:?}"
+    );
+    assert!(
+        !stacked.contains(&format!("{name}fake{reset}")),
+        "continuation line must not be mis-colored: {stacked:?}"
+    );
+
+    // 4. Multi-line fields paint each non-empty line independently.
+    let multiline_field = Report {
+        blocks: vec![Block::Field("Tags", "tag-a\ntag-b".into())],
+        json: Value::Null,
+        records: Records {
+            columns: Vec::new(),
+            rows: Vec::new(),
+        },
+    };
+    let field_rendered = Output::fixed(OutputMode::Rich, true, 80).render(&multiline_field);
+    assert_eq!(
+        field_rendered,
+        format!("  Tags: {name}tag-a{reset}\n{name}tag-b{reset}\n")
+    );
+
+    // 5. ColorChoice::Always overrides NO_COLOR consistently for tables via anstyle.
+    let env_no_color = output::Environment {
+        no_color: Some("1".into()),
+        term: Some("xterm-256color".into()),
+        ..Default::default()
+    };
+    let always_out = Output::resolve(output::Settings {
+        format: None,
+        color: ColorChoice::Always,
+        config_format: None,
+        accessible: false,
+        display: Display::from_width(120),
+        json_output: true,
+        tsv_output: true,
+        fields: None,
+        env: &env_no_color,
+        stdout_terminal: false,
+        stderr_terminal: false,
+    })
+    .unwrap();
+    assert!(
+        always_out
+            .render(&bar_report)
+            .contains(&format!("{ok}Fix Released{reset}"))
+    );
 }
