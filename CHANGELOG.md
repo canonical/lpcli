@@ -12,6 +12,13 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 ### Added
 
+- `lpcli package changelog` (and library helpers `get_source_changelog_url`,
+  `fetch_source_changelog`, `search_ppa_sources_raw`, `ChangelogEntry`,
+  `parse_debian_changelog`, and `slice_debian_changelog`) to view a source
+  package's Debian changelog for a distribution series or `--ppa OWNER/NAME`
+  in `rich`, `plain`, or `json` format. Defaults to the latest 5 entries with
+  `--limit <N>` (minimum 1) and mutually exclusive `--full`, while fetching
+  changelog text unauthenticated across trusted Launchpad/Librarian hosts.
 - `git list --target` to enumerate the Git repositories of a project,
   distribution source package, or `~person`/`~team`, including personal
   forks.

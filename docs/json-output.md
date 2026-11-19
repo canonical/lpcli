@@ -78,6 +78,7 @@ are placed under `lpcli` and are never added to Launchpad entries.
 | `queue info` | `package_upload`, `binary_properties`, `logs` (rejected uploads only), `lpcli.archive`, `lpcli.series` |
 | `queue download` | `package_upload`, `source_file_urls` or `binary_file_urls`, `lpcli` (archive, series, output directory, per-file `downloads`, `downloaded`, `failed`) |
 | `package download` | `source_package_publishing_history`, `lpcli` (`source_file_urls`, output directory, per-file `downloads`, `downloaded`, `failed`) |
+| `package changelog` | `source_package_publishing_history`, `lpcli` (`archive`, `series`, `changelog_url`, `changelog`, `total_entries`, `truncated`, `entries`) |
 
 `status` prints:
 

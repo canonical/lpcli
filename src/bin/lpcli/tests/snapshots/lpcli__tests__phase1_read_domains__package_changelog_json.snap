@@ -1,0 +1,98 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "lpcli": {
+    "archive": "ubuntu",
+    "changelog": "unbound (1.19.2-1ubuntu3.12) noble-security; urgency=medium\n\n  * SECURITY UPDATE: Allocation fix\n    - debian/patches/CVE-2026-80225.patch: cap reads.\n\n -- Allen Huang <allen.huang@canonical.com>  Wed, 14 Oct 2026 22:26:11 +0100\n\nunbound (1.19.2-1ubuntu3.11) noble-updates; urgency=high, binary-only=yes\n\n  * Backport upstream stability fix.\n\n -- Ubuntu Maintainer <maint@ubuntu.com>  Tue, 13 Oct 2026 10:00:00 +0000\n\nunbound (1.19.2-1ubuntu3.10) noble; urgency=low\n\n  * Update apparmor abstraction.\n\n -- Dev One <d1@example.org>  Mon, 12 Oct 2026 09:00:00 +0000\n\nunbound (1.19.2-1ubuntu3.9) noble; urgency=low\n\n  * Add autopkgtest timeout guard.\n\n -- Dev Two <d2@example.org>  Sun, 11 Oct 2026 08:00:00 +0000\n\nunbound (1.19.2-1ubuntu3.8) noble; urgency=low\n\n  * Fix systemd unit ordering.\n\n -- Dev Three <d3@example.org>  Sat, 10 Oct 2026 07:00:00 +0000",
+    "changelog_url": "https://api.launchpad.net/devel/ubuntu/+archive/primary/+sourcepub/18891390/+files/changelog",
+    "entries": [
+      {
+        "changes": "  * SECURITY UPDATE: Allocation fix\n    - debian/patches/CVE-2026-80225.patch: cap reads.",
+        "date": "Wed, 14 Oct 2026 22:26:11 +0100",
+        "distributions": [
+          "noble-security"
+        ],
+        "maintainer": "Allen Huang <allen.huang@canonical.com>",
+        "package": "unbound",
+        "timestamp": "2026-10-14T21:26:11Z",
+        "urgency": "medium",
+        "version": "1.19.2-1ubuntu3.12"
+      },
+      {
+        "changes": "  * Backport upstream stability fix.",
+        "date": "Tue, 13 Oct 2026 10:00:00 +0000",
+        "distributions": [
+          "noble-updates"
+        ],
+        "maintainer": "Ubuntu Maintainer <maint@ubuntu.com>",
+        "metadata": [
+          [
+            "binary-only",
+            "yes"
+          ]
+        ],
+        "package": "unbound",
+        "timestamp": "2026-10-13T10:00:00Z",
+        "urgency": "high",
+        "version": "1.19.2-1ubuntu3.11"
+      },
+      {
+        "changes": "  * Update apparmor abstraction.",
+        "date": "Mon, 12 Oct 2026 09:00:00 +0000",
+        "distributions": [
+          "noble"
+        ],
+        "maintainer": "Dev One <d1@example.org>",
+        "package": "unbound",
+        "timestamp": "2026-10-12T09:00:00Z",
+        "urgency": "low",
+        "version": "1.19.2-1ubuntu3.10"
+      },
+      {
+        "changes": "  * Add autopkgtest timeout guard.",
+        "date": "Sun, 11 Oct 2026 08:00:00 +0000",
+        "distributions": [
+          "noble"
+        ],
+        "maintainer": "Dev Two <d2@example.org>",
+        "package": "unbound",
+        "timestamp": "2026-10-11T08:00:00Z",
+        "urgency": "low",
+        "version": "1.19.2-1ubuntu3.9"
+      },
+      {
+        "changes": "  * Fix systemd unit ordering.",
+        "date": "Sat, 10 Oct 2026 07:00:00 +0000",
+        "distributions": [
+          "noble"
+        ],
+        "maintainer": "Dev Three <d3@example.org>",
+        "package": "unbound",
+        "timestamp": "2026-10-10T07:00:00Z",
+        "urgency": "low",
+        "version": "1.19.2-1ubuntu3.8"
+      }
+    ],
+    "series": "noble",
+    "total_entries": 7,
+    "truncated": true
+  },
+  "source_package_publishing_history": {
+    "archive_link": "https://api.launchpad.net/devel/ubuntu/+archive/primary",
+    "component_name": "main",
+    "date_published": "[timestamp]",
+    "date_superseded": null,
+    "distro_series_link": "https://api.launchpad.net/devel/ubuntu/noble",
+    "http_etag": "\"etag-1234\"",
+    "pocket": "Release",
+    "resource_type_link": "https://api.launchpad.net/devel/#source_package_publishing_history",
+    "section_name": "devel",
+    "self_link": "https://api.launchpad.net/devel/ubuntu/+archive/primary/+sourcepub/18891390",
+    "source_package_name": "unbound",
+    "source_package_version": "1.19.2-1ubuntu3.12",
+    "status": "Published",
+    "web_link": "https://launchpad.net/ubuntu/+archive/primary/+sourcepub/18891390"
+  }
+}

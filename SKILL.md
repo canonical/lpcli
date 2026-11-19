@@ -197,6 +197,7 @@ retry only the parts that failed.
 | List PPA sources | `lpcli package ppa-sources --owner my-username --ppa my-ppa --name curl` |
 | Download source files | `lpcli package download --name curl --series noble` |
 | Download specific version | `lpcli package download --name curl --series noble --version 8.5.0-2ubuntu10` |
+| Show package changelog | `lpcli package changelog --name unbound --series noble` (shows latest 5 entries; `--limit N`, `--full`, `--version`, `--pocket`, or `--ppa OWNER/NAME`) |
 
 ### Projects
 

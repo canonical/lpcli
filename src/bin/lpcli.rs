@@ -1637,6 +1637,33 @@ enum PackageCommand {
         #[arg(short, long, default_value = ".")]
         output: String,
     },
+    /// Show the changelog for a source package publication.
+    Changelog {
+        /// Source package name (required).
+        #[arg(short, long)]
+        name: String,
+        /// Series codename (e.g. "jammy", "noble"). Required unless --ppa is specified.
+        #[arg(short, long, required_unless_present = "ppa")]
+        series: Option<String>,
+        /// Package version (optional; uses the latest published version if omitted).
+        #[arg(short, long)]
+        version: Option<String>,
+        /// Pocket (e.g. "Release", "Updates", "Security").
+        #[arg(short, long, value_parser = parse_pocket)]
+        pocket: Option<Pocket>,
+        /// PPA to query as OWNER/NAME (e.g. "my-username/my-ppa"). Ubuntu-only.
+        #[arg(long, value_parser = parse_ppa_ref)]
+        ppa: Option<PpaRef>,
+        /// Distribution name (default: "ubuntu").
+        #[arg(short, long, default_value = "ubuntu")]
+        distro: String,
+        /// Maximum number of changelog entries to display (default: 5).
+        #[arg(short, long, value_parser = parse_positive_limit, conflicts_with = "full")]
+        limit: Option<usize>,
+        /// Show the full changelog instead of only the latest 5 entries.
+        #[arg(long, conflicts_with = "limit")]
+        full: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -2511,6 +2538,20 @@ fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
             PackageCommand::Download { series, distro, .. } => {
                 validate_series_for_distro(distro, series)
             }
+            PackageCommand::Changelog {
+                series,
+                distro,
+                ppa,
+                ..
+            } => {
+                if ppa.is_some() && !distro.eq_ignore_ascii_case("ubuntu") {
+                    Err(format!(
+                        "PPA archives are only available for Ubuntu, not '{distro}'"
+                    ))
+                } else {
+                    validate_optional_series_for_distro(distro, series.as_deref())
+                }
+            }
             _ => Ok(()),
         },
         Command::Translation(cmd) => match cmd {
@@ -2882,7 +2923,8 @@ fn read_auth_policy(command: &Command, authenticated: bool, public: bool) -> Rea
             | PackageCommand::ListSeries { .. }
             | PackageCommand::Search { .. }
             | PackageCommand::Distro { .. }
-            | PackageCommand::Download { .. },
+            | PackageCommand::Download { .. }
+            | PackageCommand::Changelog { ppa: None, .. },
         )
         | Command::Translation(_)
         | Command::Bug(BugCommand::RemoteBugTrackers { .. }) => Anonymous,

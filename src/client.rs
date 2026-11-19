@@ -76,6 +76,9 @@ fn redirect_policy(signing_origin: Option<&str>) -> reqwest::redirect::Policy {
 /// Base URL for the Launchpad devel API.
 pub const API_BASE: &str = "https://api.launchpad.net/devel";
 
+/// Maximum size in bytes read by [`LaunchpadClient::get_public_text_url()`].
+const MAX_PUBLIC_TEXT_BYTES: usize = 16 * 1024 * 1024;
+
 // Private response metadata; never infer a rejected generation from the
 // session's current credentials, which may already have changed.
 #[derive(Clone)]
@@ -1160,6 +1163,83 @@ impl LaunchpadClient {
         self.get_url(url).await
     }
 
+    /// Fetch public text content from a Launchpad or Librarian URL without
+    /// attaching OAuth or hardware-bound credentials.
+    ///
+    /// Both the initial URL and any redirect hops are restricted to HTTPS URLs
+    /// under `launchpad.net` or `launchpadlibrarian.net`, or the client's
+    /// configured `base_url` origin (for local test servers). Response bodies
+    /// are capped at 16 MiB and decoded lossily if non-UTF-8 bytes appear.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LpError::Url`] on malformed URLs, [`LpError::NotFound`] on HTTP
+    /// 404, [`LpError::RateLimit`] on HTTP 429, [`LpError::Api`] on other
+    /// non-success status codes, or [`LpError::Other`] when the URL/redirect
+    /// target is untrusted or the response exceeds the size limit.
+    pub async fn get_public_text_url(&self, url: &str) -> Result<String> {
+        self.get_public_text_url_with_limit(url, MAX_PUBLIC_TEXT_BYTES)
+            .await
+    }
+
+    async fn get_public_text_url_with_limit(&self, url: &str, max_bytes: usize) -> Result<String> {
+        let parsed = url::Url::parse(url)?;
+        if !is_trusted_public_text_url(&parsed, &self.base_url) {
+            return Err(LpError::Other(format!(
+                "Refusing to fetch untrusted public text URL: {url}"
+            )));
+        }
+        let http = public_text_http_client(&self.base_url)?;
+        let req = http.get(parsed);
+        let resp = self.send_with_retry(req).await?;
+        let status = resp.status();
+        if status == StatusCode::NOT_FOUND {
+            return Err(LpError::NotFound(
+                "The requested resource does not exist on Launchpad.".to_string(),
+            ));
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = retry_after_seconds(resp.headers(), SystemTime::now());
+            return Err(LpError::RateLimit {
+                retry_after_secs: retry_after,
+            });
+        }
+        if !status.is_success() {
+            let code = status.as_u16();
+            let message = resp.text().await.unwrap_or_else(|_| status.to_string());
+            return Err(LpError::Api {
+                status: code,
+                message,
+            });
+        }
+        if resp
+            .content_length()
+            .is_some_and(|len| len > max_bytes as u64)
+        {
+            return Err(LpError::Other(format!(
+                "Public text response exceeds maximum size ({max_bytes} bytes)."
+            )));
+        }
+
+        let mut buf = Vec::new();
+        let mut stream = resp.bytes_stream();
+        use futures_util::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if buf.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(LpError::Other(format!(
+                    "Public text response exceeds maximum size ({max_bytes} bytes)."
+                )));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+
+        Ok(match String::from_utf8(buf) {
+            Ok(text) => text,
+            Err(err) => String::from_utf8_lossy(err.as_bytes()).into_owned(),
+        })
+    }
+
     /// Perform an authenticated multipart POST and return the `Location`
     /// header from a `201 Created` response.
     ///
@@ -1317,6 +1397,45 @@ fn same_origin(url: &str, base: &str) -> bool {
         }
         _ => false,
     }
+}
+
+fn is_trusted_public_text_url(url: &url::Url, base_url: &str) -> bool {
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    if same_origin(url.as_str(), base_url) {
+        return true;
+    }
+    if url.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_end_matches('.');
+    ["launchpad.net", "launchpadlibrarian.net"]
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
+fn public_text_http_client(base_url: &str) -> Result<reqwest::Client> {
+    let trusted_base = base_url.to_string();
+    let policy = reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("too many redirects");
+        }
+        if !is_trusted_public_text_url(attempt.url(), &trusted_base) {
+            return attempt.error("refusing redirect to untrusted host");
+        }
+        attempt.follow()
+    });
+    reqwest::Client::builder()
+        .user_agent(concat!("lpcli/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(60))
+        .redirect(policy)
+        .build()
+        .map_err(|e| LpError::Other(format!("Failed to build HTTP client: {e}")))
 }
 
 /// Encode a slice of key-value tuples as URL form-encoded data, allowing
@@ -2230,5 +2349,140 @@ mod tests {
             client.credentials.as_ref().unwrap().access_token.token,
             "token"
         );
+    }
+
+    #[test]
+    fn is_trusted_public_text_url_allows_launchpad_domains_and_test_origin() {
+        let base = "http://127.0.0.1:4567";
+        for ok in [
+            "https://launchpad.net/ubuntu/+archive/primary/+sourcepub/1/+files/changelog",
+            "https://code.launchpad.net/foo",
+            "https://launchpadlibrarian.net/12345/changelog",
+            "https://foo.launchpadlibrarian.net/12345/changelog",
+            "http://127.0.0.1:4567/changelog",
+        ] {
+            let parsed = url::Url::parse(ok).unwrap();
+            assert!(
+                is_trusted_public_text_url(&parsed, base),
+                "expected trusted URL: {ok}"
+            );
+        }
+        for bad in [
+            "http://launchpad.net/changelog",
+            "http://launchpadlibrarian.net/12345/changelog",
+            "https://evil-launchpad.net/changelog",
+            "https://example.invalid/changelog",
+            "https://user:pass@launchpad.net/changelog",
+            "http://127.0.0.1:9999/changelog",
+        ] {
+            let parsed = url::Url::parse(bad).unwrap();
+            assert!(
+                !is_trusted_public_text_url(&parsed, base),
+                "expected untrusted URL: {bad}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn get_public_text_url_never_sends_credentials_and_validates_redirects() {
+        use crate::auth::Credentials;
+
+        let mut server = mockito::Server::new_async().await;
+        let mut untrusted = mockito::Server::new_async().await;
+
+        let target_mock = server
+            .mock("GET", "/librarian/changelog")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_status(200)
+            .with_body("unbound (1.0) noble; urgency=low\n\n  * Note.\n\n -- Dev <d@example>  Mon, 01 Jan 2024 00:00:00 +0000\n")
+            .create_async()
+            .await;
+        let redirect_mock = server
+            .mock("GET", "/pub/changelog")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_status(302)
+            .with_header("location", &format!("{}/librarian/changelog", server.url()))
+            .create_async()
+            .await;
+        let bad_redirect_mock = server
+            .mock("GET", "/pub/evil")
+            .with_status(302)
+            .with_header("location", &format!("{}/steal", untrusted.url()))
+            .create_async()
+            .await;
+        let untrusted_mock = untrusted
+            .mock("GET", "/steal")
+            .expect(0)
+            .create_async()
+            .await;
+        let binary_mock = server
+            .mock("GET", "/pub/latin1")
+            .with_status(200)
+            .with_body(vec![b'h', b'i', b' ', 0xff, b'\n'])
+            .create_async()
+            .await;
+        let big_mock = server
+            .mock("GET", "/pub/big")
+            .with_status(200)
+            .with_body("0123456789abcdef")
+            .create_async()
+            .await;
+        let missing_mock = server
+            .mock("GET", "/pub/missing")
+            .with_status(404)
+            .create_async()
+            .await;
+
+        let creds = Credentials::new("lpcli", "tok", "sec");
+        let client = LaunchpadClient::new(Some(creds)).with_base_url(server.url());
+
+        let text = client
+            .get_public_text_url(&format!("{}/pub/changelog", server.url()))
+            .await
+            .unwrap();
+        assert!(text.contains("unbound (1.0)"), "{text}");
+        redirect_mock.assert_async().await;
+        target_mock.assert_async().await;
+
+        // Untrusted initial URL and untrusted redirect are rejected.
+        assert!(
+            client
+                .get_public_text_url("https://example.invalid/changelog")
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .get_public_text_url(&format!("{}/pub/evil", server.url()))
+                .await
+                .is_err()
+        );
+        bad_redirect_mock.assert_async().await;
+        untrusted_mock.assert_async().await;
+
+        // Lossy UTF-8 decoding succeeds.
+        let lossy = client
+            .get_public_text_url(&format!("{}/pub/latin1", server.url()))
+            .await
+            .unwrap();
+        assert_eq!(lossy, "hi \u{FFFD}\n");
+        binary_mock.assert_async().await;
+
+        // Exceeding byte limit fails.
+        assert!(
+            client
+                .get_public_text_url_with_limit(&format!("{}/pub/big", server.url()), 8)
+                .await
+                .is_err()
+        );
+        big_mock.assert_async().await;
+
+        // 404 maps to LpError::NotFound.
+        let not_found = client
+            .get_public_text_url(&format!("{}/pub/missing", server.url()))
+            .await
+            .unwrap_err();
+        assert!(matches!(not_found, LpError::NotFound(_)), "{not_found:?}");
+        missing_mock.assert_async().await;
     }
 }

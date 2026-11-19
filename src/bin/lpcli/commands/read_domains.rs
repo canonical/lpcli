@@ -481,6 +481,32 @@ pub(crate) async fn package_report(
                 "`package download` writes files and has no read-only report.".into(),
             ));
         }
+
+        PackageCommand::Changelog {
+            name,
+            series,
+            version,
+            pocket,
+            ppa,
+            distro,
+            limit,
+            full,
+        } => {
+            package_changelog(
+                client,
+                &PackageChangelogRequest {
+                    name,
+                    series,
+                    version,
+                    pocket,
+                    ppa,
+                    distro,
+                    limit,
+                    full,
+                },
+            )
+            .await?
+        }
     })
 }
 
@@ -992,6 +1018,283 @@ pub(crate) async fn translation_report(
             )
         }
     })
+}
+
+// ---------------------------------------------------------------------------
+// Package changelog handler
+// ---------------------------------------------------------------------------
+
+pub(crate) const DEFAULT_CHANGELOG_LIMIT: usize = 5;
+
+#[derive(Debug, Clone)]
+pub(crate) struct PackageChangelogRequest {
+    pub(crate) name: String,
+    pub(crate) series: Option<String>,
+    pub(crate) version: Option<String>,
+    pub(crate) pocket: Option<Pocket>,
+    pub(crate) ppa: Option<PpaRef>,
+    pub(crate) distro: String,
+    pub(crate) limit: Option<usize>,
+    pub(crate) full: bool,
+}
+
+async fn package_changelog(
+    client: &LaunchpadClient,
+    request: &PackageChangelogRequest,
+) -> lpcli::error::Result<Report> {
+    if request.limit == Some(0) {
+        return Err(LpError::Usage("--limit must be at least 1.".into()));
+    }
+    if request.ppa.is_some() && !request.distro.eq_ignore_ascii_case("ubuntu") {
+        return Err(LpError::Usage(format!(
+            "PPA archives are only available for Ubuntu, not '{}'.",
+            request.distro
+        )));
+    }
+
+    let canonical_series_name = request
+        .series
+        .as_deref()
+        .map(|s| canonical_series(&request.distro, s));
+    let params = SourceSearchParams {
+        source_name: Some(&request.name),
+        version: request.version.as_deref(),
+        pocket: request.pocket.map(pocket_launchpad_name),
+        status: request.version.is_none().then_some("Published"),
+        exact_match: true,
+        limit: Some(1),
+    };
+
+    let found = if let Some(ppa) = &request.ppa {
+        packages::search_ppa_sources_raw(
+            client,
+            &ppa.owner,
+            &ppa.name,
+            canonical_series_name,
+            &params,
+        )
+        .await?
+    } else {
+        let series_name = canonical_series_name.ok_or_else(|| {
+            LpError::Usage("--series is required when --ppa is not given.".into())
+        })?;
+        packages::search_published_sources_raw(client, &request.distro, series_name, &params)
+            .await?
+    };
+
+    let publication_json = raw_entries(&found.raw).first().cloned();
+    let (Some(publication), Some(publication_json)) =
+        (found.value.entries.into_iter().next(), publication_json)
+    else {
+        return Err(LpError::LocalNotFound(changelog_not_found_message(
+            request,
+            canonical_series_name,
+        )));
+    };
+
+    let self_link = publication
+        .self_link
+        .as_deref()
+        .ok_or_else(|| LpError::Other("Source package publication has no self_link.".into()))?;
+    let changelog_url = packages::get_source_changelog_url(client, self_link)
+        .await?
+        .ok_or_else(|| {
+            let pkg_version = publication
+                .source_package_version
+                .as_deref()
+                .unwrap_or("unknown version");
+            LpError::LocalNotFound(format!(
+                "No changelog is available on Launchpad for '{}' ({pkg_version}) in {}.",
+                request.name,
+                changelog_target_label(request, canonical_series_name),
+            ))
+        })?;
+
+    let raw_text = packages::fetch_source_changelog(client, &changelog_url).await?;
+    Ok(package_changelog_report(
+        request,
+        canonical_series_name,
+        &publication,
+        publication_json,
+        &changelog_url,
+        &raw_text,
+    ))
+}
+
+fn changelog_target_label(
+    request: &PackageChangelogRequest,
+    canonical_series_name: Option<&str>,
+) -> String {
+    match (&request.ppa, canonical_series_name) {
+        (Some(ppa), Some(series)) => format!("{} ({})", ppa.label(), series),
+        (Some(ppa), None) => ppa.label(),
+        (None, Some(series)) => format!("{}/{series}", request.distro),
+        (None, None) => request.distro.clone(),
+    }
+}
+
+fn changelog_not_found_message(
+    request: &PackageChangelogRequest,
+    canonical_series_name: Option<&str>,
+) -> String {
+    let qualifier = if request.version.is_none() {
+        "published "
+    } else {
+        ""
+    };
+    let version = request
+        .version
+        .as_ref()
+        .map(|v| format!(" ({v})"))
+        .unwrap_or_default();
+    let pocket = request
+        .pocket
+        .map(|p| format!(" [pocket: {}]", pocket_launchpad_name(p)))
+        .unwrap_or_default();
+    format!(
+        "No {qualifier}source package '{}'{version}{pocket} found in {}.",
+        request.name,
+        changelog_target_label(request, canonical_series_name),
+    )
+}
+
+/// Build the report for `lpcli package changelog`.
+pub(crate) fn package_changelog_report(
+    request: &PackageChangelogRequest,
+    canonical_series_name: Option<&str>,
+    publication: &packages::SourcePackagePublishingHistory,
+    publication_json: Value,
+    changelog_url: &str,
+    raw_text: &str,
+) -> Report {
+    let pkg_name = publication
+        .source_package_name
+        .as_deref()
+        .unwrap_or(&request.name);
+    let pkg_version = publication
+        .source_package_version
+        .as_deref()
+        .unwrap_or("unknown version");
+    let archive_label = request
+        .ppa
+        .as_ref()
+        .map_or_else(|| request.distro.clone(), PpaRef::label);
+    let resolved_series = canonical_series_name
+        .map(str::to_string)
+        .or_else(|| output::link_name(publication.distro_series_link.as_deref()));
+
+    let mut entries = packages::parse_debian_changelog(raw_text);
+    let total_entries = entries.len();
+    let effective_limit = (!request.full).then(|| request.limit.unwrap_or(DEFAULT_CHANGELOG_LIMIT));
+    let displayed_text = match effective_limit {
+        Some(limit) if total_entries > 0 => {
+            entries.truncate(limit);
+            packages::slice_debian_changelog(raw_text, limit)
+        }
+        _ => packages::slice_debian_changelog(raw_text, usize::MAX),
+    };
+    let truncated = entries.len() < total_entries;
+
+    let mut blocks = vec![Block::Heading(format!("{pkg_name} ({pkg_version})"))];
+    if let Some(ppa) = &request.ppa {
+        blocks.push(Block::Field("Archive", ppa.label()));
+    }
+    if let Some(series) = &resolved_series {
+        blocks.push(Block::Field("Series", series.clone()));
+    }
+    if let Some(pocket) = &publication.pocket {
+        blocks.push(Block::Field("Pocket", pocket.clone()));
+    }
+    if let Some(status) = &publication.status {
+        blocks.push(Block::Field("Status", status.clone()));
+    }
+    if let Some(published) = publication.date_published {
+        blocks.push(Block::Timestamp(
+            "Published",
+            published,
+            TimestampPrecision::DateTime,
+        ));
+    }
+    blocks.push(Block::Field("Changelog", changelog_url.to_string()));
+    blocks.push(Block::Break);
+
+    if !entries.is_empty() {
+        if truncated {
+            blocks.push(Block::Note(vec![
+                Span::Text(format!(
+                    "Showing latest {} of {total_entries} changelog entries. Use ",
+                    entries.len()
+                )),
+                Span::Command("--full".into()),
+                Span::Text(" or ".into()),
+                Span::Command("--limit".into()),
+                Span::Text(" to see more.".into()),
+            ]));
+            blocks.push(Block::Break);
+        }
+        let comment_entries = entries
+            .iter()
+            .map(|entry| {
+                let mut details = Vec::new();
+                if !entry.distributions.is_empty() {
+                    details.push(("Distribution", entry.distributions.join(", ")));
+                }
+                if let Some(urgency) = &entry.urgency {
+                    details.push(("Urgency", urgency.clone()));
+                }
+                if !entry.metadata.is_empty() {
+                    let formatted = entry
+                        .metadata
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    details.push(("Metadata", formatted));
+                }
+                CommentEntry {
+                    label_field: "Version",
+                    label: entry.version.clone(),
+                    author: entry.maintainer.clone(),
+                    date: entry
+                        .timestamp
+                        .map(CommentDate::Timestamp)
+                        .or_else(|| entry.date.clone().map(CommentDate::Text)),
+                    details,
+                    content_field: "Changes",
+                    content: entry.changes.clone(),
+                    attachments: Vec::new(),
+                }
+            })
+            .collect();
+        blocks.push(Block::Comments {
+            entries: comment_entries,
+            noun: noun("changelog entry", "changelog entries"),
+            empty: "No changelog entries found.".into(),
+        });
+    } else if !displayed_text.trim().is_empty() {
+        blocks.push(Block::Field("Changes", displayed_text.clone()));
+    } else {
+        blocks.push(Block::Note(vec![Span::Text(
+            "No changelog entries found.".into(),
+        )]));
+    }
+
+    Report {
+        blocks,
+        json: serde_json::json!({
+            "source_package_publishing_history": publication_json,
+            "lpcli": {
+                "archive": archive_label,
+                "series": resolved_series,
+                "changelog_url": changelog_url,
+                "changelog": displayed_text,
+                "total_entries": total_entries,
+                "truncated": truncated,
+                "entries": entries,
+            },
+        }),
+        records: no_records(),
+    }
 }
 
 // ---------------------------------------------------------------------------

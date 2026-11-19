@@ -857,6 +857,507 @@ fn package_download_report_redacts_secrets_in_failed_outcomes() {
     }
 }
 
+fn changelog_fixture_text() -> String {
+    concat!(
+        "unbound (1.19.2-1ubuntu3.12) noble-security; urgency=medium\n",
+        "\n",
+        "  * SECURITY UPDATE: Allocation fix\n",
+        "    - debian/patches/CVE-2026-80225.patch: cap reads.\n",
+        "\n",
+        " -- Allen Huang <allen.huang@canonical.com>  Wed, 14 Oct 2026 22:26:11 +0100\n",
+        "\n",
+        "unbound (1.19.2-1ubuntu3.11) noble-updates; urgency=high, binary-only=yes\n",
+        "\n",
+        "  * Backport upstream stability fix.\n",
+        "\n",
+        " -- Ubuntu Maintainer <maint@ubuntu.com>  Tue, 13 Oct 2026 10:00:00 +0000\n",
+        "\n",
+        "unbound (1.19.2-1ubuntu3.10) noble; urgency=low\n",
+        "\n",
+        "  * Update apparmor abstraction.\n",
+        "\n",
+        " -- Dev One <d1@example.org>  Mon, 12 Oct 2026 09:00:00 +0000\n",
+        "\n",
+        "unbound (1.19.2-1ubuntu3.9) noble; urgency=low\n",
+        "\n",
+        "  * Add autopkgtest timeout guard.\n",
+        "\n",
+        " -- Dev Two <d2@example.org>  Sun, 11 Oct 2026 08:00:00 +0000\n",
+        "\n",
+        "unbound (1.19.2-1ubuntu3.8) noble; urgency=low\n",
+        "\n",
+        "  * Fix systemd unit ordering.\n",
+        "\n",
+        " -- Dev Three <d3@example.org>  Sat, 10 Oct 2026 07:00:00 +0000\n",
+        "\n",
+        "unbound (1.19.2-1ubuntu3.7) noble; urgency=low\n",
+        "\n",
+        "  * Refresh root hints.\n",
+        "\n",
+        " -- Dev Four <d4@example.org>  Fri, 09 Oct 2026 06:00:00 +0000\n",
+        "\n",
+        "unbound (1.19.2-1ubuntu3.6) noble; urgency=low\n",
+        "\n",
+        "  * Initial noble release.\n",
+        "\n",
+        " -- Dev Five <d5@example.org>  Thu, 08 Oct 2026 05:00:00 +0000\n",
+    )
+    .to_string()
+}
+
+#[tokio::test]
+async fn package_changelog_snapshots_default_truncate_and_render_modes() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let pub_val = rebase(
+        source_json("unbound", "1.19.2-1ubuntu3.12", 18891390),
+        &base,
+    );
+    let changelog_url =
+        format!("{base}/ubuntu/+archive/primary/+sourcepub/18891390/+files/changelog");
+    let changelog_body = changelog_fixture_text();
+
+    let search_mock = server
+        .mock("GET", "/ubuntu/+archive/primary")
+        .match_query(Matcher::AllOf(vec![
+            op("getPublishedSources"),
+            Matcher::UrlEncoded("distro_series".into(), format!("{base}/ubuntu/noble")),
+            Matcher::UrlEncoded("source_name".into(), "unbound".into()),
+            Matcher::UrlEncoded("status".into(), "Published".into()),
+            Matcher::UrlEncoded("exact_match".into(), "true".into()),
+            Matcher::UrlEncoded("ws.size".into(), "1".into()),
+        ]))
+        .match_header("authorization", Matcher::Missing)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "total_size": 1,
+                "start": 0,
+                "entries": [pub_val.clone()],
+            })
+            .to_string(),
+        )
+        .expect(3)
+        .create_async()
+        .await;
+    let url_mock = server
+        .mock("GET", "/ubuntu/+archive/primary/+sourcepub/18891390")
+        .match_query(op("changelogUrl"))
+        .match_header("authorization", Matcher::Missing)
+        .with_header("content-type", "application/json")
+        .with_body(Value::String(changelog_url.clone()).to_string())
+        .expect(3)
+        .create_async()
+        .await;
+    let text_mock = server
+        .mock(
+            "GET",
+            "/ubuntu/+archive/primary/+sourcepub/18891390/+files/changelog",
+        )
+        .match_header("authorization", Matcher::Missing)
+        .with_status(200)
+        .with_header("content-type", "text/x-debian-source-changelog")
+        .with_body(&changelog_body)
+        .expect(3)
+        .create_async()
+        .await;
+
+    let cmd_default = parsed(&[
+        "package",
+        "changelog",
+        "--name",
+        "unbound",
+        "--series",
+        "noble",
+    ]);
+    assert!(read_domain_supports_json(&cmd_default));
+    assert!(!read_domain_supports_tsv(&cmd_default));
+
+    // Default shows latest 5 of 7 entries.
+    let report = run(
+        &server,
+        &[
+            "package",
+            "changelog",
+            "--name",
+            "unbound",
+            "--series",
+            "noble",
+        ],
+    )
+    .await;
+    assert_eq!(report.json["source_package_publishing_history"], pub_val);
+    assert_eq!(report.json["lpcli"]["total_entries"], 7);
+    assert_eq!(report.json["lpcli"]["truncated"], true);
+    assert_eq!(report.json["lpcli"]["entries"].as_array().unwrap().len(), 5);
+    assert!(
+        !report.json["lpcli"]["changelog"]
+            .as_str()
+            .unwrap()
+            .contains("1.19.2-1ubuntu3.7")
+    );
+    assert_modes(&report);
+
+    assert_json_report!("package_changelog_json", stable(&report.json, &base));
+    insta::assert_snapshot!(
+        "package_changelog_plain",
+        render(&report, OutputMode::Plain).replace(&base, LP)
+    );
+    insta::assert_snapshot!(
+        "package_changelog_rich",
+        render(&report, OutputMode::Rich).replace(&base, LP)
+    );
+
+    // --fields filters Launchpad's entry while leaving lpcli untouched.
+    let filtered: Value = serde_json::from_str(
+        &Output::fixed(OutputMode::Json, false, 100)
+            .with_fields(&["source_package_name", "source_package_version"])
+            .render(&report),
+    )
+    .unwrap();
+    assert_eq!(
+        filtered["source_package_publishing_history"],
+        json!({
+            "source_package_name": "unbound",
+            "source_package_version": "1.19.2-1ubuntu3.12",
+        })
+    );
+    assert_eq!(filtered["lpcli"]["total_entries"], 7);
+
+    // --limit 2 limits to 2 entries.
+    let report_two = run(
+        &server,
+        &[
+            "package",
+            "changelog",
+            "--name",
+            "unbound",
+            "--series",
+            "noble",
+            "--limit",
+            "2",
+        ],
+    )
+    .await;
+    assert_eq!(
+        report_two.json["lpcli"]["entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(report_two.json["lpcli"]["truncated"], true);
+    assert_eq!(report_two.json["lpcli"]["total_entries"], 7);
+
+    // --full returns all 7 entries without truncation note.
+    let report_full = run(
+        &server,
+        &[
+            "package",
+            "changelog",
+            "--name",
+            "unbound",
+            "--series",
+            "noble",
+            "--full",
+        ],
+    )
+    .await;
+    assert_eq!(
+        report_full.json["lpcli"]["entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        7
+    );
+    assert_eq!(report_full.json["lpcli"]["truncated"], false);
+    assert_eq!(report_full.json["lpcli"]["total_entries"], 7);
+    let plain_full = render(&report_full, OutputMode::Plain);
+    assert!(plain_full.contains("1.19.2-1ubuntu3.6"), "{plain_full}");
+    assert!(!plain_full.contains("Showing latest"), "{plain_full}");
+
+    search_mock.assert_async().await;
+    url_mock.assert_async().await;
+    text_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn package_changelog_supports_version_pocket_and_ppa() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let superseded_pub = rebase(
+        entry(
+            "source_package_publishing_history",
+            "/ubuntu/+archive/primary/+sourcepub/18817934",
+            json!({
+                "source_package_name": "unbound",
+                "source_package_version": "1.19.2-1ubuntu3.10",
+                "component_name": "main",
+                "section_name": "net",
+                "status": "Superseded",
+                "pocket": "Security",
+                "date_published": "2024-03-01T00:00:00+00:00",
+                "date_superseded": "2024-04-01T00:00:00+00:00",
+                "archive_link": format!("{LP}/ubuntu/+archive/primary"),
+                "distro_series_link": format!("{LP}/ubuntu/noble"),
+            }),
+        ),
+        &base,
+    );
+    let ppa_pub = rebase(
+        entry(
+            "source_package_publishing_history",
+            "/~mozillateam/+archive/ubuntu/ppa/+sourcepub/55",
+            json!({
+                "source_package_name": "firefox",
+                "source_package_version": "160.0-1~mt1",
+                "component_name": "main",
+                "section_name": "web",
+                "status": "Published",
+                "pocket": "Release",
+                "date_published": "2024-04-05T00:00:00+00:00",
+                "date_superseded": null,
+                "archive_link": format!("{LP}/~mozillateam/+archive/ubuntu/ppa"),
+                "distro_series_link": format!("{LP}/ubuntu/noble"),
+            }),
+        ),
+        &base,
+    );
+
+    let ver_search = server
+        .mock("GET", "/ubuntu/+archive/primary")
+        .match_query(Matcher::AllOf(vec![
+            op("getPublishedSources"),
+            Matcher::UrlEncoded("distro_series".into(), format!("{base}/ubuntu/noble")),
+            Matcher::UrlEncoded("source_name".into(), "unbound".into()),
+            Matcher::UrlEncoded("version".into(), "1.19.2-1ubuntu3.10".into()),
+            Matcher::UrlEncoded("pocket".into(), "Security".into()),
+            Matcher::UrlEncoded("exact_match".into(), "true".into()),
+            Matcher::UrlEncoded("ws.size".into(), "1".into()),
+        ]))
+        .with_status(200)
+        .with_body(json!({ "total_size": 1, "start": 0, "entries": [superseded_pub] }).to_string())
+        .create_async()
+        .await;
+    let ver_url = mock_get(
+        &mut server,
+        "/ubuntu/+archive/primary/+sourcepub/18817934",
+        op("changelogUrl"),
+        &Value::String(format!("{base}/files/unbound-superseded-cl")),
+    )
+    .await;
+    let ver_text = server
+        .mock("GET", "/files/unbound-superseded-cl")
+        .with_status(200)
+        .with_body("unbound (1.19.2-1ubuntu3.10) noble-security; urgency=medium\n\n  * Old fix.\n\n -- Maint <m@ubuntu.com>  Mon, 12 Oct 2026 09:00:00 +0000\n")
+        .create_async()
+        .await;
+
+    // PPA lookup without --series infers series from publication's distro_series_link.
+    let ppa_search = mock_get(
+        &mut server,
+        "/~mozillateam/+archive/ubuntu/ppa",
+        Matcher::AllOf(vec![
+            op("getPublishedSources"),
+            Matcher::UrlEncoded("source_name".into(), "firefox".into()),
+            Matcher::UrlEncoded("status".into(), "Published".into()),
+            Matcher::UrlEncoded("exact_match".into(), "true".into()),
+            Matcher::UrlEncoded("ws.size".into(), "1".into()),
+        ]),
+        &json!({ "total_size": 1, "start": 0, "entries": [ppa_pub] }),
+    )
+    .await;
+    let ppa_url = mock_get(
+        &mut server,
+        "/~mozillateam/+archive/ubuntu/ppa/+sourcepub/55",
+        op("changelogUrl"),
+        &Value::String(format!("{base}/files/firefox-ppa-cl")),
+    )
+    .await;
+    let ppa_text = server
+        .mock("GET", "/files/firefox-ppa-cl")
+        .with_status(200)
+        .with_body("firefox (160.0-1~mt1) noble; urgency=medium\n\n  * PPA build.\n\n -- Mozilla Team <team@ubuntu.com>  Mon, 12 Oct 2026 09:00:00 +0000\n")
+        .create_async()
+        .await;
+
+    let report_ver = run(
+        &server,
+        &[
+            "package",
+            "changelog",
+            "--name",
+            "unbound",
+            "--series",
+            "noble",
+            "--version",
+            "1.19.2-1ubuntu3.10",
+            "--pocket",
+            "security",
+        ],
+    )
+    .await;
+    assert_eq!(
+        report_ver.json["lpcli"]["entries"][0]["version"],
+        "1.19.2-1ubuntu3.10"
+    );
+
+    let report_ppa = run(
+        &server,
+        &[
+            "package",
+            "changelog",
+            "--name",
+            "firefox",
+            "--ppa",
+            "mozillateam/ppa",
+        ],
+    )
+    .await;
+    assert_eq!(report_ppa.json["lpcli"]["archive"], "~mozillateam/ppa");
+    assert_eq!(report_ppa.json["lpcli"]["series"], "noble");
+    let plain_ppa = render(&report_ppa, OutputMode::Plain);
+    assert!(
+        plain_ppa.contains("Archive: ~mozillateam/ppa"),
+        "{plain_ppa}"
+    );
+    assert!(plain_ppa.contains("Series: noble"), "{plain_ppa}");
+
+    ver_search.assert_async().await;
+    ver_url.assert_async().await;
+    ver_text.assert_async().await;
+    ppa_search.assert_async().await;
+    ppa_url.assert_async().await;
+    ppa_text.assert_async().await;
+}
+
+#[tokio::test]
+async fn package_changelog_errors_and_nonstandard_fallback() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let client = mock_read_client(&server, false);
+
+    // 1. Missing publication -> LocalNotFound (exit 4).
+    let empty_mock = mock_get(
+        &mut server,
+        "/ubuntu/+archive/primary",
+        Matcher::AllOf(vec![
+            op("getPublishedSources"),
+            Matcher::UrlEncoded("distro_series".into(), format!("{base}/ubuntu/noble")),
+            Matcher::UrlEncoded("source_name".into(), "missingpkg".into()),
+        ]),
+        &json!({ "total_size": 0, "start": 0, "entries": [] }),
+    )
+    .await;
+    let Command::Package(cmd) = parsed(&[
+        "package",
+        "changelog",
+        "--name",
+        "missingpkg",
+        "--series",
+        "noble",
+    ]) else {
+        unreachable!()
+    };
+    let err = package_report(&client, cmd).await.unwrap_err();
+    assert!(matches!(err, LpError::LocalNotFound(_)), "{err:?}");
+    assert_eq!(err.exit_code(), 4);
+    empty_mock.assert_async().await;
+
+    // 2. changelogUrl returning null -> LocalNotFound (exit 4).
+    let pub_val = rebase(source_json("nolog", "1.0-1", 42), &base);
+    let pub_mock = mock_get(
+        &mut server,
+        "/ubuntu/+archive/primary",
+        Matcher::AllOf(vec![
+            op("getPublishedSources"),
+            Matcher::UrlEncoded("source_name".into(), "nolog".into()),
+        ]),
+        &json!({ "total_size": 1, "start": 0, "entries": [pub_val] }),
+    )
+    .await;
+    let null_url_mock = server
+        .mock("GET", "/ubuntu/+archive/primary/+sourcepub/42")
+        .match_query(op("changelogUrl"))
+        .with_status(200)
+        .with_body("null")
+        .create_async()
+        .await;
+    let Command::Package(cmd_nolog) = parsed(&[
+        "package",
+        "changelog",
+        "--name",
+        "nolog",
+        "--series",
+        "noble",
+    ]) else {
+        unreachable!()
+    };
+    let err_nolog = package_report(&client, cmd_nolog).await.unwrap_err();
+    assert!(
+        matches!(err_nolog, LpError::LocalNotFound(_)),
+        "{err_nolog:?}"
+    );
+    assert_eq!(err_nolog.exit_code(), 4);
+    pub_mock.assert_async().await;
+    null_url_mock.assert_async().await;
+
+    // 3. Unparseable non-standard changelog text falls back gracefully instead of failing.
+    let weird_pub = rebase(source_json("weirdlog", "1.0-1", 43), &base);
+    let weird_mock = mock_get(
+        &mut server,
+        "/ubuntu/+archive/primary",
+        Matcher::AllOf(vec![
+            op("getPublishedSources"),
+            Matcher::UrlEncoded("source_name".into(), "weirdlog".into()),
+        ]),
+        &json!({ "total_size": 1, "start": 0, "entries": [weird_pub] }),
+    )
+    .await;
+    let weird_url_mock = mock_get(
+        &mut server,
+        "/ubuntu/+archive/primary/+sourcepub/43",
+        op("changelogUrl"),
+        &Value::String(format!("{base}/files/weird-cl")),
+    )
+    .await;
+    let weird_text_mock = server
+        .mock("GET", "/files/weird-cl")
+        .with_status(200)
+        .with_body("Custom non-debian release notes\nLine 2\n")
+        .create_async()
+        .await;
+
+    let report_weird = run(
+        &server,
+        &[
+            "package",
+            "changelog",
+            "--name",
+            "weirdlog",
+            "--series",
+            "noble",
+        ],
+    )
+    .await;
+    assert_eq!(report_weird.json["lpcli"]["total_entries"], 0);
+    assert_eq!(report_weird.json["lpcli"]["truncated"], false);
+    assert_eq!(report_weird.json["lpcli"]["entries"], json!([]));
+    assert_eq!(
+        report_weird.json["lpcli"]["changelog"],
+        "Custom non-debian release notes\nLine 2"
+    );
+    assert_modes(&report_weird);
+    let plain_weird = render(&report_weird, OutputMode::Plain);
+    assert!(
+        plain_weird.contains("Custom non-debian release notes"),
+        "{plain_weird}"
+    );
+    weird_mock.assert_async().await;
+    weird_url_mock.assert_async().await;
+    weird_text_mock.assert_async().await;
+}
+
 // ---------------------------------------------------------------------------
 // project
 // ---------------------------------------------------------------------------
