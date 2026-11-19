@@ -336,34 +336,121 @@ fn repository_by_unique_name_url(client: &LaunchpadClient, unique_name: &str) ->
     client.url(&format!("/+git?ws.op=getByPath&path={enc}"))
 }
 
-/// Return the default Git repository for a project, distribution, or
-/// distribution source package.
+/// Return the default Git repository for a project or distribution source
+/// package.
 ///
-/// `target` is a project or distribution name (e.g. `"launchpad"`, `"ubuntu"`).
+/// `target` is a project name (e.g. `"launchpad"`) or a distribution source
+/// package slug (e.g. `"ubuntu/+source/unbound"`), with leading and trailing
+/// slashes trimmed. Bare distribution names, distribution series, and
+/// `~person`/`~team` targets do not have a target-level default repository on
+/// Launchpad and are not accepted.
+///
+/// # Errors
+///
+/// Returns [`LpError::Usage`] for empty targets, `~person`/`~team` targets,
+/// repository paths containing `/+git/`, or unsupported target types rejected
+/// by Launchpad (`target: (None, None)`). Returns [`LpError::LocalNotFound`]
+/// when the target does not exist on Launchpad or has no default Git
+/// repository configured (`null`).
 pub async fn get_default_git_repository(
     client: &LaunchpadClient,
     target: &str,
 ) -> Result<GitRepository> {
-    client
-        .get_url(&default_repository_url(client, target))
+    get_default_git_repository_raw(client, target)
         .await
+        .map(|raw| raw.value)
 }
 
 /// Like [`get_default_git_repository()`], but also keep the exact Launchpad
 /// JSON.
+///
+/// See [`get_default_git_repository()`] for accepted `target` formats and error
+/// semantics.
 pub async fn get_default_git_repository_raw(
     client: &LaunchpadClient,
     target: &str,
 ) -> Result<Raw<GitRepository>> {
-    client
-        .get_url_raw(&default_repository_url(client, target))
-        .await
+    let (clean, url) = default_repository_url(client, target)?;
+    match client.get_url::<serde_json::Value>(&url).await {
+        Ok(serde_json::Value::Null) => Err(no_default_repository_error(&clean)),
+        Ok(value) => Raw::from_value(value),
+        Err(err) => Err(map_default_repository_error(&clean, err)),
+    }
 }
 
-fn default_repository_url(client: &LaunchpadClient, target: &str) -> String {
-    let target_url = client.url(&format!("/{target}"));
+fn default_repository_url(client: &LaunchpadClient, target: &str) -> Result<(String, String)> {
+    let clean = target.trim().trim_matches('/');
+    if clean.is_empty() {
+        return Err(LpError::Usage(
+            "Git repository target must not be empty; pass a project name \
+             (e.g. \"launchpad\") or a distribution source package slug \
+             (e.g. \"ubuntu/+source/unbound\")."
+                .to_string(),
+        ));
+    }
+    if clean.contains("/+git/") {
+        return Err(LpError::Usage(format!(
+            "Git target '{clean}' is a repository path, not a target; pass a project \
+             name (e.g. \"launchpad\") or a distribution source package slug \
+             (e.g. \"ubuntu/+source/unbound\")."
+        )));
+    }
+    if clean.starts_with('~') {
+        return Err(LpError::Usage(format!(
+            "Person or team target '{clean}' does not have a target-level default \
+             Git repository; pass a project name (e.g. \"launchpad\") or a \
+             distribution source package slug (e.g. \"ubuntu/+source/unbound\")."
+        )));
+    }
+    let target_url = client.url(&format!("/{clean}"));
     let enc: String = url::form_urlencoded::byte_serialize(target_url.as_bytes()).collect();
-    client.url(&format!("/+git?ws.op=getDefaultRepository&target={enc}"))
+    Ok((
+        clean.to_string(),
+        client.url(&format!("/+git?ws.op=getDefaultRepository&target={enc}")),
+    ))
+}
+
+fn no_default_repository_error(target: &str) -> LpError {
+    if target.contains("/+source/") {
+        LpError::LocalNotFound(format!(
+            "No default Git repository is configured for '{target}'."
+        ))
+    } else {
+        LpError::LocalNotFound(format!(
+            "No default Git repository is configured for '{target}'. If '{target}' is a \
+             distribution source package, use '<distro>/+source/{target}' (for example, \
+             'ubuntu/+source/{target}')."
+        ))
+    }
+}
+
+fn map_default_repository_error(target: &str, err: LpError) -> LpError {
+    match &err {
+        LpError::Api {
+            status: 400,
+            message,
+        } if message.contains("target: (None, None)") => LpError::Usage(format!(
+            "Target '{target}' cannot have a default Git repository. Pass a project name \
+             (e.g. \"launchpad\") or a distribution source package slug \
+             (e.g. \"ubuntu/+source/unbound\"); bare distributions and distribution \
+             series are not valid Git targets."
+        )),
+        LpError::Api {
+            status: 400,
+            message,
+        } if message.contains("target: No such object") => {
+            if target.contains("/+source/") {
+                LpError::LocalNotFound(format!("Launchpad target '{target}' does not exist."))
+            } else {
+                LpError::LocalNotFound(format!(
+                    "Launchpad target '{target}' does not exist. Pass a project name \
+                     (e.g. \"launchpad\") or a distribution source package slug \
+                     (e.g. \"ubuntu/+source/unbound\")."
+                ))
+            }
+        }
+        _ => err,
+    }
 }
 
 /// List Git repositories for a target, including personal forks.
@@ -968,5 +1055,314 @@ diff --git a/lib/model.py b/lib/model.py
                 "empty person name {bad:?} must be rejected"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn get_default_git_repository_queries_project_and_source_package_targets() {
+        let mut server = mockito::Server::new_async().await;
+        let client = LaunchpadClient::new(None).with_base_url(server.url());
+
+        let project_body = serde_json::json!({
+            "name": "launchpad",
+            "unique_name": "~launchpad/launchpad/+git/launchpad",
+            "target_default": true,
+            "extra_launchpad_field": "kept-verbatim"
+        });
+        let project_mock = server
+            .mock("GET", "/+git")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getDefaultRepository".into()),
+                mockito::Matcher::UrlEncoded(
+                    "target".into(),
+                    format!("{}/launchpad", server.url()),
+                ),
+            ]))
+            .with_status(200)
+            .with_body(project_body.to_string())
+            .expect(2)
+            .create_async()
+            .await;
+
+        let typed = get_default_git_repository(&client, "launchpad")
+            .await
+            .unwrap();
+        assert_eq!(
+            typed.unique_name.as_deref(),
+            Some("~launchpad/launchpad/+git/launchpad")
+        );
+        let raw = get_default_git_repository_raw(&client, " /launchpad/ ")
+            .await
+            .unwrap();
+        assert_eq!(raw.raw, project_body);
+        project_mock.assert_async().await;
+
+        let pkg_body = serde_json::json!({
+            "name": "unbound",
+            "unique_name": "~git-ubuntu-import/ubuntu/+source/unbound/+git/unbound",
+            "target_default": true,
+            "extra_pkg_field": 42
+        });
+        let pkg_mock = server
+            .mock("GET", "/+git")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getDefaultRepository".into()),
+                mockito::Matcher::UrlEncoded(
+                    "target".into(),
+                    format!("{}/ubuntu/+source/unbound", server.url()),
+                ),
+            ]))
+            .with_status(200)
+            .with_body(pkg_body.to_string())
+            .expect(2)
+            .create_async()
+            .await;
+
+        let pkg_typed = get_default_git_repository(&client, " ubuntu/+source/unbound ")
+            .await
+            .unwrap();
+        assert_eq!(
+            pkg_typed.unique_name.as_deref(),
+            Some("~git-ubuntu-import/ubuntu/+source/unbound/+git/unbound")
+        );
+        let pkg_raw = get_default_git_repository_raw(&client, "/ubuntu/+source/unbound/")
+            .await
+            .unwrap();
+        assert_eq!(pkg_raw.raw, pkg_body);
+        pkg_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn get_default_git_repository_null_response_returns_local_not_found() {
+        let mut server = mockito::Server::new_async().await;
+        let client = LaunchpadClient::new(None).with_base_url(server.url());
+
+        let proj_mock = server
+            .mock("GET", "/+git")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getDefaultRepository".into()),
+                mockito::Matcher::UrlEncoded("target".into(), format!("{}/unbound", server.url())),
+            ]))
+            .with_status(200)
+            .with_body("null")
+            .expect(2)
+            .create_async()
+            .await;
+
+        for err in [
+            get_default_git_repository(&client, "unbound")
+                .await
+                .unwrap_err(),
+            get_default_git_repository_raw(&client, "unbound")
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(matches!(err, LpError::LocalNotFound(_)), "{err:?}");
+            assert_eq!(err.exit_code(), 4);
+            assert_eq!(err.http_status(), None);
+            let msg = err.to_string();
+            assert!(msg.contains("ubuntu/+source/unbound"), "{msg}");
+            assert!(!msg.contains("lpcli"), "{msg}");
+        }
+        proj_mock.assert_async().await;
+
+        let pkg_mock = server
+            .mock("GET", "/+git")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getDefaultRepository".into()),
+                mockito::Matcher::UrlEncoded(
+                    "target".into(),
+                    format!("{}/ubuntu/+source/unbound", server.url()),
+                ),
+            ]))
+            .with_status(200)
+            .with_body("null")
+            .expect(2)
+            .create_async()
+            .await;
+
+        for err in [
+            get_default_git_repository(&client, "ubuntu/+source/unbound")
+                .await
+                .unwrap_err(),
+            get_default_git_repository_raw(&client, "ubuntu/+source/unbound")
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(matches!(err, LpError::LocalNotFound(_)), "{err:?}");
+            assert_eq!(err.exit_code(), 4);
+            assert_eq!(err.http_status(), None);
+            let msg = err.to_string();
+            assert!(msg.contains("'ubuntu/+source/unbound'"), "{msg}");
+            assert!(!msg.contains("<distro>/+source/"), "{msg}");
+        }
+        pkg_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn get_default_git_repository_maps_launchpad_400_target_errors() {
+        let mut server = mockito::Server::new_async().await;
+        let client = LaunchpadClient::new(None).with_base_url(server.url());
+
+        let distro_mock = server
+            .mock("GET", "/+git")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getDefaultRepository".into()),
+                mockito::Matcher::UrlEncoded("target".into(), format!("{}/ubuntu", server.url())),
+            ]))
+            .with_status(400)
+            .with_body("target: (None, None)")
+            .expect(2)
+            .create_async()
+            .await;
+
+        for err in [
+            get_default_git_repository(&client, "ubuntu")
+                .await
+                .unwrap_err(),
+            get_default_git_repository_raw(&client, "ubuntu")
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(matches!(err, LpError::Usage(_)), "{err:?}");
+            assert_eq!(err.exit_code(), 2);
+            let msg = err.to_string();
+            assert!(msg.contains("bare distributions"), "{msg}");
+            assert!(msg.contains("ubuntu/+source/unbound"), "{msg}");
+            assert!(!msg.contains("lpcli"), "{msg}");
+        }
+        distro_mock.assert_async().await;
+
+        let missing_proj_mock = server
+            .mock("GET", "/+git")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getDefaultRepository".into()),
+                mockito::Matcher::UrlEncoded(
+                    "target".into(),
+                    format!("{}/tenacious", server.url()),
+                ),
+            ]))
+            .with_status(400)
+            .with_body(format!(
+                "target: No such object \"{}/tenacious\".",
+                server.url()
+            ))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let err = get_default_git_repository(&client, "tenacious")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LpError::LocalNotFound(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 4);
+        assert_eq!(err.http_status(), None);
+        assert!(err.to_string().contains("ubuntu/+source/unbound"), "{err}");
+        missing_proj_mock.assert_async().await;
+
+        let missing_pkg_mock = server
+            .mock("GET", "/+git")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getDefaultRepository".into()),
+                mockito::Matcher::UrlEncoded(
+                    "target".into(),
+                    format!("{}/ubuntu/+source/missing", server.url()),
+                ),
+            ]))
+            .with_status(400)
+            .with_body(format!(
+                "target: No such object \"{}/ubuntu/+source/missing\".",
+                server.url()
+            ))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let err = get_default_git_repository_raw(&client, "ubuntu/+source/missing")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LpError::LocalNotFound(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 4);
+        assert_eq!(err.http_status(), None);
+        let msg = err.to_string();
+        assert!(msg.contains("ubuntu/+source/missing"), "{msg}");
+        assert!(!msg.contains("ubuntu/+source/unbound"), "{msg}");
+        missing_pkg_mock.assert_async().await;
+
+        let other_400_mock = server
+            .mock("GET", "/+git")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getDefaultRepository".into()),
+                mockito::Matcher::UrlEncoded("target".into(), format!("{}/other400", server.url())),
+            ]))
+            .with_status(400)
+            .with_body("unexpected parameter error")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let err = get_default_git_repository(&client, "other400")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, LpError::Api { status: 400, ref message } if message == "unexpected parameter error"),
+            "{err:?}"
+        );
+        other_400_mock.assert_async().await;
+
+        let auth_mock = server
+            .mock("GET", "/+git")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getDefaultRepository".into()),
+                mockito::Matcher::UrlEncoded("target".into(), format!("{}/privproj", server.url())),
+            ]))
+            .with_status(401)
+            .with_body("Unauthorized")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let err = get_default_git_repository(&client, "privproj")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LpError::Api { status: 401, .. }), "{err:?}");
+        assert_eq!(err.exit_code(), 3);
+        auth_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn get_default_git_repository_rejects_invalid_targets_locally() {
+        let mut server = mockito::Server::new_async().await;
+        let zero_mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let client = LaunchpadClient::new(None).with_base_url(server.url());
+
+        for bad in [
+            "",
+            "   ",
+            "/",
+            "//",
+            "~ubuntu-archive",
+            "/~jdoe/",
+            "~owner/project/+git/repo",
+            "launchpad/+git/launchpad",
+        ] {
+            for err in [
+                get_default_git_repository(&client, bad).await.unwrap_err(),
+                get_default_git_repository_raw(&client, bad)
+                    .await
+                    .unwrap_err(),
+            ] {
+                assert!(
+                    matches!(err, LpError::Usage(_)),
+                    "target {bad:?} should fail with Usage, got {err:?}"
+                );
+                assert_eq!(err.exit_code(), 2, "target {bad:?}: {err}");
+                assert!(!err.to_string().contains("lpcli"), "{err}");
+            }
+        }
+        zero_mock.assert_async().await;
     }
 }

@@ -737,6 +737,9 @@ lpcli git show --path "~my-username/launchpad/+git/myrepo"
 # Show the default repository for a project
 lpcli git default --target launchpad
 
+# Show the default repository for a distribution source package
+lpcli git default --target "ubuntu/+source/unbound"
+
 # List repositories owned by a person or team
 lpcli git list-person-repos --name my-username
 
