@@ -1745,9 +1745,17 @@ enum GitCommand {
         #[arg(short, long)]
         path: String,
     },
-    /// Show the default Git repository for a target project or distribution.
+    /// Show the default Git repository for a project or distribution source
+    /// package.
+    ///
+    /// A target only has a default repository if one has been designated on
+    /// Launchpad (for example, "launchpad" or "ubuntu/+source/unbound"). To
+    /// list all repositories for a target instead, use `lpcli git list --target
+    /// <TARGET>`.
     Default {
-        /// Project or distribution name.
+        /// Project name (e.g. "launchpad") or distribution source package slug
+        /// (e.g. "ubuntu/+source/unbound"). Bare distribution names,
+        /// distribution series, and ~person/~team names are not accepted.
         #[arg(short, long)]
         target: String,
     },

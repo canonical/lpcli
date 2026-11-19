@@ -32,6 +32,13 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 ### Fixed
 
+- `git default` now handles `null` API responses as exit-code-4 not-found
+  errors when a target has no default Git repository configured (with a hint
+  to try `ubuntu/+source/<pkg>` for source packages), maps invalid bare
+  distribution/series targets to usage errors (exit 2) and missing targets to
+  not-found errors (exit 4), rejects empty, repository-path, and `~person`
+  targets locally, and updates help and docs to show project and
+  `ubuntu/+source/<pkg>` targets instead of bare distribution names.
 - `git list-person-repos` queried `~person/+git`, which is a web-UI page
   that does not exist on the API host, and failed for every name. It now
   uses the root `/+git` collection's `getRepositories` operation with a

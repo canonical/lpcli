@@ -225,7 +225,7 @@ retry only the parts that failed.
 | Action | Command |
 |--------|---------|
 | Show a repo | `lpcli git show --path "~my-username/launchpad/+git/myrepo"` |
-| Show default repo | `lpcli git default --target launchpad` |
+| Show default repo | `lpcli git default --target launchpad` (`--target`: project or `ubuntu/+source/pkg`, e.g. `ubuntu/+source/unbound`, not bare distros or `~person`; exits 4 if none configured) |
 | List person or team repos | `lpcli git list-person-repos --name my-username` (`--name` accepts team names, with or without a leading `~`) |
 | List repos for a target, incl. personal forks | `lpcli git list --target launchpad` (`--target`: project, `ubuntu/+source/pkg`, or `~person`/`~team`) |
 | List refs (branches/tags) | `lpcli git refs --path "~my-username/launchpad/+git/myrepo"` |

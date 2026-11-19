@@ -274,6 +274,122 @@ async fn git_default_prints_the_launchpad_entry() {
     mock.assert_async().await;
 }
 
+#[tokio::test]
+async fn git_default_handles_source_packages_null_and_invalid_targets() {
+    use clap::CommandFactory as _;
+
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let pkg_body = rebase(repository_json("unbound"), &base);
+
+    let pkg_mock = server
+        .mock("GET", "/+git")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("ws.op".into(), "getDefaultRepository".into()),
+            Matcher::UrlEncoded("target".into(), format!("{base}/ubuntu/+source/unbound")),
+        ]))
+        .with_body(pkg_body.to_string())
+        .create_async()
+        .await;
+    let null_mock = server
+        .mock("GET", "/+git")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("ws.op".into(), "getDefaultRepository".into()),
+            Matcher::UrlEncoded("target".into(), format!("{base}/unbound")),
+        ]))
+        .with_status(200)
+        .with_body("null")
+        .create_async()
+        .await;
+    let distro_mock = server
+        .mock("GET", "/+git")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("ws.op".into(), "getDefaultRepository".into()),
+            Matcher::UrlEncoded("target".into(), format!("{base}/ubuntu")),
+        ]))
+        .with_status(400)
+        .with_body("target: (None, None)")
+        .create_async()
+        .await;
+    let series_mock = server
+        .mock("GET", "/+git")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("ws.op".into(), "getDefaultRepository".into()),
+            Matcher::UrlEncoded("target".into(), format!("{base}/tenacious")),
+        ]))
+        .with_status(400)
+        .with_body(format!("target: No such object \"{base}/tenacious\"."))
+        .create_async()
+        .await;
+
+    let client = mock_read_client(&server, false);
+
+    // 1. Valid distribution source package target.
+    let ok_report = git_report(
+        &client,
+        git_command(&["default", "--target", "ubuntu/+source/unbound"]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ok_report.json, pkg_body);
+    assert_modes(&ok_report);
+    pkg_mock.assert_async().await;
+
+    // 2. Project with no default Git repository configured (200 null) -> exit 4 + structured not_found.
+    let err_unbound = git_report(&client, git_command(&["default", "--target", "unbound"]))
+        .await
+        .unwrap_err();
+    assert_eq!(err_unbound.exit_code(), 4, "{err_unbound:?}");
+    let unbound_json: Value = serde_json::from_str(
+        &Output::fixed(OutputMode::Json, false, 100).render_error(&err_unbound),
+    )
+    .unwrap();
+    assert_eq!(unbound_json["error"]["kind"], "not_found");
+    assert_eq!(unbound_json["error"]["http_status"], Value::Null);
+    assert!(
+        unbound_json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("ubuntu/+source/unbound"),
+        "{unbound_json}"
+    );
+    null_mock.assert_async().await;
+
+    // 3. Bare distribution target rejected by Launchpad -> exit 2 + structured usage.
+    let err_ubuntu = git_report(&client, git_command(&["default", "--target", "ubuntu"]))
+        .await
+        .unwrap_err();
+    assert_eq!(err_ubuntu.exit_code(), 2, "{err_ubuntu:?}");
+    let ubuntu_json: Value = serde_json::from_str(
+        &Output::fixed(OutputMode::Json, false, 100).render_error(&err_ubuntu),
+    )
+    .unwrap();
+    assert_eq!(ubuntu_json["error"]["kind"], "usage");
+    assert_eq!(ubuntu_json["error"]["http_status"], Value::Null);
+    distro_mock.assert_async().await;
+
+    // 4. Unknown target such as a series codename -> exit 4 + structured not_found.
+    let err_tenacious = git_report(&client, git_command(&["default", "--target", "tenacious"]))
+        .await
+        .unwrap_err();
+    assert_eq!(err_tenacious.exit_code(), 4, "{err_tenacious:?}");
+    let tenacious_json: Value = serde_json::from_str(
+        &Output::fixed(OutputMode::Json, false, 100).render_error(&err_tenacious),
+    )
+    .unwrap();
+    assert_eq!(tenacious_json["error"]["kind"], "not_found");
+    assert_eq!(tenacious_json["error"]["http_status"], Value::Null);
+    series_mock.assert_async().await;
+
+    // 5. CLI help reflects actual Launchpad targets.
+    let mut cmd = Cli::command();
+    let git_cmd = cmd.find_subcommand_mut("git").unwrap();
+    let default_cmd = git_cmd.find_subcommand_mut("default").unwrap();
+    let help = default_cmd.render_long_help().to_string();
+    assert!(help.contains("ubuntu/+source/"), "{help}");
+    assert!(!help.contains("Project or distribution name"), "{help}");
+}
+
 #[test]
 fn git_fields_select_launchpad_attributes() {
     let repo = Raw::from_value(repository_json("repo")).unwrap();
