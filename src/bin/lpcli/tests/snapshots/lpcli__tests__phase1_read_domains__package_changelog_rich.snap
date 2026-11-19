@@ -1,0 +1,62 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "render(&report, OutputMode::Rich).replace(&base, LP)"
+---
+unbound (1.19.2-1ubuntu3.12)
+────────────────────────────
+  Series: noble
+  Pocket: Release
+  Status: Published
+  Published: 2024-04-01 00:00
+  Changelog: https://api.launchpad.net/devel/ubuntu/+archive/primary/+sourcepub/18891390/+files/changelog
+
+  Showing latest 5 of 7 changelog entries. Use `--full` or `--limit` to see more.
+
+5 changelog entries found.
+
+────────────────────┬─────────────────────────────────────────┬──────────────────
+ 1.19.2-1ubuntu3.12 ┆ Allen Huang <allen.huang@canonical.com> ┆ 2026-10-14 21:26 
+────────────────────┴─────────────────────────────────────────┴──────────────────
+ Distribution: noble-security                                                    
+ Urgency: medium                                                                 
+                                                                                 
+   * SECURITY UPDATE: Allocation fix                                             
+     - debian/patches/CVE-2026-80225.patch: cap reads.                           
+─────────────────────────────────────────────────────────────────────────────────
+
+────────────────────┬─────────────────────────────────────────┬──────────────────
+ 1.19.2-1ubuntu3.11 ┆ Ubuntu Maintainer <maint@ubuntu.com>    ┆ 2026-10-13 10:00 
+────────────────────┴─────────────────────────────────────────┴──────────────────
+ Distribution: noble-updates                                                     
+ Urgency: high                                                                   
+ Metadata: binary-only=yes                                                       
+                                                                                 
+   * Backport upstream stability fix.                                            
+─────────────────────────────────────────────────────────────────────────────────
+
+────────────────────┬─────────────────────────────────────────┬──────────────────
+ 1.19.2-1ubuntu3.10 ┆ Dev One <d1@example.org>                ┆ 2026-10-12 09:00 
+────────────────────┴─────────────────────────────────────────┴──────────────────
+ Distribution: noble                                                             
+ Urgency: low                                                                    
+                                                                                 
+   * Update apparmor abstraction.                                                
+─────────────────────────────────────────────────────────────────────────────────
+
+────────────────────┬─────────────────────────────────────────┬──────────────────
+ 1.19.2-1ubuntu3.9  ┆ Dev Two <d2@example.org>                ┆ 2026-10-11 08:00 
+────────────────────┴─────────────────────────────────────────┴──────────────────
+ Distribution: noble                                                             
+ Urgency: low                                                                    
+                                                                                 
+   * Add autopkgtest timeout guard.                                              
+─────────────────────────────────────────────────────────────────────────────────
+
+────────────────────┬─────────────────────────────────────────┬──────────────────
+ 1.19.2-1ubuntu3.8  ┆ Dev Three <d3@example.org>              ┆ 2026-10-10 07:00 
+────────────────────┴─────────────────────────────────────────┴──────────────────
+ Distribution: noble                                                             
+ Urgency: low                                                                    
+                                                                                 
+   * Fix systemd unit ordering.                                                  
+─────────────────────────────────────────────────────────────────────────────────

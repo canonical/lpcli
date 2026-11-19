@@ -2230,6 +2230,196 @@ fn validate_cli_allows_non_ubuntu_series_for_package() {
 }
 
 #[test]
+fn package_changelog_cli_parsing_validation_and_auth_policy() {
+    // Default project/distro series lookup uses Anonymous read policy.
+    let cli = Cli::try_parse_from([
+        "lpcli",
+        "package",
+        "changelog",
+        "--name",
+        "unbound",
+        "--series",
+        "noble",
+    ])
+    .unwrap();
+    validate_cli(&cli).unwrap();
+    assert_eq!(
+        parsed_read_policy(&[
+            "lpcli",
+            "package",
+            "changelog",
+            "--name",
+            "unbound",
+            "--series",
+            "noble",
+        ]),
+        ReadAuthPolicy::Anonymous
+    );
+    assert_eq!(
+        parsed_read_policy(&[
+            "lpcli",
+            "package",
+            "changelog",
+            "--name",
+            "unbound",
+            "--series",
+            "noble",
+            "--authenticated",
+        ]),
+        ReadAuthPolicy::Authenticated
+    );
+
+    // Optional --limit, --full, --version, --pocket, and --ppa parse cleanly.
+    let cli_limit = Cli::try_parse_from([
+        "lpcli",
+        "package",
+        "changelog",
+        "-n",
+        "unbound",
+        "-s",
+        "noble",
+        "-v",
+        "1.19.2-1ubuntu3.12",
+        "-p",
+        "security",
+        "-l",
+        "3",
+    ])
+    .unwrap();
+    validate_cli(&cli_limit).unwrap();
+    assert!(matches!(
+        cli_limit.command,
+        Command::Package(PackageCommand::Changelog {
+            limit: Some(3),
+            full: false,
+            pocket: Some(Pocket::Security),
+            ..
+        })
+    ));
+
+    let cli_full = Cli::try_parse_from([
+        "lpcli",
+        "package",
+        "changelog",
+        "--name",
+        "unbound",
+        "--series",
+        "noble",
+        "--full",
+    ])
+    .unwrap();
+    validate_cli(&cli_full).unwrap();
+    assert!(matches!(
+        cli_full.command,
+        Command::Package(PackageCommand::Changelog {
+            limit: None,
+            full: true,
+            ..
+        })
+    ));
+
+    // --ppa makes --series optional and requires auth by default unless --public is passed.
+    let cli_ppa = Cli::try_parse_from([
+        "lpcli",
+        "package",
+        "changelog",
+        "--name",
+        "firefox",
+        "--ppa",
+        "mozillateam/ppa",
+    ])
+    .unwrap();
+    validate_cli(&cli_ppa).unwrap();
+    assert_eq!(
+        parsed_read_policy(&[
+            "lpcli",
+            "package",
+            "changelog",
+            "--name",
+            "firefox",
+            "--ppa",
+            "mozillateam/ppa",
+        ]),
+        ReadAuthPolicy::Authenticated
+    );
+    assert_eq!(
+        parsed_read_policy(&[
+            "lpcli",
+            "package",
+            "changelog",
+            "--name",
+            "firefox",
+            "--ppa",
+            "mozillateam/ppa",
+            "--public",
+        ]),
+        ReadAuthPolicy::Anonymous
+    );
+
+    // Invalid combinations rejected by clap or validate_cli.
+    assert!(
+        Cli::try_parse_from([
+            "lpcli",
+            "package",
+            "changelog",
+            "--name",
+            "unbound",
+            "--series",
+            "noble",
+            "--limit",
+            "0",
+        ])
+        .is_err(),
+        "--limit 0 must be rejected"
+    );
+    assert!(
+        Cli::try_parse_from([
+            "lpcli",
+            "package",
+            "changelog",
+            "--name",
+            "unbound",
+            "--series",
+            "noble",
+            "--limit",
+            "3",
+            "--full",
+        ])
+        .is_err(),
+        "--limit and --full must conflict"
+    );
+    assert!(
+        Cli::try_parse_from(["lpcli", "package", "changelog", "--name", "unbound"]).is_err(),
+        "--series must be required when --ppa is omitted"
+    );
+    let bad_series = Cli::try_parse_from([
+        "lpcli",
+        "package",
+        "changelog",
+        "--name",
+        "unbound",
+        "--series",
+        "not-a-series",
+    ])
+    .unwrap();
+    assert!(validate_cli(&bad_series).is_err());
+
+    let bad_ppa_distro = Cli::try_parse_from([
+        "lpcli",
+        "package",
+        "changelog",
+        "--name",
+        "firefox",
+        "--ppa",
+        "mozillateam/ppa",
+        "--distro",
+        "debian",
+    ])
+    .unwrap();
+    assert!(validate_cli(&bad_ppa_distro).is_err());
+}
+
+#[test]
 fn validate_cli_rejects_invalid_ubuntu_series_for_queue() {
     let cli = Cli::try_parse_from([
         "lpcli",

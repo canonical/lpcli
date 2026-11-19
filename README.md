@@ -678,6 +678,12 @@ lpcli package ppa-sources --owner my-username --ppa my-ppa --name curl
 lpcli package download --name curl --series noble
 lpcli package download --name curl --series noble --version 8.5.0-2ubuntu10
 lpcli package download --name curl --series noble --output ~/Downloads
+
+# Show the last 5 Debian changelog entries for a source package
+lpcli package changelog --name unbound --series noble
+lpcli package changelog --name unbound --series noble --limit 10
+lpcli package changelog --name unbound --series noble --full
+lpcli package changelog --name firefox --ppa mozillateam/ppa --series noble
 ```
 
 ---

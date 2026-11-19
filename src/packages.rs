@@ -3,7 +3,7 @@
 //! This module exposes functions for querying:
 //!
 //! * Ubuntu distributions and their series (e.g. `jammy`, `noble`).
-//! * Source packages and their publishing history within a distro series.
+//! * Source packages, publishing history, PPAs, and Debian changelogs.
 //! * Binary packages built from a source package.
 //! * Copying or syncing packages between series (PPAs).
 //!
@@ -19,8 +19,10 @@
 //! Each read function that returns Launchpad data has a `_raw` counterpart
 //! that also returns the exact JSON Launchpad sent: an entry, or a collection
 //! with `start`, `entries`, and `total_size` or `total_size_link`.
-//! [`get_source_file_urls`] has no `_raw` counterpart because Launchpad
-//! returns a plain list of URLs rather than an entry or collection.
+//! [`get_source_file_urls`], [`get_source_changelog_url`], and
+//! [`fetch_source_changelog`] have no `_raw` counterparts because Launchpad
+//! returns a URL list, an optional URL string, or plain changelog text rather
+//! than an entry or collection.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -114,6 +116,30 @@ pub struct Archive {
     pub web_link: Option<String>,
     /// Owner API link.
     pub owner_link: Option<String>,
+}
+
+/// A parsed Debian changelog entry (`deb-changelog(5)`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangelogEntry {
+    /// Source package name from the stanza header.
+    pub package: String,
+    /// Package version from the stanza header.
+    pub version: String,
+    /// Target distribution(s) listed on the header line.
+    pub distributions: Vec<String>,
+    /// Urgency metadata value (e.g. `"medium"`, `"high"`), when present.
+    pub urgency: Option<String>,
+    /// Any additional `key=value` metadata attributes from the header line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata: Vec<(String, String)>,
+    /// Changelog body text between header and trailer, preserving indentation.
+    pub changes: String,
+    /// Maintainer name and email from the `--` trailer, when present.
+    pub maintainer: Option<String>,
+    /// Raw RFC 2822 timestamp string from the `--` trailer, when present.
+    pub date: Option<String>,
+    /// Parsed UTC timestamp from `date`, when it parses as RFC 2822.
+    pub timestamp: Option<Timestamp>,
 }
 
 /// Parameters for source package publication searches.
@@ -224,21 +250,7 @@ pub async fn search_published_sources_raw(
         "{archive_url}?ws.op=getPublishedSources&distro_series={}",
         enc(&series_url),
     );
-    if let Some(name) = params.source_name {
-        query.push_str(&format!("&source_name={}", enc(name)));
-    }
-    if let Some(version) = params.version {
-        query.push_str(&format!("&version={}", enc(version)));
-    }
-    if let Some(pocket) = params.pocket {
-        query.push_str(&format!("&pocket={}", enc(pocket)));
-    }
-    if let Some(status) = params.status {
-        query.push_str(&format!("&status={}", enc(status)));
-    }
-    if params.exact_match {
-        query.push_str("&exact_match=true");
-    }
+    append_source_search_params(&mut query, params, true);
     fetch_sources_raw(client, query, params.limit).await
 }
 
@@ -298,17 +310,59 @@ pub async fn list_ppa_sources_raw(
     ppa_name: &str,
     params: &SourceSearchParams<'_>,
 ) -> Result<Raw<Collection<SourcePackagePublishingHistory>>> {
+    search_ppa_sources_inner_raw(client, owner, ppa_name, None, params, false).await
+}
+
+/// Search for source package publications in an Ubuntu PPA, optionally
+/// filtered to a distro `series`, keeping Launchpad's collection JSON.
+///
+/// Unlike [`list_ppa_sources_raw()`], this forwards [`SourceSearchParams::pocket`]
+/// and an optional Ubuntu series filter when supplied.
+pub async fn search_ppa_sources_raw(
+    client: &LaunchpadClient,
+    owner: &str,
+    ppa_name: &str,
+    series: Option<&str>,
+    params: &SourceSearchParams<'_>,
+) -> Result<Raw<Collection<SourcePackagePublishingHistory>>> {
+    search_ppa_sources_inner_raw(client, owner, ppa_name, series, params, true).await
+}
+
+async fn search_ppa_sources_inner_raw(
+    client: &LaunchpadClient,
+    owner: &str,
+    ppa_name: &str,
+    series: Option<&str>,
+    params: &SourceSearchParams<'_>,
+    include_pocket: bool,
+) -> Result<Raw<Collection<SourcePackagePublishingHistory>>> {
     let archive_url = client.url(&format!(
         "/~{}/+archive/ubuntu/{}",
         enc(owner),
         enc(ppa_name)
     ));
     let mut query = format!("{archive_url}?ws.op=getPublishedSources");
+    if let Some(series) = series {
+        let series_url = client.url(&format!("/ubuntu/{}", enc(series)));
+        query.push_str(&format!("&distro_series={}", enc(&series_url)));
+    }
+    append_source_search_params(&mut query, params, include_pocket);
+    fetch_sources_raw(client, query, params.limit).await
+}
+
+fn append_source_search_params(
+    query: &mut String,
+    params: &SourceSearchParams<'_>,
+    include_pocket: bool,
+) {
     if let Some(name) = params.source_name {
         query.push_str(&format!("&source_name={}", enc(name)));
     }
     if let Some(version) = params.version {
         query.push_str(&format!("&version={}", enc(version)));
+    }
+    if include_pocket && let Some(pocket) = params.pocket {
+        query.push_str(&format!("&pocket={}", enc(pocket)));
     }
     if let Some(status) = params.status {
         query.push_str(&format!("&status={}", enc(status)));
@@ -316,7 +370,6 @@ pub async fn list_ppa_sources_raw(
     if params.exact_match {
         query.push_str("&exact_match=true");
     }
-    fetch_sources_raw(client, query, params.limit).await
 }
 
 /// Fetch a `getPublishedSources` collection, honouring an optional limit.
@@ -359,6 +412,291 @@ pub async fn get_source_file_urls(
 ) -> Result<Vec<String>> {
     let url = format!("{pub_self_link}?ws.op=sourceFileUrls");
     client.get_url_string_list(&url).await
+}
+
+/// Resolve the public changelog download URL for a source package publication.
+///
+/// Calls `changelogUrl` on a `source_package_publishing_history` resource.
+/// Returns `Ok(None)` when Launchpad answers JSON `null` (no changelog stored
+/// for the publication).
+pub async fn get_source_changelog_url(
+    client: &LaunchpadClient,
+    pub_self_link: &str,
+) -> Result<Option<String>> {
+    let url = format!("{pub_self_link}?ws.op=changelogUrl");
+    client.get_url(&url).await
+}
+
+/// Fetch the raw text of a Debian changelog from a URL returned by
+/// [`get_source_changelog_url()`].
+///
+/// Downloads without sending OAuth or hardware-bound credentials, validates the
+/// initial URL and redirect hops, and caps the response size.
+pub async fn fetch_source_changelog(
+    client: &LaunchpadClient,
+    changelog_url: &str,
+) -> Result<String> {
+    client.get_public_text_url(changelog_url).await
+}
+
+/// Parse a Debian `debian/changelog` document into structured [`ChangelogEntry`]
+/// stanzas in newest-first file order.
+///
+/// Follows Debian Policy §4.4 (`deb-changelog(5)`): handles multi-distribution
+/// headers, case-insensitive `urgency=...` plus arbitrary `key=value` metadata,
+/// CRLF line endings, indented multi-line bodies, RFC 2822 trailer dates, and
+/// trailing Emacs `Local variables:` footers. Returns an empty vector when no
+/// structured stanzas are recognized so callers can fall back to raw text.
+pub fn parse_debian_changelog(raw: &str) -> Vec<ChangelogEntry> {
+    let normalized = normalize_line_endings(raw);
+    parse_debian_changelog_stanzas(&normalized)
+        .into_iter()
+        .map(|(entry, _)| entry)
+        .collect()
+}
+
+/// Return the raw Debian changelog text truncated to at most the first `limit`
+/// parsed stanzas, preserving exact stanza formatting.
+///
+/// When `limit == 0`, returns an empty string. When the changelog contains no
+/// recognized stanzas or `limit` covers all stanzas, returns the full normalized
+/// text with trailing whitespace trimmed.
+pub fn slice_debian_changelog(raw: &str, limit: usize) -> String {
+    if limit == 0 {
+        return String::new();
+    }
+    let normalized = normalize_line_endings(raw);
+    let stanzas = parse_debian_changelog_stanzas(&normalized);
+    if stanzas.is_empty() || limit >= stanzas.len() {
+        return normalized.trim_end().to_string();
+    }
+    let end = stanzas[limit - 1].1.end;
+    normalized[..end].trim_end().to_string()
+}
+
+fn normalize_line_endings(raw: &str) -> String {
+    if !raw.contains('\r') {
+        return raw.to_string();
+    }
+    raw.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+struct ParsedHeader {
+    package: String,
+    version: String,
+    distributions: Vec<String>,
+    urgency: Option<String>,
+    metadata: Vec<(String, String)>,
+}
+
+struct OpenStanza {
+    start: usize,
+    last_non_empty_end: usize,
+    header: ParsedHeader,
+    body_lines: Vec<String>,
+}
+
+fn finish_open_stanza(
+    stanza: OpenStanza,
+    end_offset: usize,
+    trailer: Option<(Option<String>, Option<String>, Option<Timestamp>)>,
+) -> (ChangelogEntry, std::ops::Range<usize>) {
+    let body = trim_blank_boundary_lines(&stanza.body_lines).join("\n");
+    let (maintainer, date, timestamp) = trailer.unwrap_or((None, None, None));
+    (
+        ChangelogEntry {
+            package: stanza.header.package,
+            version: stanza.header.version,
+            distributions: stanza.header.distributions,
+            urgency: stanza.header.urgency,
+            metadata: stanza.header.metadata,
+            changes: body,
+            maintainer,
+            date,
+            timestamp,
+        },
+        stanza.start..end_offset,
+    )
+}
+
+fn trim_blank_boundary_lines(lines: &[String]) -> &[String] {
+    let start = lines
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(lines.len());
+    let end = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map_or(start, |idx| idx + 1);
+    &lines[start..end]
+}
+
+fn parse_debian_changelog_stanzas(
+    normalized: &str,
+) -> Vec<(ChangelogEntry, std::ops::Range<usize>)> {
+    let mut results = Vec::new();
+    let mut current: Option<OpenStanza> = None;
+    let mut offset = 0usize;
+
+    for raw_line in normalized.split_inclusive('\n') {
+        let line_start = offset;
+        let line_end = offset + raw_line.len();
+        offset = line_end;
+        let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+        let content_end = line_start + line.len();
+
+        if current.is_none()
+            && line
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("local variables:")
+        {
+            break;
+        }
+
+        if let Some(header) = parse_changelog_header(line) {
+            if let Some(prev) = current.take() {
+                let end = prev.last_non_empty_end;
+                results.push(finish_open_stanza(prev, end, None));
+            }
+            current = Some(OpenStanza {
+                start: line_start,
+                last_non_empty_end: content_end,
+                header,
+                body_lines: Vec::new(),
+            });
+            continue;
+        }
+
+        let Some(ref mut active) = current else {
+            continue;
+        };
+
+        if let Some(trailer) = parse_changelog_trailer(line) {
+            let finished = current.take().expect("active stanza present");
+            results.push(finish_open_stanza(finished, content_end, Some(trailer)));
+            continue;
+        }
+
+        if !line.trim().is_empty() {
+            active.last_non_empty_end = content_end;
+        }
+        active.body_lines.push(line.to_string());
+    }
+
+    if let Some(prev) = current.take() {
+        let end = prev.last_non_empty_end;
+        results.push(finish_open_stanza(prev, end, None));
+    }
+
+    results
+}
+
+fn parse_changelog_header(line: &str) -> Option<ParsedHeader> {
+    if line.is_empty() || line.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let open_idx = line.find(" (")?;
+    let package = &line[..open_idx];
+    let mut pkg_chars = package.chars();
+    let first = pkg_chars.next()?;
+    if !first.is_ascii_alphanumeric()
+        || !pkg_chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+    {
+        return None;
+    }
+
+    let after_open = &line[open_idx + 2..];
+    let close_rel = after_open.find(')')?;
+    let version = &after_open[..close_rel];
+    if version.is_empty() || version.chars().any(char::is_whitespace) {
+        return None;
+    }
+
+    let after_close = &after_open[close_rel + 1..];
+    if !after_close.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+
+    let (dists_raw, meta_raw) = match after_close.split_once(';') {
+        Some((dists, meta)) => (dists, Some(meta)),
+        None => (after_close, None),
+    };
+    let distributions: Vec<String> = dists_raw.split_whitespace().map(str::to_string).collect();
+    if distributions.is_empty() {
+        return None;
+    }
+
+    let mut urgency = None;
+    let mut metadata = Vec::new();
+    if let Some(meta_raw) = meta_raw {
+        for pair in meta_raw.split(',') {
+            let trimmed = pair.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Some((key, val)) = trimmed.split_once('=') {
+                let k = key.trim();
+                let v = val.trim();
+                if k.is_empty() {
+                    continue;
+                }
+                if k.eq_ignore_ascii_case("urgency") {
+                    urgency = Some(v.to_string());
+                } else {
+                    metadata.push((k.to_string(), v.to_string()));
+                }
+            }
+        }
+    }
+
+    Some(ParsedHeader {
+        package: package.to_string(),
+        version: version.to_string(),
+        distributions,
+        urgency,
+        metadata,
+    })
+}
+
+fn parse_changelog_trailer(
+    line: &str,
+) -> Option<(Option<String>, Option<String>, Option<Timestamp>)> {
+    let rest = line
+        .strip_prefix(" -- ")
+        .or_else(|| line.strip_prefix("-- "))?;
+
+    // Debian policy separates the maintainer email and RFC 2822 date with two
+    // or more spaces. Anchor after '>' when present so double spaces in names
+    // do not split prematurely.
+    let split_idx = rest
+        .find('>')
+        .and_then(|email_end| {
+            rest[email_end + 1..]
+                .find("  ")
+                .map(|rel| email_end + 1 + rel)
+        })
+        .or_else(|| rest.find("  "));
+
+    match split_idx {
+        Some(idx) => {
+            let maint = rest[..idx].trim();
+            let date_str = rest[idx..].trim();
+            let maintainer = (!maint.is_empty()).then(|| maint.to_string());
+            let date = (!date_str.is_empty()).then(|| date_str.to_string());
+            let timestamp = date.as_deref().and_then(|d| {
+                jiff::fmt::rfc2822::DateTimeParser::new()
+                    .parse_timestamp(d)
+                    .ok()
+            });
+            Some((maintainer, date, timestamp))
+        }
+        None => {
+            let trimmed = rest.trim();
+            let maintainer = (!trimmed.is_empty()).then(|| trimmed.to_string());
+            Some((maintainer, None, None))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -480,5 +818,201 @@ mod tests {
     fn enc_encodes_spaces() {
         let out = enc("Fix Released");
         assert!(!out.contains(' '));
+    }
+
+    #[tokio::test]
+    async fn search_ppa_sources_raw_sends_optional_series_and_pocket() {
+        let mut server = mockito::Server::new_async().await;
+        let base = server.url();
+        let body = serde_json::json!({
+            "start": 0,
+            "total_size": 1,
+            "entries": [{
+                "self_link": format!("{base}/~mozillateam/+archive/ubuntu/ppa/+sourcepub/1"),
+                "source_package_name": "firefox",
+                "source_package_version": "160.0-1",
+                "status": "Published",
+                "pocket": "Release",
+            }]
+        });
+        let mock = server
+            .mock("GET", "/~mozillateam/+archive/ubuntu/ppa")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getPublishedSources".into()),
+                mockito::Matcher::UrlEncoded(
+                    "distro_series".into(),
+                    format!("{base}/ubuntu/noble"),
+                ),
+                mockito::Matcher::UrlEncoded("source_name".into(), "firefox".into()),
+                mockito::Matcher::UrlEncoded("pocket".into(), "Release".into()),
+                mockito::Matcher::UrlEncoded("status".into(), "Published".into()),
+                mockito::Matcher::UrlEncoded("exact_match".into(), "true".into()),
+                mockito::Matcher::UrlEncoded("ws.size".into(), "1".into()),
+            ]))
+            .with_status(200)
+            .with_body(body.to_string())
+            .create_async()
+            .await;
+
+        let client = LaunchpadClient::new(None).with_base_url(base);
+        let params = SourceSearchParams {
+            source_name: Some("firefox"),
+            pocket: Some("Release"),
+            status: Some("Published"),
+            exact_match: true,
+            limit: Some(1),
+            ..Default::default()
+        };
+        let found = search_ppa_sources_raw(&client, "mozillateam", "ppa", Some("noble"), &params)
+            .await
+            .unwrap();
+        assert_eq!(found.value.entries.len(), 1);
+        assert_eq!(
+            found.value.entries[0].source_package_version.as_deref(),
+            Some("160.0-1")
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn get_source_changelog_url_handles_string_and_null_and_fetches_text() {
+        let mut server = mockito::Server::new_async().await;
+        let base = server.url();
+        let pub_link = format!("{base}/ubuntu/+archive/primary/+sourcepub/18891390");
+        let missing_pub_link = format!("{base}/ubuntu/+archive/primary/+sourcepub/999");
+
+        let url_mock = server
+            .mock("GET", "/ubuntu/+archive/primary/+sourcepub/18891390")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "ws.op".into(),
+                "changelogUrl".into(),
+            ))
+            .with_status(200)
+            .with_body(serde_json::Value::String(format!("{base}/+files/changelog")).to_string())
+            .create_async()
+            .await;
+        let null_mock = server
+            .mock("GET", "/ubuntu/+archive/primary/+sourcepub/999")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "ws.op".into(),
+                "changelogUrl".into(),
+            ))
+            .with_status(200)
+            .with_body("null")
+            .create_async()
+            .await;
+        let text_mock = server
+            .mock("GET", "/+files/changelog")
+            .with_status(200)
+            .with_body("unbound (1.19.2-1ubuntu3.12) noble-security; urgency=medium\n\n  * Fix bug.\n\n -- Allen Huang <allen.huang@canonical.com>  Wed, 14 Oct 2026 22:26:11 +0100\n")
+            .create_async()
+            .await;
+
+        let client = LaunchpadClient::new(None).with_base_url(base);
+        let url = get_source_changelog_url(&client, &pub_link)
+            .await
+            .unwrap()
+            .unwrap();
+        let text = fetch_source_changelog(&client, &url).await.unwrap();
+        assert!(text.contains("unbound (1.19.2-1ubuntu3.12)"));
+        assert_eq!(
+            get_source_changelog_url(&client, &missing_pub_link)
+                .await
+                .unwrap(),
+            None
+        );
+
+        url_mock.assert_async().await;
+        null_mock.assert_async().await;
+        text_mock.assert_async().await;
+    }
+
+    #[test]
+    fn parse_debian_changelog_handles_stanzas_metadata_crlf_and_slice() {
+        let raw = concat!(
+            "unbound (1.19.2-1ubuntu3.12) noble-security noble-updates; urgency=HIGH, binary-only=yes\r\n",
+            "\r\n",
+            "  * SECURITY UPDATE: Allocation fix\r\n",
+            "    - detail line\r\n",
+            "\r\n",
+            " -- Allen Huang <allen.huang@canonical.com>  Wed, 14 Oct 2026 22:26:11 +0100\r\n",
+            "\r\n",
+            "unbound (1.19.2-1ubuntu3.10) noble; urgency=medium\r\n",
+            "\r\n",
+            "  * Rebuild without change\r\n",
+            "\r\n",
+            "unbound (1.19.2-1) unstable; urgency=low\r\n",
+            "\r\n",
+            "  * New upstream release.\r\n",
+            "\r\n",
+            " -- Maintainer <m@example.org>  not-a-valid-date\r\n",
+            "\r\n",
+            "Local variables:\r\n",
+            "mode: debian-changelog\r\n",
+            "End:\r\n",
+        );
+
+        let entries = parse_debian_changelog(raw);
+        assert_eq!(entries.len(), 3, "{entries:?}");
+
+        assert_eq!(entries[0].package, "unbound");
+        assert_eq!(entries[0].version, "1.19.2-1ubuntu3.12");
+        assert_eq!(
+            entries[0].distributions,
+            vec!["noble-security", "noble-updates"]
+        );
+        assert_eq!(entries[0].urgency.as_deref(), Some("HIGH"));
+        assert_eq!(
+            entries[0].metadata,
+            vec![("binary-only".to_string(), "yes".to_string())]
+        );
+        assert_eq!(
+            entries[0].changes,
+            "  * SECURITY UPDATE: Allocation fix\n    - detail line"
+        );
+        assert_eq!(
+            entries[0].maintainer.as_deref(),
+            Some("Allen Huang <allen.huang@canonical.com>")
+        );
+        assert_eq!(
+            entries[0].date.as_deref(),
+            Some("Wed, 14 Oct 2026 22:26:11 +0100")
+        );
+        assert_eq!(
+            entries[0].timestamp.map(|ts| ts.to_string()),
+            Some("2026-10-14T21:26:11Z".to_string())
+        );
+
+        // Missing trailer stanza is still recovered cleanly before next header.
+        assert_eq!(entries[1].version, "1.19.2-1ubuntu3.10");
+        assert_eq!(entries[1].maintainer, None);
+        assert_eq!(entries[1].timestamp, None);
+        assert_eq!(entries[1].changes, "  * Rebuild without change");
+
+        // Invalid RFC 2822 date keeps raw date while setting timestamp = None,
+        // and trailing Emacs Local variables block is ignored.
+        assert_eq!(entries[2].version, "1.19.2-1");
+        assert_eq!(entries[2].date.as_deref(), Some("not-a-valid-date"));
+        assert_eq!(entries[2].timestamp, None);
+        assert_eq!(entries[2].changes, "  * New upstream release.");
+
+        // Slicing returns exact top N stanzas without trailing footer.
+        assert_eq!(slice_debian_changelog(raw, 0), "");
+        let sliced_one = slice_debian_changelog(raw, 1);
+        assert!(sliced_one.contains("1.19.2-1ubuntu3.12"));
+        assert!(!sliced_one.contains("1.19.2-1ubuntu3.10"));
+        assert!(!sliced_one.contains("Local variables:"));
+
+        let sliced_two = slice_debian_changelog(raw, 2);
+        assert!(sliced_two.contains("1.19.2-1ubuntu3.10"));
+        assert!(!sliced_two.contains("1.19.2-1) unstable"));
+
+        // Non-standard changelog yields zero stanzas and slice preserves raw text.
+        let unparsed = "Plain release notes without debian stanza headers\n";
+        assert!(parse_debian_changelog(unparsed).is_empty());
+        assert_eq!(
+            slice_debian_changelog(unparsed, 5),
+            "Plain release notes without debian stanza headers"
+        );
     }
 }
