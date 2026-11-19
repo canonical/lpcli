@@ -34,8 +34,8 @@ use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 
 use display::Display;
 use output::{
-    Block, ColorChoice, Column, Level, Noun, Output, OutputMode, ProgressChoice, Records, Report,
-    Span,
+    Block, ColorChoice, Column, CommentAttachment, CommentEntry, Level, Noun, Output, OutputMode,
+    ProgressChoice, Records, Report, Span,
 };
 use ubuntu_info_rust::{Architecture, Pocket, SeriesInfo};
 

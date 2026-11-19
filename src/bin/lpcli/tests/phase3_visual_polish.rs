@@ -3,6 +3,8 @@
 
 use serde_json::{Value, json};
 
+use crate::output::Renderer as _;
+
 use super::*;
 
 fn bug_command(argv: &[&str]) -> BugCommand {
@@ -611,10 +613,17 @@ async fn bug_and_git_comments_normalize_usernames_and_dates() {
     let bug_out = run_bug(&server, &["lpcli", "bug", "comments", "--bug-id", "7"])
         .await
         .unwrap();
-    for rendered in [render_rich(&bug_out, false), render_plain(&bug_out)] {
-        assert!(rendered.contains("Author: jdoe"), "{rendered}");
-        assert!(rendered.contains("Date: 2026-11-16 09:15"), "{rendered}");
+    let rich_bug = render_rich(&bug_out, false);
+    assert!(
+        rich_bug.contains("│ #1 ┆ jdoe ┆ 2026-11-16 09:15 │"),
+        "{rich_bug}"
+    );
+    let plain_bug = render_plain(&bug_out);
+    assert!(plain_bug.contains("Author: jdoe"), "{plain_bug}");
+    assert!(plain_bug.contains("Date: 2026-11-16 09:15"), "{plain_bug}");
+    for rendered in [rich_bug, plain_bug] {
         assert!(!rendered.contains(&base), "{rendered}");
+        assert!(!rendered.contains("~jdoe"), "{rendered}");
         assert!(!rendered.contains("T09:15:30"), "{rendered}");
     }
 
@@ -944,5 +953,303 @@ fn table_and_field_coloring_handles_delimiters_wrapping_stacking_and_no_color_ov
         always_out
             .render(&bar_report)
             .contains(&format!("{ok}Fix Released{reset}"))
+    );
+}
+
+fn comment_report(entries: Vec<CommentEntry>, empty: &str) -> Report {
+    Report {
+        blocks: vec![Block::Comments {
+            entries,
+            noun: Noun {
+                singular: "comment",
+                plural: "comments",
+            },
+            empty: empty.to_string(),
+        }],
+        json: Value::Null,
+        records: Records {
+            columns: Vec::new(),
+            rows: Vec::new(),
+        },
+    }
+}
+
+#[test]
+fn bug_comments_rich_adapts_to_widths_and_preserves_text() {
+    let long_body = "Investigated the failure carefully with clean build environment and reproduced the exact crash path";
+    let report = comment_report(
+        vec![
+            CommentEntry {
+                label: "#0".into(),
+                author: Some("reporter".into()),
+                date: Some("2026-11-15 08:00".into()),
+                content: "Initial short note.".into(),
+                attachments: Vec::new(),
+            },
+            CommentEntry {
+                label: "#1".into(),
+                author: Some("ubuntu-developer".into()),
+                date: Some("2026-11-16 09:15".into()),
+                content: long_body.into(),
+                attachments: vec![CommentAttachment {
+                    title: "trace.log".into(),
+                    kind: "Patch".into(),
+                    url: Some("https://launchpadlibrarian.net/1000/trace.log".into()),
+                }],
+            },
+        ],
+        "No comments found for bug #42.",
+    );
+
+    // Wide (140): fits naturally on a single card width without stretching to 140 columns.
+    let wide = Output::fixed(OutputMode::Rich, false, 140).render(&report);
+    let wide_max = wide
+        .lines()
+        .filter(|l| l.starts_with('┌'))
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap();
+    assert!((90..=140).contains(&wide_max), "{wide}");
+    assert!(wide.contains(long_body), "{wide}");
+    assert!(wide.ends_with("\n2 comments found.\n"), "{wide}");
+
+    // Medium (60): keeps 3-column header + uniform header/body box width <= 60.
+    let medium = Output::fixed(OutputMode::Rich, false, 60).render(&report);
+    assert!(medium.contains('┬'), "{medium}");
+    assert!(medium.contains('╧'), "{medium}");
+    let box_widths: Vec<usize> = medium
+        .lines()
+        .filter(|l| l.starts_with(['┌', '│', '╞', '├', '└']))
+        .map(|l| l.chars().count())
+        .collect();
+    assert!(!box_widths.is_empty());
+    assert!(
+        box_widths.iter().all(|&w| w == 60),
+        "expected uniform 60-col card lines, got {box_widths:?}:\n{medium}"
+    );
+    for word in long_body.split_whitespace() {
+        assert!(
+            medium.contains(word),
+            "missing {word} at width 60:\n{medium}"
+        );
+    }
+
+    // Narrow (30): falls back cleanly to 1-column card header while preserving every word.
+    let narrow = Output::fixed(OutputMode::Rich, false, 30).render(&report);
+    assert!(
+        !narrow.contains('╧'),
+        "expected 1-col header fallback:\n{narrow}"
+    );
+    assert!(narrow.contains(" · "), "{narrow}");
+    for line in narrow.lines() {
+        assert!(
+            line.chars().count() <= 30,
+            "line exceeded width 30 ({}): {line:?}\n{narrow}",
+            line.chars().count()
+        );
+    }
+    for word in long_body.split_whitespace() {
+        assert!(
+            narrow.contains(word),
+            "missing {word} at width 30:\n{narrow}"
+        );
+    }
+
+    // Extreme narrow (5): uses unboxed stacked rows matching Display::is_stacked(3).
+    let stacked = Output::fixed(OutputMode::Rich, false, 5).render(&report);
+    assert!(!stacked.contains('┌'), "{stacked}");
+    assert!(
+        stacked.contains("Comment: #0\nAuthor: reporter\n"),
+        "{stacked}"
+    );
+    assert!(
+        stacked.contains("Attachment: trace.log [Patch]"),
+        "{stacked}"
+    );
+    assert!(stacked.ends_with("\n\n2 comments found.\n"), "{stacked}");
+}
+
+#[test]
+fn bug_comments_rich_colors_and_edge_cases() {
+    let bold = "\x1b[1m";
+    let name = "\x1b[1m\x1b[36m";
+    let reset = "\x1b[0m";
+
+    // Empty comments list uses the clear empty sentence.
+    let empty = comment_report(Vec::new(), "No comments found for bug #42.");
+    assert_eq!(
+        Output::fixed(OutputMode::Rich, true, 100).render(&empty),
+        "No comments found for bug #42.\n"
+    );
+
+    // Rich semantic colors + edge cases: literal `┆`, body prose `"Attachment: ..."`,
+    // CRLF vs bare `\r`, bidi override, multi-paragraph, multiple attachments,
+    // attachment-only comment, missing metadata, and empty body without attachments.
+    let report = comment_report(
+        vec![
+            CommentEntry {
+                label: "#0".into(),
+                author: Some("alice ┆ team".into()),
+                date: Some("2026-11-15 08:00".into()),
+                content: "First para\r\n\r\nAttachment: prose mention\r\u{202E}bad".into(),
+                attachments: vec![
+                    CommentAttachment {
+                        title: "first.patch".into(),
+                        kind: "Patch".into(),
+                        url: Some("https://example.invalid/1".into()),
+                    },
+                    CommentAttachment {
+                        title: "second.log".into(),
+                        kind: "Unspecified".into(),
+                        url: None,
+                    },
+                ],
+            },
+            CommentEntry {
+                label: "#1".into(),
+                author: None,
+                date: None,
+                content: "   \n\t ".into(),
+                attachments: vec![CommentAttachment {
+                    title: "only.diff".into(),
+                    kind: "Patch".into(),
+                    url: Some("https://example.invalid/2".into()),
+                }],
+            },
+            CommentEntry {
+                label: "#2".into(),
+                author: Some("日本語user".into()),
+                date: Some("2026-11-16 10:00".into()),
+                content: String::new(),
+                attachments: Vec::new(),
+            },
+        ],
+        "No comments.",
+    );
+
+    let colored = Output::fixed(OutputMode::Rich, true, 100).render(&report);
+    assert!(colored.contains(&format!("{bold}#0{reset}")), "{colored:?}");
+    assert!(
+        colored.contains(&format!("{name}alice ┆ team{reset}")),
+        "{colored:?}"
+    );
+    // Missing author (`—`) is not colored as a username.
+    assert!(!colored.contains(&format!("{name}—{reset}")), "{colored:?}");
+    // Body prose containing `"Attachment:"` must NOT be bolded; only real attachments are.
+    assert!(
+        colored.contains("│ Attachment: prose mention"),
+        "body prose must not be bolded:\n{colored:?}"
+    );
+    assert_eq!(
+        colored
+            .matches(&format!("{bold}Attachment:{reset}"))
+            .count(),
+        3,
+        "expected exactly the 3 real attachment prefixes bolded:\n{colored:?}"
+    );
+    // CRLF is normalized without replacement chars; bare CR and bidi override are neutralized.
+    assert!(!colored.contains('\u{202E}'), "{colored:?}");
+    assert!(!colored.contains('\r'), "{colored:?}");
+    assert!(colored.contains("First para"), "{colored:?}");
+    assert!(colored.contains("\u{FFFD}\u{FFFD}bad"), "{colored:?}");
+
+    // Uncolored check: verify CJK header and body border widths are identical,
+    // attachment-only comment renders directly below `╞═╧═╡` without an empty row,
+    // and empty comment without attachments renders `│ — │`.
+    let plain_rich = Output::fixed(OutputMode::Rich, false, 100).render(&report);
+    let top_widths: Vec<usize> = plain_rich
+        .lines()
+        .filter(|l| l.starts_with('┌'))
+        .map(|l| l.chars().count())
+        .collect();
+    let bot_widths: Vec<usize> = plain_rich
+        .lines()
+        .filter(|l| l.starts_with('└'))
+        .map(|l| l.chars().count())
+        .collect();
+    assert_eq!(top_widths.len(), 3);
+    assert_eq!(top_widths, bot_widths);
+    assert!(
+        top_widths.windows(2).all(|w| w[0] == w[1]),
+        "all cards in thread should share width: {top_widths:?}"
+    );
+    assert!(
+        plain_rich.contains("╡\n│ Attachment: only.diff"),
+        "attachment-only comment should not insert a blank body row:\n{plain_rich}"
+    );
+    assert!(
+        plain_rich.contains("│ —"),
+        "empty comment without attachments should show missing marker:\n{plain_rich}"
+    );
+
+    // ColorChoice::Always overrides NO_COLOR=1 for Block::Comments via anstyle.
+    let env_no_color = output::Environment {
+        no_color: Some("1".into()),
+        term: Some("xterm-256color".into()),
+        ..Default::default()
+    };
+    let always_out = Output::resolve(output::Settings {
+        format: None,
+        color: ColorChoice::Always,
+        config_format: None,
+        accessible: false,
+        display: Display::from_width(100),
+        json_output: true,
+        tsv_output: true,
+        fields: None,
+        env: &env_no_color,
+        stdout_terminal: false,
+        stderr_terminal: false,
+    })
+    .unwrap();
+    let forced = always_out.render(&report);
+    assert!(forced.contains(&format!("{bold}#0{reset}")), "{forced:?}");
+    assert!(
+        forced.contains(&format!("{name}alice ┆ team{reset}")),
+        "{forced:?}"
+    );
+
+    // Narrow 1-column fallback and non-Unicode styles color headers and attachments safely.
+    let narrow_colored = Output::fixed(OutputMode::Rich, true, 25).render(&report);
+    assert!(
+        narrow_colored.contains(&format!("{bold}#0")),
+        "{narrow_colored:?}"
+    );
+    assert!(
+        narrow_colored.contains(&format!("{bold}Attachment:{reset}")),
+        "{narrow_colored:?}"
+    );
+    let ascii_3col = output::RichRenderer {
+        style: output::Style {
+            color: true,
+            unicode: false,
+            width: 80,
+        },
+    }
+    .render(&report);
+    assert!(ascii_3col.contains("+====="), "{ascii_3col}");
+    assert!(
+        ascii_3col.contains(&format!("{bold}#0{reset}")),
+        "{ascii_3col:?}"
+    );
+    assert_eq!(
+        ascii_3col
+            .matches(&format!("{bold}Attachment:{reset}"))
+            .count(),
+        3,
+        "{ascii_3col:?}"
+    );
+    let ascii_1col = output::RichRenderer {
+        style: output::Style {
+            color: true,
+            unicode: false,
+            width: 25,
+        },
+    }
+    .render(&report);
+    assert!(ascii_1col.contains("| Attachment:"), "{ascii_1col}");
+    assert!(
+        ascii_1col.contains(&format!("{bold}Attachment:{reset}")),
+        "{ascii_1col:?}"
     );
 }
