@@ -12,6 +12,12 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 ### Added
 
+- `client::DEFAULT_MAX_RETRY_AFTER` (5 minutes) and
+  `LaunchpadClient::with_max_retry_after` to bound retry delays per attempt:
+  when an HTTP `429` `Retry-After` exceeds the configured limit,
+  `send_with_retry` stops retrying immediately and returns `LpError::RateLimit`
+  with the server's `retry_after_secs`, and exponential backoff sleeps are
+  clamped to `max_retry_after`. Passing `None` disables the cap.
 - `lpcli bug mark-duplicate` and `lpcli bug unmark-duplicate` (and library
   helpers `mark_bug_as_duplicate`, `mark_bug_as_duplicate_raw`,
   `unmark_bug_as_duplicate`, `unmark_bug_as_duplicate_raw`) to mark a bug as a
