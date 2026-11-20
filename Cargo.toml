@@ -96,7 +96,7 @@ dbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust", 
 # Non-blocking hidraw access for USB FIDO2 security keys
 libc = "0.2"
 # Safe getpwuid_r wrapper for environment-independent cache coordination paths
-nix = { version = "0.30", default-features = false, features = ["user"] }
+nix = { version = "0.32", default-features = false, features = ["user"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1", features = ["keychain"] }
