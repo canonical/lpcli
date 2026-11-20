@@ -483,14 +483,46 @@ fn ok_block(message: impl Into<String>) -> Block {
     Block::Status(Level::Ok, vec![Span::Text(message.into())])
 }
 
-/// Bug number from an API link, when the link ends in a numeric ID.
-fn bug_id_from_api_link(link: &str) -> Option<u64> {
-    link.rsplit('/').next()?.parse().ok()
+/// Bug number from an API link, when the link is an HTTP(S) URL whose path
+/// ends in `/bugs/<id>` with a non-zero numeric bug ID.
+pub(crate) fn bug_id_from_api_link(link: &str) -> Option<u64> {
+    let parsed = url::Url::parse(link.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let segments: Vec<&str> = parsed.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let [.., "bugs", id] = segments.as_slice() else {
+        return None;
+    };
+    let id: u64 = id.parse().ok()?;
+    (id > 0).then_some(id)
 }
 
-/// Web-UI URL for a bug from its API link, when the link ends in a bug number.
+/// Web-UI URL for a bug from its API link, when the link ends in `/bugs/<id>`.
 fn bug_web_url_from_api_link(link: &str) -> Option<String> {
     bug_id_from_api_link(link).map(|id| format!("https://bugs.launchpad.net/bugs/{id}"))
+}
+
+/// Strip query strings, fragments, and URL userinfo and redact credentials
+/// before showing a fallback bug link in terminal output.
+fn redact_bug_link_for_display(link: &str) -> String {
+    if let Ok(mut parsed) = url::Url::parse(link.trim()) {
+        parsed.set_query(None);
+        parsed.set_fragment(None);
+        if !parsed.username().is_empty() {
+            let _ = parsed.set_username("");
+        }
+        if parsed.password().is_some() {
+            let _ = parsed.set_password(None);
+        }
+        return crate::output::redact_secrets(parsed.as_str());
+    }
+    let without_fragment = link.split('#').next().unwrap_or(link);
+    let without_query = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
+    crate::output::redact_secrets(without_query)
 }
 
 fn note_block(message: impl Into<String>) -> Block {
@@ -576,7 +608,7 @@ fn bug_show_blocks(read: &BugReportRead) -> Vec<Block> {
     if let Some(link) = &bug.duplicate_of_link {
         blocks.push(Block::Field(
             "Duplicate of",
-            bug_web_url_from_api_link(link).unwrap_or_else(|| link.clone()),
+            bug_web_url_from_api_link(link).unwrap_or_else(|| redact_bug_link_for_display(link)),
         ));
     }
     if let Some(count) = bug.number_of_duplicates.filter(|count| *count > 0) {
@@ -1045,6 +1077,44 @@ impl BugWatchesRead {
 // Bug handlers
 // ---------------------------------------------------------------------------
 
+/// Whether a Launchpad HTTP 401 message indicates missing bug-edit permission
+/// (`launchpad.Edit`) rather than an OAuth authentication/token failure.
+fn is_launchpad_permission_401(message: &str) -> bool {
+    let trimmed = message.trim();
+    if trimmed.is_empty()
+        || [
+            "Expired token",
+            "Unknown access token",
+            "Unknown consumer",
+            "Invalid ",
+            "Nonce ",
+            "Timestamp ",
+        ]
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+    {
+        return false;
+    }
+    trimmed.contains("launchpad.Edit")
+        || trimmed.starts_with("Unauthorized")
+        || trimmed.to_ascii_lowercase().contains("permission")
+}
+
+/// Map Launchpad's `launchpad.Edit` 401 denial on duplicate mutations to
+/// [`LpError::Unauthorized`] (exit code 5), while keeping token/auth 401s on
+/// exit code 3.
+fn bug_duplicate_permission_error(err: LpError, bug_id: u64, action: &str) -> LpError {
+    match err {
+        LpError::Api {
+            status: 401,
+            message,
+        } if is_launchpad_permission_401(&message) => LpError::Unauthorized(format!(
+            "You lack 'launchpad.Edit' permission to {action} bug #{bug_id}. {message}"
+        )),
+        other => other,
+    }
+}
+
 pub(crate) async fn handle_bug(
     cmd: BugCommand,
     output: &Output,
@@ -1258,16 +1328,22 @@ pub(crate) async fn bug_outcome(
             bug_id,
             duplicate_of,
         } => {
-            let updated = bugs::mark_bug_as_duplicate_raw(client, bug_id, duplicate_of).await?;
-            // Launchpad may canonicalise a chain of duplicates, so report the
-            // master bug from its response when present.
+            let updated = bugs::mark_bug_as_duplicate_raw(client, bug_id, duplicate_of)
+                .await
+                .map_err(|err| bug_duplicate_permission_error(err, bug_id, "mark"))?;
+            // Launchpad may canonicalise a chain of duplicates, so inspect its
+            // response and require a valid `/bugs/<id>` link before claiming success.
             let master_id = updated
                 .value
                 .duplicate_of_link
                 .as_deref()
                 .and_then(bug_id_from_api_link)
-                .unwrap_or(duplicate_of);
-            let blocks = vec![
+                .ok_or_else(|| {
+                    LpError::Partial(format!(
+                        "Marking bug #{bug_id} as a duplicate of bug #{duplicate_of} returned a response without a valid duplicate_of_link. Check `lpcli bug show -b {bug_id}` to verify."
+                    ))
+                })?;
+            let mut blocks = vec![
                 ok_block(format!(
                     "Marked bug #{bug_id} as a duplicate of bug #{master_id}."
                 )),
@@ -1276,11 +1352,18 @@ pub(crate) async fn bug_outcome(
                     format!("https://bugs.launchpad.net/bugs/{master_id}"),
                 ),
             ];
+            if master_id != duplicate_of {
+                blocks.push(note_block(format!(
+                    "Launchpad resolved bug #{duplicate_of} to canonical master bug #{master_id}."
+                )));
+            }
             BugOutcome::entry(&updated, blocks)
         }
 
         BugCommand::UnmarkDuplicate { bug_id } => {
-            let updated = bugs::unmark_bug_as_duplicate_raw(client, bug_id).await?;
+            let updated = bugs::unmark_bug_as_duplicate_raw(client, bug_id)
+                .await
+                .map_err(|err| bug_duplicate_permission_error(err, bug_id, "unmark"))?;
             let blocks = vec![ok_block(format!(
                 "Removed the duplicate marker from bug #{bug_id}."
             ))];

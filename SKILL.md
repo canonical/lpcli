@@ -491,13 +491,10 @@ lpcli person ppas --name my-username
 7. **Missing command?** lpcli does not wrap every Launchpad operation. Do not
    fall back to `launchpadlib`: it uses a separate credential store
    (`~/.launchpadlib`) and any new authorization needs an interactive browser
-   session, which fails in agent runs. Report the gap instead. If a raw API
-   call is unavoidable, sign it with the stored lpcli OAuth credentials
-   (consumer key, token, and secret are in the OS keyring, with a file fallback
-   at `~/.config/lpcli/credentials.toml`).
+   session, which fails in agent runs. Report the gap instead.
 8. **Check the binary version** — run `lpcli --version`. If a command described
-   here is missing, the installed binary predates the checkout: reinstall with
-   `cargo install --path .`.
+   here is missing, the installed binary predates this documentation: report the
+   version mismatch and ask the user to upgrade or reinstall `lpcli`.
 9. **Source package names in Launchpad** may differ from upstream project names
    (e.g. `rustc-1.97` not `rust`). Use the exact source package name the user
    provides.

@@ -1012,9 +1012,10 @@ pub async fn set_bug_tags_raw(
 /// # Errors
 ///
 /// Returns [`LpError::Usage`] if `bug_id` and `duplicate_of` are the same, and
-/// [`crate::error::LpError::Api`] with `status` 401 if the authenticated user
-/// lacks `launchpad.Edit` on the bug (for example a bug locked to
-/// comment-only).
+/// [`LpError::Api`] if Launchpad rejects the request (for example `status` 400
+/// on an invalid target bug or information-type conflict, `status` 401/403 if
+/// the authenticated user lacks `launchpad.Edit` on the bug, or `status` 404
+/// if the bug does not exist).
 pub async fn mark_bug_as_duplicate(
     client: &LaunchpadClient,
     bug_id: u64,
@@ -1031,8 +1032,9 @@ pub async fn mark_bug_as_duplicate(
 ///
 /// # Errors
 ///
-/// If Launchpad accepts the change but its response cannot be read,
-/// returns [`LpError::Partial`].
+/// Returns [`LpError::Usage`] if `bug_id` and `duplicate_of` are the same,
+/// [`LpError::Api`] if Launchpad rejects the request, and [`LpError::Partial`]
+/// if Launchpad accepts the change but its response cannot be read.
 pub async fn mark_bug_as_duplicate_raw(
     client: &LaunchpadClient,
     bug_id: u64,
@@ -1046,6 +1048,12 @@ pub async fn mark_bug_as_duplicate_raw(
 /// Remove a bug's duplicate marker, making it a normal bug again.
 ///
 /// Returns the updated [`Bug`] on success.
+///
+/// # Errors
+///
+/// Returns [`LpError::Api`] if Launchpad rejects the request (for example
+/// `status` 401/403 if the authenticated user lacks `launchpad.Edit` on the
+/// bug, or `status` 404 if the bug does not exist).
 pub async fn unmark_bug_as_duplicate(client: &LaunchpadClient, bug_id: u64) -> Result<Bug> {
     let url = client.url(&format!("/bugs/{bug_id}"));
     let body = serde_json::json!({ "duplicate_of_link": null });
@@ -1057,8 +1065,9 @@ pub async fn unmark_bug_as_duplicate(client: &LaunchpadClient, bug_id: u64) -> R
 ///
 /// # Errors
 ///
-/// If Launchpad accepts the change but its response cannot be read,
-/// returns [`LpError::Partial`].
+/// Returns [`LpError::Api`] if Launchpad rejects the request, and
+/// [`LpError::Partial`] if Launchpad accepts the change but its response
+/// cannot be read.
 pub async fn unmark_bug_as_duplicate_raw(
     client: &LaunchpadClient,
     bug_id: u64,
@@ -3168,6 +3177,37 @@ mod tests {
         let bug: Bug = serde_json::from_str(json).unwrap();
         assert_eq!(bug.tags, vec!["regression", "focal"]);
         assert_eq!(bug.users_affected_count, Some(5));
+    }
+
+    #[test]
+    fn bug_deserialise_with_duplicate_fields() {
+        let json = r#"{
+            "id": 101,
+            "title": "Duplicate bug",
+            "description": null,
+            "tags": [],
+            "date_created": null,
+            "date_last_updated": null,
+            "self_link": "https://api.launchpad.net/devel/bugs/101",
+            "web_link": "https://bugs.launchpad.net/bugs/101",
+            "owner_link": null,
+            "users_affected_count": null,
+            "duplicate_of_link": "https://api.launchpad.net/devel/bugs/100",
+            "number_of_duplicates": 3
+        }"#;
+        let bug: Bug = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            bug.duplicate_of_link.as_deref(),
+            Some("https://api.launchpad.net/devel/bugs/100")
+        );
+        assert_eq!(bug.number_of_duplicates, Some(3));
+
+        let cleared: Bug = serde_json::from_str(
+            r#"{"id": 102, "title": "Clean bug", "tags": [], "duplicate_of_link": null}"#,
+        )
+        .unwrap();
+        assert_eq!(cleared.duplicate_of_link, None);
+        assert_eq!(cleared.number_of_duplicates, None);
     }
 
     #[test]
