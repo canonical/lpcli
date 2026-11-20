@@ -10,6 +10,9 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 ## [Unreleased]
 
+
+## [0.5.1] - 2026-11-20
+
 ### Added
 
 - `client::DEFAULT_MAX_RETRY_AFTER` (5 minutes) and
