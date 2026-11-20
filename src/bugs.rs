@@ -21,6 +21,8 @@
 //! | [`delete_bug_comment`] | Delete a comment from a bug |
 //! | [`set_bug_description`] | Replace the description of a bug |
 //! | [`set_bug_tags`] | Replace the tag list on a bug |
+//! | [`mark_bug_as_duplicate`] | Mark a bug as a duplicate of another bug |
+//! | [`unmark_bug_as_duplicate`] | Remove a bug's duplicate marker |
 //! | [`get_bug_tracker_by_name`] | Fetch a bug tracker by name |
 //! | [`get_bug_trackers`] | List registered remote bug trackers |
 //! | [`get_bug_tracker`] | Fetch a bug tracker by API self-link |
@@ -90,6 +92,10 @@ pub struct Bug {
     pub owner_link: Option<String>,
     /// Number of users who are affected by this bug.
     pub users_affected_count: Option<u64>,
+    /// API link to the master bug when this bug is marked as a duplicate.
+    pub duplicate_of_link: Option<String>,
+    /// Number of bugs marked as duplicates of this bug.
+    pub number_of_duplicates: Option<u64>,
 }
 
 /// The status of a bug task (the per-project/package assignment of a bug).
@@ -992,6 +998,92 @@ pub async fn set_bug_tags_raw(
 ) -> Result<Raw<Bug>> {
     let body = serde_json::json!({ "tags": tags });
     patch_bug_raw(client, bug_id, &body, "Setting the bug tags").await
+}
+
+/// Mark a bug as a duplicate of another bug.
+///
+/// Launchpad exposes duplicate marking as the writable `duplicate_of_link`
+/// field on the bug resource, not as a named `markAsDuplicate` operation.
+/// Marking a bug that already has duplicates also re-targets those duplicates
+/// to the new master bug.
+///
+/// Returns the updated [`Bug`] on success.
+///
+/// # Errors
+///
+/// Returns [`LpError::Usage`] if `bug_id` and `duplicate_of` are the same, and
+/// [`LpError::Api`] if Launchpad rejects the request (for example `status` 400
+/// on an invalid target bug or information-type conflict, `status` 401/403 if
+/// the authenticated user lacks `launchpad.Edit` on the bug, or `status` 404
+/// if the bug does not exist).
+pub async fn mark_bug_as_duplicate(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    duplicate_of: u64,
+) -> Result<Bug> {
+    let url = duplicate_of_url(client, bug_id, duplicate_of)?;
+    let body = serde_json::json!({ "duplicate_of_link": url });
+    let bug_url = client.url(&format!("/bugs/{bug_id}"));
+    client.patch_url_with_value(&bug_url, &body).await
+}
+
+/// Like [`mark_bug_as_duplicate()`], but return the updated bug's exact
+/// Launchpad JSON.
+///
+/// # Errors
+///
+/// Returns [`LpError::Usage`] if `bug_id` and `duplicate_of` are the same,
+/// [`LpError::Api`] if Launchpad rejects the request, and [`LpError::Partial`]
+/// if Launchpad accepts the change but its response cannot be read.
+pub async fn mark_bug_as_duplicate_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    duplicate_of: u64,
+) -> Result<Raw<Bug>> {
+    let url = duplicate_of_url(client, bug_id, duplicate_of)?;
+    let body = serde_json::json!({ "duplicate_of_link": url });
+    patch_bug_raw(client, bug_id, &body, "Marking the bug as a duplicate").await
+}
+
+/// Remove a bug's duplicate marker, making it a normal bug again.
+///
+/// Returns the updated [`Bug`] on success.
+///
+/// # Errors
+///
+/// Returns [`LpError::Api`] if Launchpad rejects the request (for example
+/// `status` 401/403 if the authenticated user lacks `launchpad.Edit` on the
+/// bug, or `status` 404 if the bug does not exist).
+pub async fn unmark_bug_as_duplicate(client: &LaunchpadClient, bug_id: u64) -> Result<Bug> {
+    let url = client.url(&format!("/bugs/{bug_id}"));
+    let body = serde_json::json!({ "duplicate_of_link": null });
+    client.patch_url_with_value(&url, &body).await
+}
+
+/// Like [`unmark_bug_as_duplicate()`], but return the updated bug's exact
+/// Launchpad JSON.
+///
+/// # Errors
+///
+/// Returns [`LpError::Api`] if Launchpad rejects the request, and
+/// [`LpError::Partial`] if Launchpad accepts the change but its response
+/// cannot be read.
+pub async fn unmark_bug_as_duplicate_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+) -> Result<Raw<Bug>> {
+    let body = serde_json::json!({ "duplicate_of_link": null });
+    patch_bug_raw(client, bug_id, &body, "Removing the duplicate marker").await
+}
+
+/// Validate a duplicate target and return its API link.
+fn duplicate_of_url(client: &LaunchpadClient, bug_id: u64, duplicate_of: u64) -> Result<String> {
+    if bug_id == duplicate_of {
+        return Err(LpError::Usage(format!(
+            "Bug #{bug_id} cannot be marked as a duplicate of itself."
+        )));
+    }
+    Ok(client.url(&format!("/bugs/{duplicate_of}")))
 }
 
 /// PATCH a bug and keep the exact entry Launchpad returned.
@@ -3085,6 +3177,37 @@ mod tests {
         let bug: Bug = serde_json::from_str(json).unwrap();
         assert_eq!(bug.tags, vec!["regression", "focal"]);
         assert_eq!(bug.users_affected_count, Some(5));
+    }
+
+    #[test]
+    fn bug_deserialise_with_duplicate_fields() {
+        let json = r#"{
+            "id": 101,
+            "title": "Duplicate bug",
+            "description": null,
+            "tags": [],
+            "date_created": null,
+            "date_last_updated": null,
+            "self_link": "https://api.launchpad.net/devel/bugs/101",
+            "web_link": "https://bugs.launchpad.net/bugs/101",
+            "owner_link": null,
+            "users_affected_count": null,
+            "duplicate_of_link": "https://api.launchpad.net/devel/bugs/100",
+            "number_of_duplicates": 3
+        }"#;
+        let bug: Bug = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            bug.duplicate_of_link.as_deref(),
+            Some("https://api.launchpad.net/devel/bugs/100")
+        );
+        assert_eq!(bug.number_of_duplicates, Some(3));
+
+        let cleared: Bug = serde_json::from_str(
+            r#"{"id": 102, "title": "Clean bug", "tags": [], "duplicate_of_link": null}"#,
+        )
+        .unwrap();
+        assert_eq!(cleared.duplicate_of_link, None);
+        assert_eq!(cleared.number_of_duplicates, None);
     }
 
     #[test]

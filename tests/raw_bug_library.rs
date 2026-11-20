@@ -742,6 +742,24 @@ async fn bug_patch_raw_mutations_return_exact_entry() {
         .expect(1)
         .create_async()
         .await;
+    let mark = server
+        .mock("PATCH", "/bugs/42")
+        .match_body(Matcher::Json(json!({
+            "duplicate_of_link": format!("{base}/bugs/43"),
+        })))
+        .with_header("content-type", "application/json")
+        .with_body(body.to_string())
+        .expect(1)
+        .create_async()
+        .await;
+    let unmark = server
+        .mock("PATCH", "/bugs/42")
+        .match_body(Matcher::Json(json!({"duplicate_of_link": null})))
+        .with_header("content-type", "application/json")
+        .with_body(body.to_string())
+        .expect(1)
+        .create_async()
+        .await;
     let client = client(&server);
 
     let raw = bugs::set_bug_description_raw(&client, 42, "New text")
@@ -752,7 +770,103 @@ async fn bug_patch_raw_mutations_return_exact_entry() {
         .await
         .unwrap();
     assert_eq!(raw.raw, body);
-    assert_all(&[description, tags]).await;
+    let raw = bugs::mark_bug_as_duplicate_raw(&client, 42, 43)
+        .await
+        .unwrap();
+    assert_eq!(raw.raw, body);
+    let raw = bugs::unmark_bug_as_duplicate_raw(&client, 42)
+        .await
+        .unwrap();
+    assert_eq!(raw.raw, body);
+    assert_all(&[description, tags, mark, unmark]).await;
+}
+
+#[tokio::test]
+async fn mark_bug_as_duplicate_rejects_the_bug_itself_without_a_request() {
+    let server = Server::new_async().await;
+    let client = client(&server);
+    let error = bugs::mark_bug_as_duplicate_raw(&client, 42, 42)
+        .await
+        .expect_err("a bug cannot be a duplicate of itself");
+    assert!(matches!(error, LpError::Usage(_)), "{error}");
+    let typed_error = bugs::mark_bug_as_duplicate(&client, 42, 42)
+        .await
+        .expect_err("a bug cannot be a duplicate of itself");
+    assert!(matches!(typed_error, LpError::Usage(_)), "{typed_error}");
+}
+
+#[tokio::test]
+async fn typed_duplicate_helpers_patch_bug_and_unreadable_raw_responses_are_partial() {
+    let mut server = Server::new_async().await;
+    let base = server.url();
+    let marked_body = json!({
+        "id": 42,
+        "title": "Sample bug",
+        "tags": [],
+        "duplicate_of_link": format!("{base}/bugs/43"),
+        "number_of_duplicates": 0
+    });
+    let unmarked_body = json!({
+        "id": 42,
+        "title": "Sample bug",
+        "tags": [],
+        "duplicate_of_link": null,
+        "number_of_duplicates": 0
+    });
+    let mark = server
+        .mock("PATCH", "/bugs/42")
+        .match_body(Matcher::Json(json!({
+            "duplicate_of_link": format!("{base}/bugs/43"),
+        })))
+        .with_header("content-type", "application/json")
+        .with_body(marked_body.to_string())
+        .expect(1)
+        .create_async()
+        .await;
+    let unmark = server
+        .mock("PATCH", "/bugs/42")
+        .match_body(Matcher::Json(json!({"duplicate_of_link": null})))
+        .with_header("content-type", "application/json")
+        .with_body(unmarked_body.to_string())
+        .expect(1)
+        .create_async()
+        .await;
+    let client_ok = client(&server);
+
+    let marked = bugs::mark_bug_as_duplicate(&client_ok, 42, 43)
+        .await
+        .unwrap();
+    assert_eq!(
+        marked.duplicate_of_link.as_deref(),
+        Some(format!("{base}/bugs/43").as_str())
+    );
+    let unmarked = bugs::unmark_bug_as_duplicate(&client_ok, 42).await.unwrap();
+    assert_eq!(unmarked.duplicate_of_link, None);
+    assert_all(&[mark, unmark]).await;
+
+    let mut bad_server = Server::new_async().await;
+    let bad_mark = bad_server
+        .mock("PATCH", "/bugs/42")
+        .with_body("not json")
+        .expect(2)
+        .create_async()
+        .await;
+    let bad_client = client(&bad_server);
+    assert_partial(
+        bugs::mark_bug_as_duplicate_raw(&bad_client, 42, 43).await,
+        &[
+            "Marking the bug as a duplicate succeeded",
+            "lpcli bug show -b 42",
+        ],
+    );
+    assert_partial(
+        bugs::unmark_bug_as_duplicate_raw(&bad_client, 42).await,
+        &[
+            "Removing the duplicate marker succeeded",
+            "lpcli bug show -b 42",
+        ],
+    );
+    bad_mark.assert_async().await;
 }
 
 #[tokio::test]
