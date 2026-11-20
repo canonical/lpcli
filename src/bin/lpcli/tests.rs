@@ -199,6 +199,23 @@ mod documentation_examples {
     }
 
     #[test]
+    fn skill_doc_does_not_recommend_credential_extraction_or_self_install() {
+        let skill = include_str!("../../../SKILL.md");
+        assert!(
+            !skill.contains("credentials.toml"),
+            "SKILL.md must not instruct agents to read credentials.toml"
+        );
+        let tips = skill
+            .split("## Tips for Agents")
+            .nth(1)
+            .expect("SKILL.md must contain Tips for Agents section");
+        assert!(
+            !tips.contains("cargo install"),
+            "SKILL.md Tips for Agents must not instruct agents to run cargo install"
+        );
+    }
+
+    #[test]
     fn extracts_shell_fences_and_inline_commands_only() {
         let markdown = "Use `lpcli --help` and `lpcli --version`; `lpcli` names the program.\n\
                         ```bash\n\

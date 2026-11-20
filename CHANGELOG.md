@@ -12,6 +12,11 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 ### Added
 
+- `lpcli bug mark-duplicate` and `lpcli bug unmark-duplicate` (and library
+  helpers `mark_bug_as_duplicate`, `mark_bug_as_duplicate_raw`,
+  `unmark_bug_as_duplicate`, `unmark_bug_as_duplicate_raw`) to mark a bug as a
+  duplicate of another bug or remove the marker. `bug show` now displays
+  `Duplicate of` and `Duplicates` when Launchpad reports them.
 - A `Maintainer` column (from Launchpad's `package_maintainer_link`) to
   `lpcli package search` and `lpcli package ppa-sources` output (adding a
   trailing `maintainer` column to `--format tsv`), and

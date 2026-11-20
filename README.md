@@ -534,6 +534,12 @@ lpcli bug set-description --bug-id 123456 --description-file ./description.txt
 # Change the description of a bug from a pipe
 cat description.txt | lpcli bug set-description --bug-id 123456 --description-file -
 
+# Mark a bug as a duplicate of another (requires 'launchpad.Edit' on the bug)
+lpcli bug mark-duplicate --bug-id 123456 --duplicate-of 654321
+
+# Remove a duplicate marker
+lpcli bug unmark-duplicate --bug-id 123456
+
 # Change the status of a bug task (--target is the name shown by 'lpcli bug tasks';
 # status values are kebab-case: new, confirmed, triaged, in-progress,
 # fix-committed, fix-released, invalid, wont-fix, opinion, expired)

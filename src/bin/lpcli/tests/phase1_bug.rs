@@ -235,11 +235,13 @@ const READS: [&str; 8] = [
     "remote-bug-trackers",
 ];
 
-const MUTATIONS: [&str; 15] = [
+const MUTATIONS: [&str; 17] = [
     "add-comment -b 42 -m hi",
     "delete-comment -b 42 -c 1",
     "create -T title -d description",
     "set-description -b 42 -d text",
+    "mark-duplicate -b 42 --duplicate-of 43",
+    "unmark-duplicate -b 42",
     "set-status -b 42 --all-targets --all-series -s confirmed",
     "set-importance -b 42 -t curl --no-series -i high",
     "set-assignee -b 42 --many-targets curl --series noble -n someone",
@@ -352,6 +354,71 @@ async fn show_json_combines_unmodified_launchpad_members() {
     for mock in mocks {
         mock.assert_async().await;
     }
+}
+
+#[tokio::test]
+async fn show_displays_duplicate_state() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let mut bug = bug_json(&base, &[]);
+    bug["duplicate_of_link"] = serde_json::json!(format!("{base}/bugs/43"));
+    bug["number_of_duplicates"] = serde_json::json!(2);
+    get(&mut server, "/bugs/42", &bug).await;
+    get(
+        &mut server,
+        "/bugs/42/bug_tasks",
+        &collection(vec![task_json(&base, None, "New")]),
+    )
+    .await;
+    get(&mut server, "/bugs/42/attachments", &collection(vec![])).await;
+
+    let outcome = run(&server, &["lpcli", "bug", "show", "-b", "42"])
+        .await
+        .unwrap();
+    let rich = render(&outcome, OutputMode::Rich, false);
+    assert!(
+        rich.contains("Duplicate of") && rich.contains("https://bugs.launchpad.net/bugs/43"),
+        "{rich}"
+    );
+    assert!(
+        rich.contains("Duplicates") && rich.contains("2 bug(s)"),
+        "{rich}"
+    );
+    let plain = render(&outcome, OutputMode::Plain, false);
+    assert!(
+        plain.contains("Duplicate of: https://bugs.launchpad.net/bugs/43\n"),
+        "{plain}"
+    );
+    assert!(plain.contains("Duplicates: 2 bug(s)\n"), "{plain}");
+
+    // Zero duplicates is omitted, and a non-bug fallback link strips secrets.
+    let mut server2 = isolated_mock_server().await;
+    let base2 = server2.url();
+    let mut bug2 = bug_json(&base2, &[]);
+    bug2["duplicate_of_link"] =
+        serde_json::json!("https://user:pwsecret@example.invalid/other/99?token=toksecret#frag");
+    bug2["number_of_duplicates"] = serde_json::json!(0);
+    get(&mut server2, "/bugs/42", &bug2).await;
+    get(
+        &mut server2,
+        "/bugs/42/bug_tasks",
+        &collection(vec![task_json(&base2, None, "New")]),
+    )
+    .await;
+    get(&mut server2, "/bugs/42/attachments", &collection(vec![])).await;
+
+    let outcome2 = run(&server2, &["lpcli", "bug", "show", "-b", "42"])
+        .await
+        .unwrap();
+    let plain2 = render(&outcome2, OutputMode::Plain, false);
+    assert!(!plain2.contains("Duplicates:"), "{plain2}");
+    assert!(
+        plain2.contains("Duplicate of: https://example.invalid/other/99\n"),
+        "{plain2}"
+    );
+    assert!(!plain2.contains("pwsecret"), "{plain2}");
+    assert!(!plain2.contains("toksecret"), "{plain2}");
+    assert!(!plain2.contains("frag"), "{plain2}");
 }
 
 #[tokio::test]
@@ -910,6 +977,365 @@ async fn tag_prints_the_updated_bug_entry() {
         format!("{base}/bugs/42\n")
     );
     patch.assert_async().await;
+}
+
+#[tokio::test]
+async fn mark_duplicate_patches_the_link_and_prints_the_updated_bug() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let mut updated = bug_json(&base, &[]);
+    updated["duplicate_of_link"] = serde_json::json!(format!("{base}/bugs/43"));
+    let patch = server
+        .mock("PATCH", "/bugs/42")
+        .match_header("content-type", "application/json")
+        .match_body(mockito::Matcher::Json(serde_json::json!({
+            "duplicate_of_link": format!("{base}/bugs/43"),
+        })))
+        .with_header("content-type", "application/json")
+        .with_body(updated.to_string())
+        .create_async()
+        .await;
+
+    let outcome = run(
+        &server,
+        &[
+            "lpcli",
+            "bug",
+            "mark-duplicate",
+            "-b",
+            "42",
+            "--duplicate-of",
+            "43",
+        ],
+    )
+    .await
+    .unwrap();
+    let rendered: serde_json::Value =
+        serde_json::from_str(&render(&outcome, OutputMode::Json, false)).unwrap();
+    assert_eq!(rendered, updated);
+    assert_eq!(
+        render(&outcome, OutputMode::Json, true),
+        format!("{base}/bugs/42\n")
+    );
+    let rich = render(&outcome, OutputMode::Rich, false);
+    assert!(
+        rich.contains("Marked bug #42 as a duplicate of bug #43."),
+        "{rich}"
+    );
+    assert!(
+        rich.contains("https://bugs.launchpad.net/bugs/43"),
+        "{rich}"
+    );
+    let plain = render(&outcome, OutputMode::Plain, false);
+    assert!(
+        plain.contains("OK: Marked bug #42 as a duplicate of bug #43."),
+        "{plain}"
+    );
+    assert!(
+        plain.contains("Duplicate of: https://bugs.launchpad.net/bugs/43\n"),
+        "{plain}"
+    );
+    patch.assert_async().await;
+}
+
+#[tokio::test]
+async fn unmark_duplicate_patches_null_and_prints_the_updated_bug() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let updated = bug_json(&base, &[]);
+    let patch = server
+        .mock("PATCH", "/bugs/42")
+        .match_header("content-type", "application/json")
+        .match_body(mockito::Matcher::Json(serde_json::json!({
+            "duplicate_of_link": null,
+        })))
+        .with_header("content-type", "application/json")
+        .with_body(updated.to_string())
+        .create_async()
+        .await;
+
+    let outcome = run(&server, &["lpcli", "bug", "unmark-duplicate", "-b", "42"])
+        .await
+        .unwrap();
+    let rendered: serde_json::Value =
+        serde_json::from_str(&render(&outcome, OutputMode::Json, false)).unwrap();
+    assert_eq!(rendered, updated);
+    assert_eq!(
+        render(&outcome, OutputMode::Json, true),
+        format!("{base}/bugs/42\n")
+    );
+    let rich = render(&outcome, OutputMode::Rich, false);
+    assert!(
+        rich.contains("Removed the duplicate marker from bug #42."),
+        "{rich}"
+    );
+    let plain = render(&outcome, OutputMode::Plain, false);
+    assert!(
+        plain.contains("OK: Removed the duplicate marker from bug #42."),
+        "{plain}"
+    );
+    patch.assert_async().await;
+}
+
+#[test]
+fn mark_duplicate_of_itself_is_a_usage_error() {
+    let argv = argv("json", "mark-duplicate -b 42 --duplicate-of 42");
+    let cli = Cli::try_parse_from(&argv).unwrap();
+    let error = validate_cli(&cli).expect_err("a bug cannot duplicate itself");
+    assert_eq!(error.exit_code(), 2, "{error}");
+    assert!(error.to_string().contains("duplicate of itself"), "{error}");
+}
+
+#[tokio::test]
+async fn mark_duplicate_reports_canonicalized_master_and_partial_when_link_missing() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let mut canonical = bug_json(&base, &[]);
+    canonical["duplicate_of_link"] = serde_json::json!(format!("{base}/bugs/100"));
+    let patch_chain = server
+        .mock("PATCH", "/bugs/42")
+        .with_header("content-type", "application/json")
+        .with_body(canonical.to_string())
+        .expect(1)
+        .create_async()
+        .await;
+
+    let outcome = run(
+        &server,
+        &[
+            "lpcli",
+            "bug",
+            "mark-duplicate",
+            "-b",
+            "42",
+            "--duplicate-of",
+            "43",
+        ],
+    )
+    .await
+    .unwrap();
+    let plain = render(&outcome, OutputMode::Plain, false);
+    assert!(
+        plain.contains("OK: Marked bug #42 as a duplicate of bug #100."),
+        "{plain}"
+    );
+    assert!(
+        plain.contains("Duplicate of: https://bugs.launchpad.net/bugs/100\n"),
+        "{plain}"
+    );
+    assert!(
+        plain.contains("Launchpad resolved bug #43 to canonical master bug #100."),
+        "{plain}"
+    );
+    patch_chain.assert_async().await;
+
+    let mut bad_server = isolated_mock_server().await;
+    let bad_base = bad_server.url();
+    let missing_link = bug_json(&bad_base, &[]);
+    let patch_missing = bad_server
+        .mock("PATCH", "/bugs/42")
+        .with_header("content-type", "application/json")
+        .with_body(missing_link.to_string())
+        .expect(1)
+        .create_async()
+        .await;
+
+    let error = run(
+        &bad_server,
+        &[
+            "lpcli",
+            "bug",
+            "mark-duplicate",
+            "-b",
+            "42",
+            "--duplicate-of",
+            "43",
+        ],
+    )
+    .await
+    .expect_err("missing duplicate_of_link in 200 response must be partial");
+    assert!(matches!(error, LpError::Partial(_)), "{error:?}");
+    assert_eq!(error.exit_code(), 7, "{error}");
+    patch_missing.assert_async().await;
+}
+
+#[tokio::test]
+async fn mark_and_unmark_duplicate_error_classification() {
+    let cases: [(&[&str], u16, &str, ErrorKind, i32); 9] = [
+        (
+            &[
+                "lpcli",
+                "bug",
+                "mark-duplicate",
+                "-b",
+                "42",
+                "--duplicate-of",
+                "43",
+            ],
+            401,
+            "(<Bug at 0x1>, 'duplicate_of', 'launchpad.Edit')",
+            ErrorKind::PermissionDenied,
+            5,
+        ),
+        (
+            &["lpcli", "bug", "unmark-duplicate", "-b", "42"],
+            401,
+            "Unauthorized: missing permission",
+            ErrorKind::PermissionDenied,
+            5,
+        ),
+        (
+            &[
+                "lpcli",
+                "bug",
+                "mark-duplicate",
+                "-b",
+                "42",
+                "--duplicate-of",
+                "43",
+            ],
+            401,
+            "Expired token (abc)",
+            ErrorKind::NotAuthenticated,
+            3,
+        ),
+        (
+            &["lpcli", "bug", "unmark-duplicate", "-b", "42"],
+            401,
+            "Unknown access token (abc).",
+            ErrorKind::NotAuthenticated,
+            3,
+        ),
+        (
+            &[
+                "lpcli",
+                "bug",
+                "mark-duplicate",
+                "-b",
+                "42",
+                "--duplicate-of",
+                "43",
+            ],
+            403,
+            "Forbidden",
+            ErrorKind::PermissionDenied,
+            5,
+        ),
+        (
+            &["lpcli", "bug", "unmark-duplicate", "-b", "42"],
+            404,
+            "Object not found",
+            ErrorKind::NotFound,
+            4,
+        ),
+        (
+            &[
+                "lpcli",
+                "bug",
+                "mark-duplicate",
+                "-b",
+                "42",
+                "--duplicate-of",
+                "43",
+            ],
+            400,
+            "duplicate_of: Bug #43 does not exist or is private",
+            ErrorKind::General,
+            1,
+        ),
+        (
+            &[
+                "lpcli",
+                "bug",
+                "mark-duplicate",
+                "-b",
+                "42",
+                "--duplicate-of",
+                "43",
+            ],
+            200,
+            "not json",
+            ErrorKind::Partial,
+            7,
+        ),
+        (
+            &["lpcli", "bug", "unmark-duplicate", "-b", "42"],
+            200,
+            "not json",
+            ErrorKind::Partial,
+            7,
+        ),
+    ];
+
+    for (args, status, body, expected_kind, expected_exit) in cases {
+        let mut server = isolated_mock_server().await;
+        let patch = server
+            .mock("PATCH", "/bugs/42")
+            .with_status(usize::from(status))
+            .with_body(body)
+            .expect(1)
+            .create_async()
+            .await;
+        let error = run(&server, args).await.unwrap_err();
+        assert_eq!(
+            error.kind(),
+            expected_kind,
+            "{args:?} ({status} {body}): {error}"
+        );
+        assert_eq!(
+            error.exit_code(),
+            expected_exit,
+            "{args:?} ({status} {body}): {error}"
+        );
+        patch.assert_async().await;
+    }
+}
+
+#[test]
+fn mark_and_unmark_duplicate_reject_public_flag() {
+    for args in [
+        &[
+            "lpcli",
+            "--public",
+            "bug",
+            "mark-duplicate",
+            "-b",
+            "42",
+            "--duplicate-of",
+            "43",
+        ][..],
+        &["lpcli", "--public", "bug", "unmark-duplicate", "-b", "42"][..],
+    ] {
+        let cli = Cli::try_parse_from(args).unwrap();
+        let error =
+            validate_cli(&cli).expect_err("--public must be rejected on duplicate mutations");
+        assert_eq!(error.exit_code(), 2, "{args:?}: {error}");
+    }
+}
+
+#[test]
+fn bug_id_from_api_link_requires_valid_bugs_path() {
+    assert_eq!(
+        commands::bug::bug_id_from_api_link("https://api.launchpad.net/devel/bugs/43"),
+        Some(43)
+    );
+    assert_eq!(
+        commands::bug::bug_id_from_api_link("http://127.0.0.1:8080/bugs/100/"),
+        Some(100)
+    );
+    for invalid in [
+        "https://api.launchpad.net/devel/bugs/0",
+        "https://api.launchpad.net/devel/~alice/123",
+        "https://api.launchpad.net/devel/ubuntu/+source/curl/+bug/42",
+        "ftp://example.com/bugs/42",
+        "not-a-url/bugs/42",
+    ] {
+        assert_eq!(
+            commands::bug::bug_id_from_api_link(invalid),
+            None,
+            "{invalid}"
+        );
+    }
 }
 
 #[tokio::test]

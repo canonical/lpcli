@@ -765,6 +765,21 @@ enum BugCommand {
         #[arg(long)]
         description_file: Option<String>,
     },
+    /// Mark a bug as a duplicate of another bug.
+    MarkDuplicate {
+        /// The Launchpad bug number to mark as a duplicate.
+        #[arg(short, long)]
+        bug_id: u64,
+        /// The master bug number that this bug duplicates.
+        #[arg(long)]
+        duplicate_of: u64,
+    },
+    /// Remove a duplicate marker from a bug.
+    UnmarkDuplicate {
+        /// The Launchpad bug number to unmark as a duplicate.
+        #[arg(short, long)]
+        bug_id: u64,
+    },
     /// Change the status of a bug task.
     #[command(
         group(ArgGroup::new("target_spec")
@@ -2515,6 +2530,12 @@ fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
                 many_series,
                 ..
             } => validate_bug_series(target, series.as_deref(), many_series.as_deref()),
+            BugCommand::MarkDuplicate {
+                bug_id,
+                duplicate_of,
+            } if bug_id == duplicate_of => Err(format!(
+                "a bug cannot be marked as a duplicate of itself (bug #{bug_id})"
+            )),
             BugCommand::LinkRemote { target, series, .. }
             | BugCommand::UnlinkRemote { target, series, .. } => {
                 validate_series_for_target(target.as_deref().unwrap_or(""), series.as_deref())
