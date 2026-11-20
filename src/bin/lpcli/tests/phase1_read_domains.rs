@@ -581,6 +581,103 @@ async fn package_lists_print_launchpad_collections() {
     }
 }
 
+#[tokio::test]
+async fn package_search_and_ppa_sources_show_normalized_maintainer() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let with_maint = |id: u64, name: &str, version: &str, maint: Option<&str>| {
+        let mut entry = rebase(source_json(name, version, id), &base);
+        entry["package_maintainer_link"] =
+            maint.map_or(Value::Null, |m| Value::String(format!("{base}/~{m}")));
+        entry
+    };
+
+    let search_body = json!({
+        "total_size": 2,
+        "start": 0,
+        "entries": [
+            with_maint(10, "unbound", "1.19.2-1ubuntu3.12", Some("ubuntu-devel-discuss-lists")),
+            with_maint(11, "unmaintained-pkg", "1.0-1", None),
+        ],
+    });
+    let ppa_body = json!({
+        "total_size": 2,
+        "start": 0,
+        "entries": [
+            with_maint(20, "firefox", "160.0-1~mt1", Some("ubuntu-mozillateam")),
+            with_maint(21, "helper-pkg", "0.1-1~mt1", None),
+        ],
+    });
+
+    let search_mock = mock_get(
+        &mut server,
+        "/ubuntu/+archive/primary",
+        Matcher::AllOf(vec![
+            op("getPublishedSources"),
+            Matcher::UrlEncoded("distro_series".into(), format!("{base}/ubuntu/noble")),
+        ]),
+        &search_body,
+    )
+    .await;
+    let ppa_mock = mock_get(
+        &mut server,
+        "/~mozillateam/+archive/ubuntu/ppa",
+        op("getPublishedSources"),
+        &ppa_body,
+    )
+    .await;
+
+    for (args, expected_raw, expected_maint, pkg_with_maint) in [
+        (
+            &["package", "search", "-s", "noble", "-n", "unbound"][..],
+            &search_body,
+            "ubuntu-devel-discuss-lists",
+            "unbound",
+        ),
+        (
+            &["package", "ppa-sources", "-o", "mozillateam", "-p", "ppa"][..],
+            &ppa_body,
+            "ubuntu-mozillateam",
+            "firefox",
+        ),
+    ] {
+        let report = run(&server, args).await;
+        assert_eq!(&report.json, expected_raw);
+        assert_list(&report);
+
+        let rich = Output::fixed(OutputMode::Rich, false, 120).render(&report);
+        assert!(rich.contains("Maintainer"), "{rich}");
+        assert!(rich.contains(expected_maint), "{rich}");
+        assert!(rich.contains("none"), "{rich}");
+        assert!(!rich.contains(&format!("~{expected_maint}")), "{rich}");
+        assert!(!rich.contains(&base), "{rich}");
+
+        let plain = render(&report, OutputMode::Plain);
+        assert!(
+            plain.contains(&format!("Maintainer: {expected_maint}\n")),
+            "{plain}"
+        );
+        assert!(plain.contains("Maintainer: none\n"), "{plain}");
+        assert!(!plain.contains(&format!("~{expected_maint}")), "{plain}");
+
+        let tsv = render(&report, OutputMode::Tsv);
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert_eq!(
+            lines[0],
+            "source_package_name\tsource_package_version\tcomponent_name\tpocket\tstatus\tmaintainer"
+        );
+        assert!(
+            lines[1].starts_with(pkg_with_maint)
+                && lines[1].ends_with(&format!("\t{expected_maint}")),
+            "{tsv}"
+        );
+        assert!(lines[2].ends_with('\t'), "{tsv}");
+    }
+
+    search_mock.assert_async().await;
+    ppa_mock.assert_async().await;
+}
+
 // ---------------------------------------------------------------------------
 // package download
 // ---------------------------------------------------------------------------
@@ -1356,6 +1453,90 @@ async fn package_changelog_errors_and_nonstandard_fallback() {
     weird_mock.assert_async().await;
     weird_url_mock.assert_async().await;
     weird_text_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn package_changelog_ppa_surfaces_clear_error_when_changelog_url_requires_auth() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let client = mock_read_client(&server, false);
+    let mut ppa_pub = rebase(source_json("privpkg", "1.2-1~ppa1", 77), &base);
+    ppa_pub["archive_link"] = Value::String(format!("{base}/~secretteam/+archive/ubuntu/private"));
+    ppa_pub["self_link"] = Value::String(format!(
+        "{base}/~secretteam/+archive/ubuntu/private/+sourcepub/77"
+    ));
+
+    let ppa_search = mock_get(
+        &mut server,
+        "/~secretteam/+archive/ubuntu/private",
+        Matcher::AllOf(vec![
+            op("getPublishedSources"),
+            Matcher::UrlEncoded("source_name".into(), "privpkg".into()),
+        ]),
+        &json!({ "total_size": 1, "start": 0, "entries": [ppa_pub] }),
+    )
+    .await;
+    let ppa_url = mock_get(
+        &mut server,
+        "/~secretteam/+archive/ubuntu/private/+sourcepub/77",
+        op("changelogUrl"),
+        &Value::String(format!("{base}/files/private-cl")),
+    )
+    .await;
+    let not_found_cl = server
+        .mock("GET", "/files/private-cl")
+        .with_status(404)
+        .create_async()
+        .await;
+
+    let Command::Package(cmd_404) = parsed(&[
+        "package",
+        "changelog",
+        "--name",
+        "privpkg",
+        "--ppa",
+        "secretteam/private",
+    ]) else {
+        unreachable!()
+    };
+    let err_404 = package_report(&client, cmd_404).await.unwrap_err();
+    assert!(matches!(err_404, LpError::LocalNotFound(_)), "{err_404:?}");
+    assert_eq!(err_404.exit_code(), 4);
+    let msg_404 = err_404.to_string();
+    assert!(msg_404.contains("private PPAs"), "{msg_404}");
+    assert!(msg_404.contains("~secretteam/private"), "{msg_404}");
+
+    let forbidden_cl = server
+        .mock("GET", "/files/private-cl")
+        .with_status(403)
+        .with_body("Authentication required")
+        .create_async()
+        .await;
+    let Command::Package(cmd_403) = parsed(&[
+        "package",
+        "changelog",
+        "--name",
+        "privpkg",
+        "--ppa",
+        "secretteam/private",
+    ]) else {
+        unreachable!()
+    };
+    let err_403 = package_report(&client, cmd_403).await.unwrap_err();
+    assert!(
+        matches!(err_403, LpError::Api { status: 403, .. }),
+        "{err_403:?}"
+    );
+    assert_eq!(err_403.exit_code(), 5);
+    let msg_403 = err_403.to_string();
+    assert!(msg_403.contains("requires authentication"), "{msg_403}");
+    assert!(msg_403.contains("private PPAs"), "{msg_403}");
+    assert!(msg_403.contains("~secretteam/private"), "{msg_403}");
+
+    ppa_search.expect_at_least(2).assert_async().await;
+    ppa_url.expect_at_least(2).assert_async().await;
+    not_found_cl.assert_async().await;
+    forbidden_cl.assert_async().await;
 }
 
 // ---------------------------------------------------------------------------

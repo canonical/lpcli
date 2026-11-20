@@ -383,13 +383,16 @@ fn progress_style_bytes() -> ProgressStyle {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Strip query strings, fragments, and URL passwords and redact any credentials for display.
-fn redact_url_for_display(url: &str) -> String {
+/// Strip query strings, fragments, and URL userinfo and redact any credentials for display.
+pub(crate) fn redact_url_for_display(url: &str) -> String {
     if let Ok(mut parsed) = url::Url::parse(url) {
         parsed.set_query(None);
         parsed.set_fragment(None);
+        if !parsed.username().is_empty() {
+            let _ = parsed.set_username("");
+        }
         if parsed.password().is_some() {
-            let _ = parsed.set_password(Some("[redacted]"));
+            let _ = parsed.set_password(None);
         }
         return crate::error::redact_secrets(&sanitize_terminal_fragment(parsed.as_str()));
     }
