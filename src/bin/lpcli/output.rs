@@ -1378,7 +1378,7 @@ fn field_value_style(label: &str, value: &str) -> Option<AnsiStyle> {
             status_style(value)
         }
         "Importance" | "Priority" => importance_style(value),
-        "Tags" | "Author" | "Person" | "Subscribed By" | "Assignee" | "Member" => {
+        "Tags" | "Author" | "Person" | "Subscribed By" | "Assignee" | "Member" | "Maintainer" => {
             (!matches!(value, "none" | "—" | "unknown" | "(none)")).then_some(NAME)
         }
         _ => None,
