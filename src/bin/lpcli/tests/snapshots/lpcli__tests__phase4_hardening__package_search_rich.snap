@@ -4,6 +4,6 @@ expression: rendered
 ---
 1 source publication found.
 
- Package ┆ Version ┆ Component ┆ Pocket  ┆ Status    
-─────────┼─────────┼───────────┼─────────┼───────────
- hello   ┆ 2.10-3  ┆ main      ┆ Release ┆ Published
+ Package ┆ Version ┆ Component ┆ Pocket  ┆ Status    ┆ Maintainer        
+─────────┼─────────┼───────────┼─────────┼───────────┼───────────────────
+ hello   ┆ 2.10-3  ┆ main      ┆ Release ┆ Published ┆ ubuntu-developers

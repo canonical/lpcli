@@ -182,6 +182,7 @@ fn source_columns() -> Vec<Column> {
         column("Component", "component_name"),
         column("Pocket", "pocket"),
         column("Status", "status"),
+        column("Maintainer", "maintainer"),
     ]
 }
 
@@ -197,6 +198,7 @@ fn sources_report(page: &Raw<Collection<packages::SourcePackagePublishingHistory
                 p.component_name.clone(),
                 p.pocket.clone(),
                 p.status.clone(),
+                link_name(p.package_maintainer_link.as_deref()),
             ]
         })
         .collect();
@@ -1110,7 +1112,36 @@ async fn package_changelog(
             ))
         })?;
 
-    let raw_text = packages::fetch_source_changelog(client, &changelog_url).await?;
+    let raw_text = match packages::fetch_source_changelog(client, &changelog_url).await {
+        Ok(text) => text,
+        Err(err) => {
+            if let Some(ppa) = &request.ppa {
+                let pkg_version = publication
+                    .source_package_version
+                    .as_deref()
+                    .unwrap_or("unknown version");
+                let ppa_label = ppa.label();
+                return Err(match err {
+                    LpError::NotFound(_) => LpError::LocalNotFound(format!(
+                        "Changelog for '{}' ({pkg_version}) in {ppa_label} could not be fetched without authentication; changelogs in private PPAs are not accessible via public librarian URLs.",
+                        request.name,
+                    )),
+                    LpError::Unauthorized(_)
+                    | LpError::Api {
+                        status: 401 | 403, ..
+                    } => LpError::Api {
+                        status: 403,
+                        message: format!(
+                            "Changelog for '{}' ({pkg_version}) in {ppa_label} requires authentication; changelogs in private PPAs cannot be fetched via public librarian URLs.",
+                            request.name,
+                        ),
+                    },
+                    other => other,
+                });
+            }
+            return Err(err);
+        }
+    };
     Ok(package_changelog_report(
         request,
         canonical_series_name,

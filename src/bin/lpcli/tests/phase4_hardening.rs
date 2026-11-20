@@ -688,6 +688,7 @@ fn source_json(name: &str, version: &str, id: u64) -> Value {
             "status": "Published",
             "pocket": "Release",
             "date_published": "2024-04-01T00:00:00+00:00",
+            "package_maintainer_link": format!("{LP}/~ubuntu-developers"),
         }),
     )
 }

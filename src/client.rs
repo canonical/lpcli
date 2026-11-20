@@ -35,11 +35,11 @@ use reqwest::{
 };
 use serde::de::DeserializeOwned;
 
-fn api_http_client(hardware: bool, base_url: &str) -> reqwest::Client {
+fn api_http_client(base_url: &str) -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(concat!("lpcli/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(30))
-        .redirect(redirect_policy(hardware.then_some(base_url)))
+        .redirect(redirect_policy(Some(base_url)))
         .build()
         .expect("Failed to build HTTP client")
 }
@@ -78,6 +78,9 @@ pub const API_BASE: &str = "https://api.launchpad.net/devel";
 
 /// Maximum size in bytes read by [`LaunchpadClient::get_public_text_url()`].
 const MAX_PUBLIC_TEXT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Total request and body timeout enforced by [`LaunchpadClient::get_public_text_url()`].
+const PUBLIC_TEXT_TIMEOUT: Duration = Duration::from_secs(120);
 
 // Private response metadata; never infer a rejected generation from the
 // session's current credentials, which may already have changed.
@@ -137,7 +140,7 @@ impl LaunchpadClient {
     /// Pass `Some(creds)` for authenticated calls; `None` for anonymous access.
     pub fn new(credentials: Option<Credentials>) -> Self {
         Self {
-            http: api_http_client(false, API_BASE),
+            http: api_http_client(API_BASE),
             credentials,
             hardware: None,
             base_url: API_BASE.to_string(),
@@ -157,7 +160,7 @@ impl LaunchpadClient {
     /// carry the original authorization, so a 401 could not identify the token.
     pub fn with_hardware_token(session: Arc<HardwareTokenSession>) -> Self {
         Self {
-            http: api_http_client(true, API_BASE),
+            http: api_http_client(API_BASE),
             hardware: Some(HardwareSession::Real(session)),
             ..Self::new(None)
         }
@@ -171,9 +174,7 @@ impl LaunchpadClient {
     /// Override the base URL (used in integration tests with a mock server).
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
-        if self.hardware.is_some() {
-            self.http = api_http_client(true, &self.base_url);
-        }
+        self.http = api_http_client(&self.base_url);
         self
     }
 
@@ -204,6 +205,17 @@ impl LaunchpadClient {
             self.base_url.trim_end_matches('/'),
             path.trim_start_matches('/')
         )
+    }
+
+    /// Verify that `url` shares the configured Launchpad API origin.
+    pub(crate) fn ensure_same_api_origin(&self, url: &str, context: &str) -> Result<()> {
+        if !same_origin(url, &self.base_url) {
+            return Err(LpError::Other(format!(
+                "Refusing to follow cross-origin Launchpad {context}: {}",
+                crate::download::redact_url_for_display(url)
+            )));
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -607,8 +619,9 @@ impl LaunchpadClient {
         mut req: reqwest::RequestBuilder,
         url: &str,
     ) -> Result<(reqwest::RequestBuilder, Option<Credentials>)> {
+        let same_api_origin = same_origin(url, &self.base_url);
         let hardware_credentials = if let Some(session) = &self.hardware {
-            if same_origin(url, &self.base_url) {
+            if same_api_origin {
                 Some(session.access_credentials().await?)
             } else {
                 None
@@ -618,8 +631,10 @@ impl LaunchpadClient {
         };
         let signing_credentials = if self.hardware.is_some() {
             hardware_credentials.as_ref()
-        } else {
+        } else if same_api_origin {
             self.credentials.as_ref()
+        } else {
+            None
         };
         if let Some(creds) = signing_credentials {
             req = req.header("Authorization", auth::build_auth_header(creds)?);
@@ -979,9 +994,7 @@ impl LaunchpadClient {
             .user_agent(concat!("lpcli/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(30))
             .read_timeout(std::time::Duration::from_secs(300))
-            .redirect(redirect_policy(
-                self.hardware.is_some().then_some(&self.base_url),
-            ))
+            .redirect(redirect_policy(Some(&self.base_url)))
             .build()
             .map_err(|e| LpError::Other(format!("Failed to build download client: {e}")))?;
 
@@ -1076,9 +1089,7 @@ impl LaunchpadClient {
             .user_agent(concat!("lpcli/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(30))
             .read_timeout(std::time::Duration::from_secs(300))
-            .redirect(redirect_policy(
-                self.hardware.is_some().then_some(&self.base_url),
-            ))
+            .redirect(redirect_policy(Some(&self.base_url)))
             .build()
             .map_err(|e| LpError::Other(format!("Failed to build download client: {e}")))?;
 
@@ -1174,22 +1185,34 @@ impl LaunchpadClient {
     /// # Errors
     ///
     /// Returns [`LpError::Url`] on malformed URLs, [`LpError::NotFound`] on HTTP
-    /// 404, [`LpError::RateLimit`] on HTTP 429, [`LpError::Api`] on other
-    /// non-success status codes, or [`LpError::Other`] when the URL/redirect
-    /// target is untrusted or the response exceeds the size limit.
+    /// 404, [`LpError::RateLimit`] on HTTP 429, [`LpError::Timeout`] on request or
+    /// stream timeout, [`LpError::Api`] on other non-success status codes, or
+    /// [`LpError::Other`] when the URL/redirect target is untrusted or the
+    /// response exceeds the size limit.
     pub async fn get_public_text_url(&self, url: &str) -> Result<String> {
         self.get_public_text_url_with_limit(url, MAX_PUBLIC_TEXT_BYTES)
             .await
     }
 
     async fn get_public_text_url_with_limit(&self, url: &str, max_bytes: usize) -> Result<String> {
+        self.get_public_text_url_with_options(url, max_bytes, PUBLIC_TEXT_TIMEOUT)
+            .await
+    }
+
+    async fn get_public_text_url_with_options(
+        &self,
+        url: &str,
+        max_bytes: usize,
+        timeout: Duration,
+    ) -> Result<String> {
         let parsed = url::Url::parse(url)?;
         if !is_trusted_public_text_url(&parsed, &self.base_url) {
             return Err(LpError::Other(format!(
-                "Refusing to fetch untrusted public text URL: {url}"
+                "Refusing to fetch untrusted public text URL: {}",
+                crate::download::redact_url_for_display(url)
             )));
         }
-        let http = public_text_http_client(&self.base_url)?;
+        let http = public_text_http_client(&self.base_url, timeout)?;
         let req = http.get(parsed);
         let resp = self.send_with_retry(req).await?;
         let status = resp.status();
@@ -1221,18 +1244,28 @@ impl LaunchpadClient {
             )));
         }
 
-        let mut buf = Vec::new();
-        let mut stream = resp.bytes_stream();
-        use futures_util::StreamExt;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            if buf.len().saturating_add(chunk.len()) > max_bytes {
-                return Err(LpError::Other(format!(
-                    "Public text response exceeds maximum size ({max_bytes} bytes)."
-                )));
+        let buf = tokio::time::timeout(timeout, async {
+            let mut buf = Vec::new();
+            let mut stream = resp.bytes_stream();
+            use futures_util::StreamExt;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                if buf.len().saturating_add(chunk.len()) > max_bytes {
+                    return Err(LpError::Other(format!(
+                        "Public text response exceeds maximum size ({max_bytes} bytes)."
+                    )));
+                }
+                buf.extend_from_slice(&chunk);
             }
-            buf.extend_from_slice(&chunk);
-        }
+            Ok(buf)
+        })
+        .await
+        .map_err(|_| {
+            LpError::Timeout(format!(
+                "Timed out reading public text from {}",
+                crate::download::redact_url_for_display(url)
+            ))
+        })??;
 
         Ok(match String::from_utf8(buf) {
             Ok(text) => text,
@@ -1418,7 +1451,7 @@ fn is_trusted_public_text_url(url: &url::Url, base_url: &str) -> bool {
         .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
 }
 
-fn public_text_http_client(base_url: &str) -> Result<reqwest::Client> {
+fn public_text_http_client(base_url: &str, timeout: Duration) -> Result<reqwest::Client> {
     let trusted_base = base_url.to_string();
     let policy = reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() >= 10 {
@@ -1433,6 +1466,7 @@ fn public_text_http_client(base_url: &str) -> Result<reqwest::Client> {
         .user_agent(concat!("lpcli/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(30))
         .read_timeout(Duration::from_secs(60))
+        .timeout(timeout)
         .redirect(policy)
         .build()
         .map_err(|e| LpError::Other(format!("Failed to build HTTP client: {e}")))
@@ -1507,7 +1541,10 @@ impl<T: DeserializeOwned + std::fmt::Debug> Collection<T> {
             let page: Collection<T> = client.get_url(&url).await?;
             results.extend(page.entries);
             match page.next_collection_link {
-                Some(next) => url = next,
+                Some(next) => {
+                    client.ensure_same_api_origin(&next, "next_collection_link")?;
+                    url = next;
+                }
                 None => break,
             }
         }
@@ -1535,6 +1572,7 @@ impl<T: DeserializeOwned + std::fmt::Debug> Collection<T> {
         let mut raw_entries = first.value.entries;
         let mut next = first.value.next_collection_link;
         while let Some(url) = next {
+            client.ensure_same_api_origin(&url, "next_collection_link")?;
             let page: Collection<serde_json::Value> = client.get_url(&url).await?;
             raw_entries.extend(page.entries);
             next = page.next_collection_link;
@@ -1620,7 +1658,7 @@ mod tests {
     fn test_hardware_client(base: &str) -> (LaunchpadClient, Arc<TestHardwareSession>) {
         let session = Arc::new(TestHardwareSession::default());
         let mut client = LaunchpadClient::new(None).with_base_url(base);
-        client.http = api_http_client(true, base);
+        client.http = api_http_client(base);
         client.hardware = Some(HardwareSession::Test(session.clone()));
         (client, session)
     }
@@ -2484,5 +2522,133 @@ mod tests {
             .unwrap_err();
         assert!(matches!(not_found, LpError::NotFound(_)), "{not_found:?}");
         missing_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn classic_oauth_credentials_are_not_sent_to_cross_origin_urls() {
+        let api = mockito::Server::new_async().await;
+        let mut foreign = mockito::Server::new_async().await;
+        let foreign_mock = foreign
+            .mock("GET", "/secret-check")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_status(200)
+            .with_body(r#"{"ok":true}"#)
+            .create_async()
+            .await;
+
+        let client = LaunchpadClient::new(Some(Credentials::new(
+            "lpcli",
+            "classic-token",
+            "classic-secret",
+        )))
+        .with_base_url(api.url());
+
+        let value: serde_json::Value = client
+            .get_url(&format!("{}/secret-check", foreign.url()))
+            .await
+            .unwrap();
+        assert_eq!(value["ok"], true);
+        foreign_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn collection_fetch_all_and_fetch_all_raw_reject_cross_origin_next_link() {
+        let mut api = mockito::Server::new_async().await;
+        let mut foreign = mockito::Server::new_async().await;
+        let foreign_mock = foreign
+            .mock("GET", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let body = serde_json::json!({
+            "start": 0,
+            "total_size": 2,
+            "entries": [{"name": "item-1"}],
+            "next_collection_link": format!("{}/steal?oauth_token=leak", foreign.url()),
+        })
+        .to_string();
+        let page1_mock = api
+            .mock("GET", "/items")
+            .with_status(200)
+            .with_body(body)
+            .expect(2)
+            .create_async()
+            .await;
+
+        let client = LaunchpadClient::new(Some(Credentials::new("lpcli", "tok", "supersecret")))
+            .with_base_url(api.url());
+
+        let first_url = client.url("/items");
+        let err = Collection::<serde_json::Value>::fetch_all(&client, &first_url)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cross-origin"), "{err}");
+        assert!(!err.contains("oauth_token=leak"), "{err}");
+        assert!(!err.contains("supersecret"), "{err}");
+
+        let raw_err = Collection::<serde_json::Value>::fetch_all_raw(&client, &first_url)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(raw_err.contains("cross-origin"), "{raw_err}");
+        assert!(!raw_err.contains("oauth_token=leak"), "{raw_err}");
+        assert!(!raw_err.contains("supersecret"), "{raw_err}");
+
+        page1_mock.assert_async().await;
+        foreign_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn get_public_text_url_redacts_query_fragment_and_userinfo_in_error() {
+        let client = LaunchpadClient::new(None);
+        let err = client
+            .get_public_text_url(
+                "https://user:pwsecret@example.invalid/pub/changelog?token=toksecret#frag",
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Refusing to fetch untrusted public text URL"),
+            "{err}"
+        );
+        assert!(!err.contains("pwsecret"), "{err}");
+        assert!(!err.contains("toksecret"), "{err}");
+        assert!(!err.contains("frag"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn get_public_text_url_times_out_on_stalled_stream() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nhello")
+                .await;
+            let _ = socket.flush().await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let client = LaunchpadClient::new(None).with_base_url(format!("http://{addr}"));
+        let err = client
+            .get_public_text_url_with_options(
+                &format!("http://{addr}/pub/changelog?token=s3cr3t"),
+                1024,
+                Duration::from_millis(50),
+            )
+            .await
+            .unwrap_err();
+        match &err {
+            LpError::Timeout(msg) => assert!(!msg.contains("s3cr3t"), "{msg}"),
+            other => panic!("expected LpError::Timeout, got {other:?}"),
+        }
+        server_task.abort();
     }
 }

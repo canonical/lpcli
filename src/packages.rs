@@ -78,6 +78,9 @@ pub struct SourcePackagePublishingHistory {
     pub archive_link: Option<String>,
     /// Series API link.
     pub distro_series_link: Option<String>,
+    /// API link to the package maintainer (e.g.
+    /// `"https://api.launchpad.net/devel/~ubuntu-devel-discuss-lists"`).
+    pub package_maintainer_link: Option<String>,
 }
 
 /// A binary package publication record.
@@ -410,6 +413,7 @@ pub async fn get_source_file_urls(
     client: &LaunchpadClient,
     pub_self_link: &str,
 ) -> Result<Vec<String>> {
+    client.ensure_same_api_origin(pub_self_link, "publication self_link")?;
     let url = format!("{pub_self_link}?ws.op=sourceFileUrls");
     client.get_url_string_list(&url).await
 }
@@ -423,6 +427,7 @@ pub async fn get_source_changelog_url(
     client: &LaunchpadClient,
     pub_self_link: &str,
 ) -> Result<Option<String>> {
+    client.ensure_same_api_origin(pub_self_link, "publication self_link")?;
     let url = format!("{pub_self_link}?ws.op=changelogUrl");
     client.get_url(&url).await
 }
@@ -536,6 +541,7 @@ fn parse_debian_changelog_stanzas(
 ) -> Vec<(ChangelogEntry, std::ops::Range<usize>)> {
     let mut results = Vec::new();
     let mut current: Option<OpenStanza> = None;
+    let mut in_emacs_footer = false;
     let mut offset = 0usize;
 
     for raw_line in normalized.split_inclusive('\n') {
@@ -545,13 +551,24 @@ fn parse_debian_changelog_stanzas(
         let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
         let content_end = line_start + line.len();
 
-        if current.is_none()
-            && line
-                .trim_start()
-                .to_ascii_lowercase()
-                .starts_with("local variables:")
+        if in_emacs_footer {
+            if line.trim().eq_ignore_ascii_case("end:") {
+                in_emacs_footer = false;
+            }
+            continue;
+        }
+
+        if line
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("local variables:")
         {
-            break;
+            if let Some(prev) = current.take() {
+                let end = prev.last_non_empty_end;
+                results.push(finish_open_stanza(prev, end, None));
+            }
+            in_emacs_footer = true;
+            continue;
         }
 
         if let Some(header) = parse_changelog_header(line) {
@@ -789,6 +806,27 @@ mod tests {
         let pub_history: SourcePackagePublishingHistory = serde_json::from_str(json).unwrap();
         assert_eq!(pub_history.source_package_name.as_deref(), Some("linux"));
         assert_eq!(pub_history.pocket.as_deref(), Some("Release"));
+        assert_eq!(pub_history.package_maintainer_link, None);
+    }
+
+    #[test]
+    fn source_publication_deserialise_with_package_maintainer_link() {
+        let with_maintainer = r#"{
+            "source_package_name": "unbound",
+            "package_maintainer_link": "https://api.launchpad.net/devel/~ubuntu-devel-discuss-lists"
+        }"#;
+        let parsed: SourcePackagePublishingHistory = serde_json::from_str(with_maintainer).unwrap();
+        assert_eq!(
+            parsed.package_maintainer_link.as_deref(),
+            Some("https://api.launchpad.net/devel/~ubuntu-devel-discuss-lists")
+        );
+
+        let with_null = r#"{
+            "source_package_name": "unbound",
+            "package_maintainer_link": null
+        }"#;
+        let parsed_null: SourcePackagePublishingHistory = serde_json::from_str(with_null).unwrap();
+        assert_eq!(parsed_null.package_maintainer_link, None);
     }
 
     #[test]
@@ -1013,6 +1051,94 @@ mod tests {
         assert_eq!(
             slice_debian_changelog(unparsed, 5),
             "Plain release notes without debian stanza headers"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_source_file_urls_and_changelog_url_reject_cross_origin_self_link() {
+        let mut api = mockito::Server::new_async().await;
+        let mut foreign = mockito::Server::new_async().await;
+        let api_hit = api
+            .mock("GET", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let foreign_hit = foreign
+            .mock("GET", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let client = LaunchpadClient::new(Some(crate::auth::Credentials::new(
+            "lpcli",
+            "tok",
+            "topsecret",
+        )))
+        .with_base_url(api.url());
+        let foreign_link = format!("{}/ubuntu/+sourcepub/1", foreign.url());
+
+        let files_err = get_source_file_urls(&client, &foreign_link)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(files_err.contains("cross-origin"), "{files_err}");
+        assert!(!files_err.contains("topsecret"), "{files_err}");
+
+        let changelog_err = get_source_changelog_url(&client, &foreign_link)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(changelog_err.contains("cross-origin"), "{changelog_err}");
+        assert!(!changelog_err.contains("topsecret"), "{changelog_err}");
+
+        api_hit.assert_async().await;
+        foreign_hit.assert_async().await;
+    }
+
+    #[test]
+    fn parse_debian_changelog_handles_emacs_local_variables_on_trailerless_and_leading_blocks() {
+        let raw = concat!(
+            "Local variables:\n",
+            "coding: utf-8\n",
+            "End:\n",
+            "\n",
+            "hello (2.10-2) noble; urgency=medium\n",
+            "\n",
+            "  * Newer entry.\n",
+            "\n",
+            " -- Maint <m@ubuntu.com>  Wed, 14 Oct 2026 22:26:11 +0100\n",
+            "\n",
+            "hello (2.10-1) noble; urgency=low\n",
+            "\n",
+            "  * Initial entry without trailer.\n",
+            "\n",
+            "Local variables:\n",
+            "mode: debian-changelog\n",
+            "End:\n",
+        );
+        let entries = parse_debian_changelog(raw);
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert_eq!(entries[0].version, "2.10-2");
+        assert_eq!(entries[0].changes, "  * Newer entry.");
+        assert_eq!(entries[1].version, "2.10-1");
+        assert_eq!(entries[1].changes, "  * Initial entry without trailer.");
+
+        let stanzas = parse_debian_changelog_stanzas(raw);
+        assert_eq!(stanzas.len(), 2);
+        let second_span = &raw[stanzas[1].1.clone()];
+        assert!(second_span.contains("hello (2.10-1)"), "{second_span}");
+        assert!(!second_span.contains("Local variables:"), "{second_span}");
+        assert!(
+            !second_span.contains("mode: debian-changelog"),
+            "{second_span}"
+        );
+
+        let sliced_one = slice_debian_changelog(raw, 1);
+        assert!(sliced_one.contains("hello (2.10-2)"), "{sliced_one}");
+        assert!(!sliced_one.contains("hello (2.10-1)"), "{sliced_one}");
+        assert!(
+            !sliced_one.contains("mode: debian-changelog"),
+            "{sliced_one}"
         );
     }
 }
