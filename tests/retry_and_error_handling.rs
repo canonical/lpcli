@@ -607,3 +607,148 @@ async fn post_5xx_is_retried() {
 
     mock.assert_async().await;
 }
+
+// ---------------------------------------------------------------------------
+// Issue #55: Bounded Retry-After fail-fast behaviour
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn retry_after_exceeding_max_fails_fast_without_retrying_in_all_handlers() {
+    let mut server = Server::new_async().await;
+    let default_client = LaunchpadClient::new(None)
+        .with_base_url(server.url())
+        .with_max_retries(2)
+        .with_retry_delay_ms(1);
+
+    let future_header = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(3600));
+    for header in ["3600", future_header.as_str()] {
+        for path in ["/json", "/empty", "/location", "/pub/changelog"] {
+            let method = if path == "/pub/changelog" {
+                "GET"
+            } else {
+                "POST"
+            };
+            let mock = server
+                .mock(method, path)
+                .with_status(429)
+                .with_header("Retry-After", header)
+                .expect(1)
+                .create_async()
+                .await;
+            let err = tokio::time::timeout(Duration::from_secs(5), async {
+                if path == "/pub/changelog" {
+                    default_client
+                        .get_public_text_url(&format!("{}{path}", server.url()))
+                        .await
+                        .map(|_| ())
+                } else {
+                    retry_after_request(&default_client, path).await
+                }
+            })
+            .await
+            .expect("excessive Retry-After must fail fast without sleeping")
+            .expect_err("429 must be returned as an error");
+
+            let secs = rate_limit_seconds(err).expect("server Retry-After secs must be surfaced");
+            if header == "3600" {
+                assert_eq!(secs, 3600, "{path}");
+            } else {
+                assert!((3590..=3601).contains(&secs), "{path}: {secs}");
+            }
+            mock.assert_async().await;
+            mock.remove_async().await;
+        }
+    }
+
+    // Explicit lower limit also fails fast and preserves true retry_after_secs.
+    let short_cap_client = LaunchpadClient::new(None)
+        .with_base_url(server.url())
+        .with_max_retries(2)
+        .with_retry_delay_ms(1)
+        .with_max_retry_after(Some(Duration::from_secs(1)));
+    let mock = server
+        .mock("POST", "/json")
+        .with_status(429)
+        .with_header("Retry-After", "2")
+        .expect(1)
+        .create_async()
+        .await;
+    let err = retry_after_request(&short_cap_client, "/json")
+        .await
+        .expect_err("2s > 1s cap must fail fast");
+    assert_eq!(rate_limit_seconds(err), Some(2));
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn retry_after_within_max_retries_and_none_disables_cap() {
+    let mut server = Server::new_async().await;
+
+    // A zero-second cap still allows zero-delay retries, while failing fast on 1s.
+    let zero_cap_client = LaunchpadClient::new(None)
+        .with_base_url(server.url())
+        .with_max_retries(1)
+        .with_retry_delay_ms(1)
+        .with_max_retry_after(Some(Duration::ZERO));
+    let zero_limited = server
+        .mock("GET", "/ok-on-zero")
+        .with_status(429)
+        .with_header("Retry-After", "0")
+        .expect(1)
+        .create_async()
+        .await;
+    let zero_ok = server
+        .mock("GET", "/ok-on-zero")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"ok":true}"#)
+        .expect(1)
+        .create_async()
+        .await;
+    let body: serde_json::Value = zero_cap_client.get("/ok-on-zero").await.unwrap();
+    assert_eq!(body["ok"], true);
+    zero_limited.assert_async().await;
+    zero_ok.assert_async().await;
+
+    let fail_on_one = server
+        .mock("GET", "/reject-one")
+        .with_status(429)
+        .with_header("Retry-After", "1")
+        .expect(1)
+        .create_async()
+        .await;
+    let err = zero_cap_client
+        .get::<serde_json::Value>("/reject-one")
+        .await
+        .unwrap_err();
+    assert_eq!(rate_limit_seconds(err), Some(1));
+    fail_on_one.assert_async().await;
+
+    // Passing `None` disables the cap so the exact same 1s Retry-After is retried.
+    let unbounded_client = zero_cap_client.with_max_retry_after(None);
+    let one_limited = server
+        .mock("GET", "/ok-when-unbounded")
+        .with_status(429)
+        .with_header("Retry-After", "1")
+        .expect(1)
+        .create_async()
+        .await;
+    let one_ok = server
+        .mock("GET", "/ok-when-unbounded")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"ok":true}"#)
+        .expect(1)
+        .create_async()
+        .await;
+    let body: serde_json::Value = tokio::time::timeout(
+        Duration::from_secs(5),
+        unbounded_client.get("/ok-when-unbounded"),
+    )
+    .await
+    .expect("1s Retry-After with unbounded cap should finish quickly")
+    .unwrap();
+    assert_eq!(body["ok"], true);
+    one_limited.assert_async().await;
+    one_ok.assert_async().await;
+}

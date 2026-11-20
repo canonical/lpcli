@@ -76,6 +76,10 @@ fn redirect_policy(signing_origin: Option<&str>) -> reqwest::redirect::Policy {
 /// Base URL for the Launchpad devel API.
 pub const API_BASE: &str = "https://api.launchpad.net/devel";
 
+/// Default maximum `Retry-After` delay honoured by [`LaunchpadClient`] before
+/// giving up on automatic retries (5 minutes).
+pub const DEFAULT_MAX_RETRY_AFTER: Duration = Duration::from_mins(5);
+
 /// Maximum size in bytes read by [`LaunchpadClient::get_public_text_url()`].
 const MAX_PUBLIC_TEXT_BYTES: usize = 16 * 1024 * 1024;
 
@@ -132,6 +136,9 @@ pub struct LaunchpadClient {
     /// Initial delay between retry attempts in milliseconds.
     /// Doubles after each retry (exponential backoff).  Defaults to 1000 ms.
     initial_retry_delay_ms: u64,
+    /// Maximum `Retry-After` delay honoured on HTTP `429` responses.
+    /// `Some(DEFAULT_MAX_RETRY_AFTER)` by default; `None` disables the cap.
+    max_retry_after: Option<Duration>,
 }
 
 impl LaunchpadClient {
@@ -146,6 +153,7 @@ impl LaunchpadClient {
             base_url: API_BASE.to_string(),
             max_retries: 0,
             initial_retry_delay_ms: 1_000,
+            max_retry_after: Some(DEFAULT_MAX_RETRY_AFTER),
         }
     }
 
@@ -182,9 +190,18 @@ impl LaunchpadClient {
     /// server-error (5xx) responses.
     ///
     /// `0` (the default) disables retries. The backoff starts at
-    /// `initial_retry_delay_ms` milliseconds, doubling after each attempt.
-    /// For 429 responses, a valid `Retry-After` header (delay-seconds or
-    /// HTTP-date) overrides the backoff, including a zero delay for past dates.
+    /// `initial_retry_delay_ms` milliseconds, doubling after each attempt, and
+    /// is clamped per attempt to [`Self::with_max_retry_after()`]. For 429
+    /// responses, a valid `Retry-After` header (delay-seconds or HTTP-date)
+    /// overrides the backoff, including a zero delay for past dates.
+    ///
+    /// Note that `max_retry_after` bounds each retry attempt individually, so
+    /// the worst-case total sleep across `max_retries` attempts can be up to
+    /// `max_retries * max_retry_after` (for example, up to 10 minutes with
+    /// `max_retries = 2` and the default 5-minute [`DEFAULT_MAX_RETRY_AFTER`]),
+    /// in addition to per-request timeouts. If a `429` `Retry-After` delay
+    /// exceeds `max_retry_after`, retries stop immediately and return
+    /// [`LpError::RateLimit`] with the server's `retry_after_secs`.
     pub fn with_max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
         self
@@ -195,6 +212,24 @@ impl LaunchpadClient {
     /// Defaults to `1000` ms. The delay doubles after each failed attempt.
     pub fn with_retry_delay_ms(mut self, ms: u64) -> Self {
         self.initial_retry_delay_ms = ms;
+        self
+    }
+
+    /// Set the maximum per-attempt retry delay honoured when retrying responses.
+    ///
+    /// Defaults to `Some(`[`DEFAULT_MAX_RETRY_AFTER`]`)` (5 minutes). When a
+    /// `429` response carries a valid `Retry-After` delay larger than this
+    /// limit, retries stop immediately without sleeping and [`LpError::RateLimit`]
+    /// is returned with the server's advertised `retry_after_secs`.
+    /// Exponential backoff sleeps (for `5xx` responses and `429` responses
+    /// without a usable `Retry-After`) are clamped per attempt to this limit.
+    ///
+    /// Pass `None` to remove the limit on both backoff and `Retry-After`;
+    /// even with `None`, a `Retry-After` delay that overflows the runtime
+    /// timer stops retries immediately and returns [`LpError::RateLimit`]
+    /// rather than retrying early.
+    pub fn with_max_retry_after(mut self, max_retry_after: Option<Duration>) -> Self {
+        self.max_retry_after = max_retry_after;
         self
     }
 
@@ -686,10 +721,15 @@ impl LaunchpadClient {
     /// times with exponential backoff.
     ///
     /// For 429 responses, `Retry-After` can specify delay-seconds or an
-    /// HTTP-date. Future dates wait until that date; current/past dates do
-    /// not wait. Missing, invalid or unrepresentable hints use the current
-    /// backoff, which starts at `initial_retry_delay_ms` and doubles after
-    /// each unsuccessful attempt. 5xx responses continue to use backoff.
+    /// HTTP-date. Future dates wait until that date unless the delay exceeds
+    /// `max_retry_after` (`Some(DEFAULT_MAX_RETRY_AFTER)` by default) or
+    /// overflows the runtime timer, in which case retries stop immediately and
+    /// the final 429 response is returned so callers receive [`LpError::RateLimit`]
+    /// with the server's `retry_after_secs`. Current/past dates do not wait.
+    /// Missing, invalid or unrepresentable hints use the current backoff
+    /// (which starts at `initial_retry_delay_ms`, doubles after each
+    /// unsuccessful attempt, and is clamped per attempt to `max_retry_after`).
+    /// 5xx responses continue to use the clamped exponential backoff.
     ///
     /// Returns the final `reqwest::Response` (which may still carry a 429 or
     /// 5xx status if all retries were exhausted).  Transport-level errors
@@ -719,13 +759,14 @@ impl LaunchpadClient {
 
             if let Some(next) = saved
                 && (status.as_u16() == 429 || status.is_server_error())
-            {
-                let sleep_for = calculate_retry_delay(
+                && let Some(sleep_for) = calculate_retry_delay(
                     status,
                     resp.headers(),
                     Duration::from_millis(delay_ms),
+                    self.max_retry_after,
                     SystemTime::now(),
-                );
+                )
+            {
                 tokio::time::sleep(sleep_for).await;
                 delay_ms = delay_ms.saturating_mul(2);
                 retries_left -= 1;
@@ -1384,24 +1425,45 @@ fn parse_retry_after_header(headers: &HeaderMap, now: SystemTime) -> Option<Dura
     parse_retry_after(headers.get(RETRY_AFTER)?.to_str().ok()?, now)
 }
 
-/// Calculate the duration to wait before the next retry attempt.
+/// Calculate the duration to wait before the next retry attempt, or `None` when
+/// automatic retries should stop immediately.
 ///
 /// For `429 Too Many Requests` responses, a valid `Retry-After` header delay
-/// that can be scheduled by the Tokio timer takes precedence over `backoff`.
+/// takes precedence over `backoff` when it does not exceed `max_retry_after`
+/// and can be scheduled by the Tokio timer. If the server's `Retry-After`
+/// delay exceeds `max_retry_after` (or overflows the timer), returns `None`
+/// so [`LaunchpadClient::send_with_retry`] fails fast instead of sleeping
+/// longer than the cap or retrying earlier than the server requested.
 /// All other retryable statuses (such as `5xx` server errors), or responses
-/// without a usable `Retry-After` header, fall back to `backoff`.
+/// without a usable `Retry-After` header, fall back to `backoff` clamped to
+/// `max_retry_after` (or `None` if that overflows the timer).
 fn calculate_retry_delay(
     status: StatusCode,
     headers: &HeaderMap,
     backoff: Duration,
+    max_retry_after: Option<Duration>,
     now: SystemTime,
-) -> Duration {
+) -> Option<Duration> {
+    let capped_backoff = || {
+        let clamped = max_retry_after.map_or(backoff, |max| backoff.min(max));
+        tokio::time::Instant::now()
+            .checked_add(clamped)
+            .map(|_| clamped)
+    };
     if status == StatusCode::TOO_MANY_REQUESTS {
-        parse_retry_after_header(headers, now)
-            .filter(|delay| tokio::time::Instant::now().checked_add(*delay).is_some())
-            .unwrap_or(backoff)
+        match parse_retry_after_header(headers, now) {
+            Some(delay) => {
+                if max_retry_after.is_some_and(|max| delay > max) {
+                    return None;
+                }
+                tokio::time::Instant::now()
+                    .checked_add(delay)
+                    .map(|_| delay)
+            }
+            None => capped_backoff(),
+        }
     } else {
-        backoff
+        capped_backoff()
     }
 }
 
@@ -1761,16 +1823,49 @@ mod tests {
     }
 
     #[test]
+    fn default_max_retry_after_is_five_minutes_and_configurable() {
+        assert_eq!(DEFAULT_MAX_RETRY_AFTER, Duration::from_secs(300));
+        let default_client = LaunchpadClient::new(None);
+        assert_eq!(
+            default_client.max_retry_after,
+            Some(DEFAULT_MAX_RETRY_AFTER)
+        );
+        let custom_client = default_client
+            .clone()
+            .with_max_retry_after(Some(Duration::from_secs(30)));
+        assert_eq!(custom_client.max_retry_after, Some(Duration::from_secs(30)));
+        let unbounded_client = custom_client.with_max_retry_after(None);
+        assert_eq!(unbounded_client.max_retry_after, None);
+    }
+
+    #[test]
     fn calculate_retry_delay_uses_backoff_only_without_usable_429_advice() {
         let backoff = Duration::from_millis(100);
+        let default_cap = Some(DEFAULT_MAX_RETRY_AFTER);
         for headers in [
             HeaderMap::new(),
             retry_headers("invalid"),
             retry_headers("18446744073709551615"),
         ] {
             assert_eq!(
-                calculate_retry_delay(StatusCode::TOO_MANY_REQUESTS, &headers, backoff, date()),
-                backoff
+                calculate_retry_delay(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    &headers,
+                    backoff,
+                    default_cap,
+                    date(),
+                ),
+                Some(backoff)
+            );
+            assert_eq!(
+                calculate_retry_delay(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    &headers,
+                    backoff,
+                    Some(Duration::ZERO),
+                    date(),
+                ),
+                Some(Duration::ZERO)
             );
         }
         assert_eq!(
@@ -1778,9 +1873,10 @@ mod tests {
                 StatusCode::TOO_MANY_REQUESTS,
                 &retry_headers(HTTP_DATE),
                 backoff,
-                date()
+                default_cap,
+                date(),
             ),
-            Duration::ZERO
+            Some(Duration::ZERO)
         );
         // HTTP-date parsing does not broaden which statuses honor Retry-After.
         assert_eq!(
@@ -1788,9 +1884,164 @@ mod tests {
                 StatusCode::SERVICE_UNAVAILABLE,
                 &retry_headers("0"),
                 backoff,
-                date()
+                default_cap,
+                date(),
             ),
-            backoff
+            Some(backoff)
+        );
+    }
+
+    #[test]
+    fn calculate_retry_delay_clamps_exponential_backoff_to_max_retry_after() {
+        let large_backoff = Duration::from_secs(600);
+        assert_eq!(
+            calculate_retry_delay(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &HeaderMap::new(),
+                large_backoff,
+                Some(DEFAULT_MAX_RETRY_AFTER),
+                date(),
+            ),
+            Some(DEFAULT_MAX_RETRY_AFTER)
+        );
+        assert_eq!(
+            calculate_retry_delay(
+                StatusCode::TOO_MANY_REQUESTS,
+                &retry_headers("invalid"),
+                Duration::from_millis(100),
+                Some(Duration::from_millis(50)),
+                date(),
+            ),
+            Some(Duration::from_millis(50))
+        );
+        assert_eq!(
+            calculate_retry_delay(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &HeaderMap::new(),
+                large_backoff,
+                None,
+                date(),
+            ),
+            Some(large_backoff)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn calculate_retry_delay_fails_fast_when_unbounded_retry_after_overflows_timer() {
+        tokio::time::advance(Duration::from_secs(1_000)).await;
+        let overflow_secs = (i64::MAX as u64) - 500;
+        let delay = Duration::from_secs(overflow_secs);
+        assert!(
+            parse_retry_after(&overflow_secs.to_string(), SystemTime::UNIX_EPOCH).is_some(),
+            "delay should remain representable against UNIX_EPOCH"
+        );
+        assert!(
+            tokio::time::Instant::now().checked_add(delay).is_none(),
+            "delay should overflow tokio::time::Instant after advancing clock"
+        );
+        assert_eq!(
+            calculate_retry_delay(
+                StatusCode::TOO_MANY_REQUESTS,
+                &retry_headers(&overflow_secs.to_string()),
+                Duration::from_millis(100),
+                None,
+                SystemTime::UNIX_EPOCH,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn calculate_retry_delay_enforces_max_retry_after_bound() {
+        let backoff = Duration::from_millis(100);
+        let cap = Some(DEFAULT_MAX_RETRY_AFTER);
+
+        // Within and exactly at the 5-minute bound (integer seconds & HTTP-date).
+        assert_eq!(
+            calculate_retry_delay(
+                StatusCode::TOO_MANY_REQUESTS,
+                &retry_headers("300"),
+                backoff,
+                cap,
+                date(),
+            ),
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(
+            calculate_retry_delay(
+                StatusCode::TOO_MANY_REQUESTS,
+                &retry_headers(HTTP_DATE),
+                backoff,
+                cap,
+                date() - Duration::from_secs(300),
+            ),
+            Some(Duration::from_secs(300))
+        );
+
+        // Exceeding the cap (even by 1ns or 1s) stops retries immediately.
+        assert_eq!(
+            calculate_retry_delay(
+                StatusCode::TOO_MANY_REQUESTS,
+                &retry_headers("301"),
+                backoff,
+                cap,
+                date(),
+            ),
+            None
+        );
+        assert_eq!(
+            calculate_retry_delay(
+                StatusCode::TOO_MANY_REQUESTS,
+                &retry_headers(HTTP_DATE),
+                backoff,
+                cap,
+                date() - Duration::from_secs(300) - Duration::from_nanos(1),
+            ),
+            None
+        );
+
+        // A zero-second cap allows 0s/past Retry-After and rejects positive delays.
+        assert_eq!(
+            calculate_retry_delay(
+                StatusCode::TOO_MANY_REQUESTS,
+                &retry_headers("0"),
+                backoff,
+                Some(Duration::ZERO),
+                date(),
+            ),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            calculate_retry_delay(
+                StatusCode::TOO_MANY_REQUESTS,
+                &retry_headers("1"),
+                backoff,
+                Some(Duration::ZERO),
+                date(),
+            ),
+            None
+        );
+
+        // Disabling the cap allows long delays (integer seconds & HTTP-date).
+        assert_eq!(
+            calculate_retry_delay(
+                StatusCode::TOO_MANY_REQUESTS,
+                &retry_headers("3600"),
+                backoff,
+                None,
+                date(),
+            ),
+            Some(Duration::from_secs(3600))
+        );
+        assert_eq!(
+            calculate_retry_delay(
+                StatusCode::TOO_MANY_REQUESTS,
+                &retry_headers(HTTP_DATE),
+                backoff,
+                None,
+                date() - Duration::from_secs(3600),
+            ),
+            Some(Duration::from_secs(3600))
         );
     }
 
@@ -1798,16 +2049,23 @@ mod tests {
     async fn retry_after_sleep_preserves_server_delay() {
         // Exercise the same delay selection and timer used by send_with_retry,
         // without real socket I/O or a wall clock that moves during the test.
-        for (header, delay) in [
-            ("2", Duration::from_secs(2)),
-            (HTTP_DATE, Duration::from_millis(1250)),
+        for (header, max_retry_after, delay) in [
+            ("2", Some(DEFAULT_MAX_RETRY_AFTER), Duration::from_secs(2)),
+            (
+                HTTP_DATE,
+                Some(DEFAULT_MAX_RETRY_AFTER),
+                Duration::from_millis(1250),
+            ),
+            ("3600", None, Duration::from_secs(3600)),
         ] {
             let selected = calculate_retry_delay(
                 StatusCode::TOO_MANY_REQUESTS,
                 &retry_headers(header),
                 Duration::from_millis(1),
+                max_retry_after,
                 date() - Duration::from_millis(1250),
-            );
+            )
+            .expect("delay within bound should be selected");
             assert_eq!(selected, delay);
             let sleep = tokio::time::sleep(selected);
             tokio::pin!(sleep);
