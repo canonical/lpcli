@@ -128,7 +128,9 @@ entry read back from Launchpad afterwards. Commands whose Launchpad operation
 returns no entry print an lpcli-defined result under `lpcli`, for example
 `{"lpcli": {"deleted": true, "webhook_link": "..."}}`.
 
-Bug operations that change several tasks print
+`bug mark-duplicate` and `bug unmark-duplicate` print the updated bug entry:
+`duplicate_of_link` is the master bug's API link after marking, and `null`
+after unmarking. Bug operations that change several tasks print
 `{"bug_tasks": {...}, "lpcli": {"failures": [...]}}` (`bug add-task` may also
 include `bug_watches`). `bug delete-task` prints
 `{"lpcli": {"bug_id", "deleted_task_links", "failures"}}`. Each failure is:

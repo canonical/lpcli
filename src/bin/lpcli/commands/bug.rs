@@ -483,6 +483,16 @@ fn ok_block(message: impl Into<String>) -> Block {
     Block::Status(Level::Ok, vec![Span::Text(message.into())])
 }
 
+/// Bug number from an API link, when the link ends in a numeric ID.
+fn bug_id_from_api_link(link: &str) -> Option<u64> {
+    link.rsplit('/').next()?.parse().ok()
+}
+
+/// Web-UI URL for a bug from its API link, when the link ends in a bug number.
+fn bug_web_url_from_api_link(link: &str) -> Option<String> {
+    bug_id_from_api_link(link).map(|id| format!("https://bugs.launchpad.net/bugs/{id}"))
+}
+
 fn note_block(message: impl Into<String>) -> Block {
     Block::Note(vec![Span::Text(message.into())])
 }
@@ -562,6 +572,15 @@ fn bug_show_blocks(read: &BugReportRead) -> Vec<Block> {
     ];
     if !bug.tags.is_empty() {
         blocks.push(Block::Field("Tags", bug.tags.join(", ")));
+    }
+    if let Some(link) = &bug.duplicate_of_link {
+        blocks.push(Block::Field(
+            "Duplicate of",
+            bug_web_url_from_api_link(link).unwrap_or_else(|| link.clone()),
+        ));
+    }
+    if let Some(count) = bug.number_of_duplicates.filter(|count| *count > 0) {
+        blocks.push(Block::Field("Duplicates", format!("{count} bug(s)")));
     }
     if let Some(count) = bug.users_affected_count {
         blocks.push(Block::Field("Affects", format!("{count} user(s)")));
@@ -1232,6 +1251,39 @@ pub(crate) async fn bug_outcome(
             if let Some(link) = &updated.value.web_link {
                 blocks.push(Block::Field("URL", link.clone()));
             }
+            BugOutcome::entry(&updated, blocks)
+        }
+
+        BugCommand::MarkDuplicate {
+            bug_id,
+            duplicate_of,
+        } => {
+            let updated = bugs::mark_bug_as_duplicate_raw(client, bug_id, duplicate_of).await?;
+            // Launchpad may canonicalise a chain of duplicates, so report the
+            // master bug from its response when present.
+            let master_id = updated
+                .value
+                .duplicate_of_link
+                .as_deref()
+                .and_then(bug_id_from_api_link)
+                .unwrap_or(duplicate_of);
+            let blocks = vec![
+                ok_block(format!(
+                    "Marked bug #{bug_id} as a duplicate of bug #{master_id}."
+                )),
+                Block::Field(
+                    "Duplicate of",
+                    format!("https://bugs.launchpad.net/bugs/{master_id}"),
+                ),
+            ];
+            BugOutcome::entry(&updated, blocks)
+        }
+
+        BugCommand::UnmarkDuplicate { bug_id } => {
+            let updated = bugs::unmark_bug_as_duplicate_raw(client, bug_id).await?;
+            let blocks = vec![ok_block(format!(
+                "Removed the duplicate marker from bug #{bug_id}."
+            ))];
             BugOutcome::entry(&updated, blocks)
         }
 
@@ -2564,6 +2616,8 @@ pub(crate) fn bug_supports_json(command: &BugCommand) -> bool {
         | BugCommand::DeleteComment { .. }
         | BugCommand::Create { .. }
         | BugCommand::SetDescription { .. }
+        | BugCommand::MarkDuplicate { .. }
+        | BugCommand::UnmarkDuplicate { .. }
         | BugCommand::SetStatus { .. }
         | BugCommand::SetImportance { .. }
         | BugCommand::SetAssignee { .. }

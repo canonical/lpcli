@@ -235,11 +235,13 @@ const READS: [&str; 8] = [
     "remote-bug-trackers",
 ];
 
-const MUTATIONS: [&str; 15] = [
+const MUTATIONS: [&str; 17] = [
     "add-comment -b 42 -m hi",
     "delete-comment -b 42 -c 1",
     "create -T title -d description",
     "set-description -b 42 -d text",
+    "mark-duplicate -b 42 --duplicate-of 43",
+    "unmark-duplicate -b 42",
     "set-status -b 42 --all-targets --all-series -s confirmed",
     "set-importance -b 42 -t curl --no-series -i high",
     "set-assignee -b 42 --many-targets curl --series noble -n someone",
@@ -352,6 +354,36 @@ async fn show_json_combines_unmodified_launchpad_members() {
     for mock in mocks {
         mock.assert_async().await;
     }
+}
+
+#[tokio::test]
+async fn show_displays_duplicate_state() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let mut bug = bug_json(&base, &[]);
+    bug["duplicate_of_link"] = serde_json::json!(format!("{base}/bugs/43"));
+    bug["number_of_duplicates"] = serde_json::json!(2);
+    get(&mut server, "/bugs/42", &bug).await;
+    get(
+        &mut server,
+        "/bugs/42/bug_tasks",
+        &collection(vec![task_json(&base, None, "New")]),
+    )
+    .await;
+    get(&mut server, "/bugs/42/attachments", &collection(vec![])).await;
+
+    let outcome = run(&server, &["lpcli", "bug", "show", "-b", "42"])
+        .await
+        .unwrap();
+    let rich = render(&outcome, OutputMode::Rich, false);
+    assert!(
+        rich.contains("Duplicate of") && rich.contains("https://bugs.launchpad.net/bugs/43"),
+        "{rich}"
+    );
+    assert!(
+        rich.contains("Duplicates") && rich.contains("2 bug(s)"),
+        "{rich}"
+    );
 }
 
 #[tokio::test]
@@ -910,6 +942,99 @@ async fn tag_prints_the_updated_bug_entry() {
         format!("{base}/bugs/42\n")
     );
     patch.assert_async().await;
+}
+
+#[tokio::test]
+async fn mark_duplicate_patches_the_link_and_prints_the_updated_bug() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let mut updated = bug_json(&base, &[]);
+    updated["duplicate_of_link"] = serde_json::json!(format!("{base}/bugs/43"));
+    let patch = server
+        .mock("PATCH", "/bugs/42")
+        .match_header("content-type", "application/json")
+        .match_body(mockito::Matcher::Json(serde_json::json!({
+            "duplicate_of_link": format!("{base}/bugs/43"),
+        })))
+        .with_header("content-type", "application/json")
+        .with_body(updated.to_string())
+        .create_async()
+        .await;
+
+    let outcome = run(
+        &server,
+        &[
+            "lpcli",
+            "bug",
+            "mark-duplicate",
+            "-b",
+            "42",
+            "--duplicate-of",
+            "43",
+        ],
+    )
+    .await
+    .unwrap();
+    let rendered: serde_json::Value =
+        serde_json::from_str(&render(&outcome, OutputMode::Json, false)).unwrap();
+    assert_eq!(rendered, updated);
+    assert_eq!(
+        render(&outcome, OutputMode::Json, true),
+        format!("{base}/bugs/42\n")
+    );
+    let rich = render(&outcome, OutputMode::Rich, false);
+    assert!(
+        rich.contains("Marked bug #42 as a duplicate of bug #43."),
+        "{rich}"
+    );
+    assert!(
+        rich.contains("https://bugs.launchpad.net/bugs/43"),
+        "{rich}"
+    );
+    patch.assert_async().await;
+}
+
+#[tokio::test]
+async fn unmark_duplicate_patches_null_and_prints_the_updated_bug() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let updated = bug_json(&base, &[]);
+    let patch = server
+        .mock("PATCH", "/bugs/42")
+        .match_header("content-type", "application/json")
+        .match_body(mockito::Matcher::Json(serde_json::json!({
+            "duplicate_of_link": null,
+        })))
+        .with_header("content-type", "application/json")
+        .with_body(updated.to_string())
+        .create_async()
+        .await;
+
+    let outcome = run(&server, &["lpcli", "bug", "unmark-duplicate", "-b", "42"])
+        .await
+        .unwrap();
+    let rendered: serde_json::Value =
+        serde_json::from_str(&render(&outcome, OutputMode::Json, false)).unwrap();
+    assert_eq!(rendered, updated);
+    assert_eq!(
+        render(&outcome, OutputMode::Json, true),
+        format!("{base}/bugs/42\n")
+    );
+    let rich = render(&outcome, OutputMode::Rich, false);
+    assert!(
+        rich.contains("Removed the duplicate marker from bug #42."),
+        "{rich}"
+    );
+    patch.assert_async().await;
+}
+
+#[test]
+fn mark_duplicate_of_itself_is_a_usage_error() {
+    let argv = argv("json", "mark-duplicate -b 42 --duplicate-of 42");
+    let cli = Cli::try_parse_from(&argv).unwrap();
+    let error = validate_cli(&cli).expect_err("a bug cannot duplicate itself");
+    assert_eq!(error.exit_code(), 2, "{error}");
+    assert!(error.to_string().contains("duplicate of itself"), "{error}");
 }
 
 #[tokio::test]

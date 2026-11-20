@@ -21,6 +21,8 @@
 //! | [`delete_bug_comment`] | Delete a comment from a bug |
 //! | [`set_bug_description`] | Replace the description of a bug |
 //! | [`set_bug_tags`] | Replace the tag list on a bug |
+//! | [`mark_bug_as_duplicate`] | Mark a bug as a duplicate of another bug |
+//! | [`unmark_bug_as_duplicate`] | Remove a bug's duplicate marker |
 //! | [`get_bug_tracker_by_name`] | Fetch a bug tracker by name |
 //! | [`get_bug_trackers`] | List registered remote bug trackers |
 //! | [`get_bug_tracker`] | Fetch a bug tracker by API self-link |
@@ -90,6 +92,10 @@ pub struct Bug {
     pub owner_link: Option<String>,
     /// Number of users who are affected by this bug.
     pub users_affected_count: Option<u64>,
+    /// API link to the master bug when this bug is marked as a duplicate.
+    pub duplicate_of_link: Option<String>,
+    /// Number of bugs marked as duplicates of this bug.
+    pub number_of_duplicates: Option<u64>,
 }
 
 /// The status of a bug task (the per-project/package assignment of a bug).
@@ -992,6 +998,83 @@ pub async fn set_bug_tags_raw(
 ) -> Result<Raw<Bug>> {
     let body = serde_json::json!({ "tags": tags });
     patch_bug_raw(client, bug_id, &body, "Setting the bug tags").await
+}
+
+/// Mark a bug as a duplicate of another bug.
+///
+/// Launchpad exposes duplicate marking as the writable `duplicate_of_link`
+/// field on the bug resource, not as a named `markAsDuplicate` operation.
+/// Marking a bug that already has duplicates also re-targets those duplicates
+/// to the new master bug.
+///
+/// Returns the updated [`Bug`] on success.
+///
+/// # Errors
+///
+/// Returns [`LpError::Usage`] if `bug_id` and `duplicate_of` are the same, and
+/// [`crate::error::LpError::Api`] with `status` 401 if the authenticated user
+/// lacks `launchpad.Edit` on the bug (for example a bug locked to
+/// comment-only).
+pub async fn mark_bug_as_duplicate(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    duplicate_of: u64,
+) -> Result<Bug> {
+    let url = duplicate_of_url(client, bug_id, duplicate_of)?;
+    let body = serde_json::json!({ "duplicate_of_link": url });
+    let bug_url = client.url(&format!("/bugs/{bug_id}"));
+    client.patch_url_with_value(&bug_url, &body).await
+}
+
+/// Like [`mark_bug_as_duplicate()`], but return the updated bug's exact
+/// Launchpad JSON.
+///
+/// # Errors
+///
+/// If Launchpad accepts the change but its response cannot be read,
+/// returns [`LpError::Partial`].
+pub async fn mark_bug_as_duplicate_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    duplicate_of: u64,
+) -> Result<Raw<Bug>> {
+    let url = duplicate_of_url(client, bug_id, duplicate_of)?;
+    let body = serde_json::json!({ "duplicate_of_link": url });
+    patch_bug_raw(client, bug_id, &body, "Marking the bug as a duplicate").await
+}
+
+/// Remove a bug's duplicate marker, making it a normal bug again.
+///
+/// Returns the updated [`Bug`] on success.
+pub async fn unmark_bug_as_duplicate(client: &LaunchpadClient, bug_id: u64) -> Result<Bug> {
+    let url = client.url(&format!("/bugs/{bug_id}"));
+    let body = serde_json::json!({ "duplicate_of_link": null });
+    client.patch_url_with_value(&url, &body).await
+}
+
+/// Like [`unmark_bug_as_duplicate()`], but return the updated bug's exact
+/// Launchpad JSON.
+///
+/// # Errors
+///
+/// If Launchpad accepts the change but its response cannot be read,
+/// returns [`LpError::Partial`].
+pub async fn unmark_bug_as_duplicate_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+) -> Result<Raw<Bug>> {
+    let body = serde_json::json!({ "duplicate_of_link": null });
+    patch_bug_raw(client, bug_id, &body, "Removing the duplicate marker").await
+}
+
+/// Validate a duplicate target and return its API link.
+fn duplicate_of_url(client: &LaunchpadClient, bug_id: u64, duplicate_of: u64) -> Result<String> {
+    if bug_id == duplicate_of {
+        return Err(LpError::Usage(format!(
+            "Bug #{bug_id} cannot be marked as a duplicate of itself."
+        )));
+    }
+    Ok(client.url(&format!("/bugs/{duplicate_of}")))
 }
 
 /// PATCH a bug and keep the exact entry Launchpad returned.

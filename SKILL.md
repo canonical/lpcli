@@ -1,6 +1,6 @@
 ---
 name: lpcli
-description: 'Query and manage Launchpad.net via the lpcli CLI. USE FOR: counting or listing bugs against Ubuntu packages or projects, searching Launchpad bugs by status/tag/importance/keyword, looking up CVEs, finding source packages, checking people/teams, reviewing merge proposals, managing upload queues, and any question about Launchpad data. DO NOT USE FOR: GitHub issues, Jira, or non-Launchpad bug trackers.'
+description: 'Query and manage Launchpad.net via the lpcli CLI. USE FOR: counting or listing bugs against Ubuntu packages or projects, searching Launchpad bugs by status/tag/importance/keyword, marking bugs as duplicates, looking up CVEs, finding source packages, checking people/teams, reviewing merge proposals, managing upload queues, and any question about Launchpad data. DO NOT USE FOR: GitHub issues, Jira, or non-Launchpad bug trackers.'
 ---
 
 # lpcli Skill
@@ -143,6 +143,8 @@ retry only the parts that failed.
 | List comments | `lpcli bug comments --bug-id 123456` |
 | File a new bug | `lpcli bug create --target ubuntu --package curl --title "title" --description "desc"` |
 | Edit a bug description | `lpcli bug set-description --bug-id 123456 --description "new text"` or `--description-file ./desc.txt` (`-` reads stdin) |
+| Mark a bug as a duplicate | `lpcli bug mark-duplicate --bug-id 123456 --duplicate-of 654321` |
+| Remove a duplicate marker | `lpcli bug unmark-duplicate --bug-id 123456` |
 | Set bug task status | `lpcli bug set-status --bug-id 123456 --target curl --series noble --status in-progress` |
 | Set status on multiple series | `lpcli bug set-status --bug-id 123456 --target curl --many-series "noble, jammy" --status fix-released` |
 | Set status on all series | `lpcli bug set-status --bug-id 123456 --target curl --all-series --status fix-released` |
@@ -332,6 +334,26 @@ lpcli bug set-importance --bug-id 123456 --target curl \
 lpcli bug add-comment --bug-id 123456 --message "Triaged as High for Noble."
 ```
 
+### Mark a bug as a duplicate
+
+Marking requires `launchpad.Edit` on the bug (its reporter, the target's bug
+supervisor, or a driver); otherwise lpcli exits 5. Marking a bug that already
+has duplicates re-targets those duplicates to the new master bug.
+
+```bash
+# Check the current state first; the JSON includes Launchpad's duplicate links
+lpcli --format json --fields duplicate_of_link,number_of_duplicates bug show --bug-id 123456
+
+# Mark 123456 as a duplicate of 654321
+lpcli --format json --quiet bug mark-duplicate --bug-id 123456 --duplicate-of 654321
+
+# Verify the result (the link resolves to the canonical master)
+lpcli --format json --fields duplicate_of_link bug show --bug-id 123456
+
+# Remove the duplicate marker again
+lpcli --format json --quiet bug unmark-duplicate --bug-id 123456
+```
+
 ### Forward a bug to Debian or upstream
 
 ```bash
@@ -466,10 +488,20 @@ lpcli person ppas --name my-username
 6. **Check exit codes** — 3 means log in, 4 not found, 5 permission denied,
    6 retry later, and 7 means the change was only partly applied; read stdout
    before retrying.
-7. **Source package names in Launchpad** may differ from upstream project names
+7. **Missing command?** lpcli does not wrap every Launchpad operation. Do not
+   fall back to `launchpadlib`: it uses a separate credential store
+   (`~/.launchpadlib`) and any new authorization needs an interactive browser
+   session, which fails in agent runs. Report the gap instead. If a raw API
+   call is unavoidable, sign it with the stored lpcli OAuth credentials
+   (consumer key, token, and secret are in the OS keyring, with a file fallback
+   at `~/.config/lpcli/credentials.toml`).
+8. **Check the binary version** — run `lpcli --version`. If a command described
+   here is missing, the installed binary predates the checkout: reinstall with
+   `cargo install --path .`.
+9. **Source package names in Launchpad** may differ from upstream project names
    (e.g. `rustc-1.97` not `rust`). Use the exact source package name the user
    provides.
-8. **Self-contained documentation** — `lpcli skills` (alias `lpcli skill`)
+10. **Self-contained documentation** — `lpcli skills` (alias `lpcli skill`)
    prints this entire document straight from the binary, byte for byte, with
    no authentication or network access; redirect it into a skill directory if
    your agent tooling expects one.
