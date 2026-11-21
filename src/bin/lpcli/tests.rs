@@ -852,6 +852,7 @@ fn private_inclusive_collections_and_identity_require_auth() {
             "--ppa",
             "test",
         ],
+        vec!["package", "builds", "--owner", "ubuntu", "--ppa", "test"],
         vec!["project", "search", "--query", "test"],
         vec!["project", "list-series", "--project", "test"],
         vec!["git", "list-person-repos", "--name", "ubuntu"],
@@ -938,6 +939,7 @@ fn public_distribution_reads_do_not_require_auth() {
         ],
         vec!["package", "list-series"],
         vec!["package", "search", "--series", "resolute"],
+        vec!["package", "builds", "--series", "resolute"],
         vec!["bug", "remote-bug-trackers"],
     ] {
         let mut full = vec!["lpcli"];
@@ -2011,6 +2013,45 @@ fn queue_status_parser_rejects_unknown_status() {
         "err: {err}"
     );
     assert!(parse_queue_status("").is_err());
+}
+
+#[test]
+fn build_state_parser_accepts_canonical_names_and_aliases() {
+    for (input, expected) in [
+        ("success", "Successfully built"),
+        ("Successfully built", "Successfully built"),
+        ("successfully-built", "Successfully built"),
+        ("failed", "Failed to build"),
+        ("FAILED_TO_BUILD", "Failed to build"),
+        ("building", "Currently building"),
+        ("needs-build", "Needs building"),
+        ("dep-wait", "Dependency wait"),
+        ("superseded", "Build for superseded Source"),
+        ("cancelled", "Cancelled build"),
+    ] {
+        assert_eq!(
+            parse_build_state(input).unwrap(),
+            expected,
+            "input: {input}"
+        );
+    }
+}
+
+#[test]
+fn build_state_parser_rejects_unknown_state() {
+    let err = parse_build_state("exploded").unwrap_err();
+    assert!(err.contains("exploded"), "err: {err}");
+    assert!(err.contains("successfully built"), "err: {err}");
+    assert!(parse_build_state("").is_err());
+}
+
+#[test]
+fn build_arch_parser_normalizes_and_rejects_unknown() {
+    assert_eq!(parse_build_arch("AMD64").unwrap(), "amd64");
+    assert_eq!(parse_build_arch(" amd64v3 ").unwrap(), "amd64v3");
+    let err = parse_build_arch("source").unwrap_err();
+    assert!(err.contains("source"), "err: {err}");
+    assert!(parse_build_arch("nonsense").is_err());
 }
 
 #[test]

@@ -79,6 +79,17 @@ are placed under `lpcli` and are never added to Launchpad entries.
 | `queue download` | `package_upload`, `source_file_urls` or `binary_file_urls`, `lpcli` (archive, series, output directory, per-file `downloads`, `downloaded`, `failed`) |
 | `package download` | `source_package_publishing_history`, `lpcli` (`source_file_urls`, output directory, per-file `downloads`, `downloaded`, `failed`) |
 | `package changelog` | `source_package_publishing_history`, `lpcli` (`archive`, `series`, `changelog_url`, `changelog`, `total_entries`, `truncated`, `entries`) |
+| `package builds` | `source_publications`, `builds`, `lpcli` (`archive`, `series`, `complete`, `sources`) |
+
+`package builds` prints `builds.entries` from the `getBuilds` entries of the
+listed source publications, in source and architecture order. `--arch` and
+`--state` filter those entries locally, so `builds` omits `start` and
+`total_size`. `lpcli.sources` is keyed by the source publication's `self_link`
+and records the build `self_link`s listed for that source plus whether
+Launchpad reports active binary publications; an empty `builds` list means the
+source has no builds yet. `lpcli.complete` is false when `--limit` cut the
+source publications short; `source_publications.next_collection_link` then
+continues the unfiltered source list.
 
 `status` prints:
 

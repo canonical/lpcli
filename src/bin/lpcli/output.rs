@@ -979,6 +979,9 @@ pub struct Column {
     pub key: &'static str,
     /// Optional timestamp formatting applied per renderer.
     pub format: ColumnFormat,
+    /// Whether `rich` tables omit this column, for values such as long URLs
+    /// that leave too little room for the other columns.
+    pub hide_in_rich: bool,
 }
 
 impl Column {
@@ -988,6 +991,20 @@ impl Column {
             label,
             key,
             format: ColumnFormat::Text,
+            hide_in_rich: false,
+        }
+    }
+
+    /// Construct a column whose values `rich` tables omit.
+    ///
+    /// `plain`, `tsv`, and `json` still include the column, so long URLs
+    /// remain available for copying and machine consumption.
+    pub const fn rich_hidden(label: &'static str, key: &'static str) -> Self {
+        Self {
+            label,
+            key,
+            format: ColumnFormat::Text,
+            hide_in_rich: true,
         }
     }
 
@@ -997,6 +1014,7 @@ impl Column {
             label,
             key,
             format: ColumnFormat::Date,
+            hide_in_rich: false,
         }
     }
 
@@ -1006,6 +1024,7 @@ impl Column {
             label,
             key,
             format: ColumnFormat::DateTime,
+            hide_in_rich: false,
         }
     }
 }
@@ -1101,6 +1120,17 @@ pub enum Block {
     /// rows are independent of [`Report::records`] (used when a report has
     /// multiple tables or when `tsv` uses raw Launchpad attributes).
     Table {
+        records: Records,
+        noun: Noun,
+        empty: String,
+        hint: Option<String>,
+    },
+    /// A table shown only in `rich` output.
+    ///
+    /// This is for supplementary detail, such as long URLs, that `plain`,
+    /// `tsv`, and `json` already carry elsewhere and that would make the
+    /// main `rich` table too narrow.
+    RichTable {
         records: Records,
         noun: Noun,
         empty: String,
@@ -1564,6 +1594,9 @@ impl RichRenderer {
                     out.push('\n');
                 }
                 for (index, column) in records.columns.iter().enumerate() {
+                    if column.hide_in_rich {
+                        continue;
+                    }
                     let cleaned = row
                         .get(index)
                         .and_then(Option::as_deref)
@@ -1584,8 +1617,14 @@ impl RichRenderer {
                 }
             }
         } else {
-            let mut table =
-                display.table(records.columns.iter().map(|column| column.label).collect());
+            let mut table = display.table(
+                records
+                    .columns
+                    .iter()
+                    .filter(|column| !column.hide_in_rich)
+                    .map(|column| column.label)
+                    .collect(),
+            );
             if !self.style.unicode {
                 table.load_style(ASCII_LIGHT_TABLE);
             }
@@ -1594,20 +1633,20 @@ impl RichRenderer {
             for row in &records.rows {
                 let mut cells = Vec::with_capacity(records.columns.len());
                 let mut styles = Vec::with_capacity(records.columns.len());
-                for (col_idx, value) in row.iter().enumerate() {
-                    let column = records.columns.get(col_idx);
+                for (col_idx, column) in records.columns.iter().enumerate() {
+                    if column.hide_in_rich {
+                        continue;
+                    }
+                    let value = row.get(col_idx);
                     let cleaned = value
-                        .as_deref()
-                        .map(|raw| {
-                            let format = column.map_or(ColumnFormat::Text, |c| c.format);
-                            format_column_value(raw, format, Some(&self.time_zone))
-                        })
+                        .and_then(Option::as_deref)
+                        .map(|raw| format_column_value(raw, column.format, Some(&self.time_zone)))
                         .map(|val| clean(&val))
                         .unwrap_or_else(|| missing.to_string());
                     let style = self
                         .style
                         .color
-                        .then(|| column.and_then(|c| field_value_style(c.label, &cleaned)))
+                        .then(|| field_value_style(column.label, &cleaned))
                         .flatten();
                     cells.push(cleaned);
                     styles.push(style);
@@ -2177,6 +2216,14 @@ impl Renderer for RichRenderer {
                 } => {
                     self.list(&mut out, records, *noun, empty, hint.as_deref());
                 }
+                Block::RichTable {
+                    records,
+                    noun,
+                    empty,
+                    hint,
+                } => {
+                    self.list(&mut out, records, *noun, empty, hint.as_deref());
+                }
                 Block::Comments {
                     entries,
                     noun,
@@ -2298,6 +2345,7 @@ impl Renderer for PlainRenderer {
                 } => {
                     Self::list(&mut out, records, *noun, empty, hint.as_deref());
                 }
+                Block::RichTable { .. } => {}
                 Block::Comments {
                     entries,
                     noun,

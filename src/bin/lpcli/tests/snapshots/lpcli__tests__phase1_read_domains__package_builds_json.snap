@@ -1,0 +1,96 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "builds": {
+    "entries": [
+      {
+        "arch_tag": "amd64",
+        "build_log_url": "https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.5/+build/10/+files/buildlog_ubuntu-noble-amd64.mutter_50.1-0ubuntu2.5_BUILDING.txt.gz",
+        "buildstate": "Successfully built",
+        "datebuilt": "[timestamp]",
+        "distro_series_link": "https://api.launchpad.net/devel/ubuntu/noble",
+        "duration": "0:24:28.874821",
+        "http_etag": "\"etag-1234\"",
+        "pocket": "Release",
+        "resource_type_link": "https://api.launchpad.net/devel/#build",
+        "self_link": "https://api.launchpad.net/devel/ubuntu/+archive/primary/+build/10",
+        "source_package_name": "mutter",
+        "source_package_version": "50.1-0ubuntu2.5",
+        "web_link": "https://launchpad.net/ubuntu/+archive/primary/+build/10"
+      },
+      {
+        "arch_tag": "arm64",
+        "build_log_url": "https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.5/+build/11/+files/buildlog_ubuntu-noble-arm64.mutter_50.1-0ubuntu2.5_BUILDING.txt.gz",
+        "buildstate": "Failed to build",
+        "datebuilt": "[timestamp]",
+        "distro_series_link": "https://api.launchpad.net/devel/ubuntu/noble",
+        "duration": "0:24:28.874821",
+        "http_etag": "\"etag-1234\"",
+        "pocket": "Release",
+        "resource_type_link": "https://api.launchpad.net/devel/#build",
+        "self_link": "https://api.launchpad.net/devel/ubuntu/+archive/primary/+build/11",
+        "source_package_name": "mutter",
+        "source_package_version": "50.1-0ubuntu2.5",
+        "web_link": "https://launchpad.net/ubuntu/+archive/primary/+build/11"
+      }
+    ]
+  },
+  "lpcli": {
+    "archive": "ubuntu",
+    "complete": true,
+    "series": "noble",
+    "sources": {
+      "https://api.launchpad.net/devel/ubuntu/+archive/primary/+sourcepub/1": {
+        "binaries_published": true,
+        "builds": [
+          "https://api.launchpad.net/devel/ubuntu/+archive/primary/+build/10",
+          "https://api.launchpad.net/devel/ubuntu/+archive/primary/+build/11"
+        ]
+      },
+      "https://api.launchpad.net/devel/ubuntu/+archive/primary/+sourcepub/2": {
+        "binaries_published": false,
+        "builds": []
+      }
+    }
+  },
+  "source_publications": {
+    "entries": [
+      {
+        "archive_link": "https://api.launchpad.net/devel/ubuntu/+archive/primary",
+        "component_name": "main",
+        "date_published": "[timestamp]",
+        "date_superseded": null,
+        "distro_series_link": "https://api.launchpad.net/devel/ubuntu/noble",
+        "http_etag": "\"etag-1234\"",
+        "pocket": "Release",
+        "resource_type_link": "https://api.launchpad.net/devel/#source_package_publishing_history",
+        "section_name": "devel",
+        "self_link": "https://api.launchpad.net/devel/ubuntu/+archive/primary/+sourcepub/1",
+        "source_package_name": "mutter",
+        "source_package_version": "50.1-0ubuntu2.5",
+        "status": "Published",
+        "web_link": "https://launchpad.net/ubuntu/+archive/primary/+sourcepub/1"
+      },
+      {
+        "archive_link": "https://api.launchpad.net/devel/ubuntu/+archive/primary",
+        "component_name": "main",
+        "date_published": "[timestamp]",
+        "date_superseded": null,
+        "distro_series_link": "https://api.launchpad.net/devel/ubuntu/noble",
+        "http_etag": "\"etag-1234\"",
+        "pocket": "Release",
+        "resource_type_link": "https://api.launchpad.net/devel/#source_package_publishing_history",
+        "section_name": "devel",
+        "self_link": "https://api.launchpad.net/devel/ubuntu/+archive/primary/+sourcepub/2",
+        "source_package_name": "mutter",
+        "source_package_version": "50.1-0ubuntu2.6",
+        "status": "Pending",
+        "web_link": "https://launchpad.net/ubuntu/+archive/primary/+sourcepub/2"
+      }
+    ],
+    "start": 0,
+    "total_size": 2
+  }
+}

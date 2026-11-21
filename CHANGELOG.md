@@ -10,6 +10,16 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 ## [Unreleased]
 
+### Added
+
+- `lpcli package builds` (and library helpers `get_source_builds`,
+  `get_source_builds_raw`, `source_has_active_binaries`, and `SourceBuild`) to
+  list one row per architecture with the source version, series, build state,
+  binaries-published flag, finish time, duration, and build log URL for a PPA
+  (`--owner`/`--ppa`) or the primary archive (`--series`). Filters are
+  `--name`, `--version`, `--arch`, and `--state`; sources with no builds yet
+  show `No builds yet`. `SourceSearchParams::statuses` adds repeated `status`
+  filters, used to exclude deleted and obsolete publications.
 
 ## [0.5.1] - 2026-11-20
 
