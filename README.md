@@ -1189,7 +1189,10 @@ automatically in CI.
    [Rust conventions](rust-instructions.md).
 3. Add or update inline library tests, CLI tests in `src/bin/lpcli/tests.rs`, or
    integration tests in `tests/` for changed behaviour. Use mocked HTTP responses
-   and isolated filesystem/subprocess fixtures for routine validation.
+   and isolated filesystem/subprocess fixtures for routine validation. Some
+   integration tests replay real Launchpad responses recorded under
+   `tests/fixtures/`; refresh them with
+   `LPCLI_RECORD_FIXTURES=1 cargo test --test <name>` (see `tests/support/mod.rs`).
 4. Run the CI-equivalent checks below and the documentation tests.
 5. Open a pull request against `main`.
 
