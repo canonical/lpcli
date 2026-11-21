@@ -44,7 +44,7 @@ fn stable(value: &Value, base: &str) -> Value {
         Value::Array(values) => values.iter().map(|v| stable(v, base)).collect(),
         Value::Object(map) => map
             .iter()
-            .map(|(key, value)| (key.clone(), stable(value, base)))
+            .map(|(key, value)| (key.replace(base, LP), stable(value, base)))
             .collect::<serde_json::Map<_, _>>()
             .into(),
         other => other.clone(),
@@ -61,6 +61,7 @@ macro_rules! assert_json_report {
             ".**.date_made_public" => "[timestamp]",
             ".**.date_last_updated" => "[timestamp]",
             ".**.date_published" => "[timestamp]",
+            ".**.datebuilt" => "[timestamp]",
         })
     };
 }
@@ -184,6 +185,7 @@ fn every_read_command_supports_json_and_lists_support_tsv() {
         &["package", "list-series"],
         &["package", "search", "-s", "noble", "-n", "hello"],
         &["package", "ppa-sources", "-o", "jdoe", "-p", "ppa"],
+        &["package", "builds", "-s", "noble", "-n", "hello"],
         &["project", "search", "-q", "launchpad"],
         &["project", "milestones", "-p", "launchpad"],
         &["project", "list-series", "-p", "launchpad"],
@@ -676,6 +678,230 @@ async fn package_search_and_ppa_sources_show_normalized_maintainer() {
 
     search_mock.assert_async().await;
     ppa_mock.assert_async().await;
+}
+
+// ---------------------------------------------------------------------------
+// package builds
+// ---------------------------------------------------------------------------
+
+fn build_json(id: u64, arch: &str, state: &str, datebuilt: Option<&str>) -> Value {
+    let version = "50.1-0ubuntu2.5";
+    entry(
+        "build",
+        &format!("/ubuntu/+archive/primary/+build/{id}"),
+        json!({
+            "arch_tag": arch,
+            "buildstate": state,
+            "datebuilt": datebuilt,
+            "duration": "0:24:28.874821",
+            "build_log_url": format!(
+                "https://launchpad.net/ubuntu/+source/mutter/{version}/+build/{id}/+files/buildlog_ubuntu-noble-{arch}.mutter_{version}_BUILDING.txt.gz"
+            ),
+            "source_package_name": "mutter",
+            "source_package_version": version,
+            "distro_series_link": format!("{LP}/ubuntu/noble"),
+            "pocket": "Release",
+        }),
+    )
+}
+
+#[tokio::test]
+async fn package_builds_lists_build_results_and_active_binaries() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let source1 = rebase(source_json("mutter", "50.1-0ubuntu2.5", 1), &base);
+    let mut source2 = rebase(source_json("mutter", "50.1-0ubuntu2.6", 2), &base);
+    source2["status"] = json!("Pending");
+
+    let sources = rebase(
+        json!({
+            "start": 0,
+            "total_size": 2,
+            "entries": [source1, source2],
+        }),
+        &base,
+    );
+    let pub1 = format!("{base}/ubuntu/+archive/primary/+sourcepub/1");
+    let pub2 = format!("{base}/ubuntu/+archive/primary/+sourcepub/2");
+    let builds1 = rebase(
+        json!({
+            "start": 0,
+            "total_size": 2,
+            "entries": [
+                build_json(10, "amd64", "Successfully built", Some("2026-10-08T09:04:54.281155+00:00")),
+                build_json(11, "arm64", "Failed to build", Some("2026-10-14T05:51:03.982388+00:00")),
+            ],
+        }),
+        &base,
+    );
+    let builds2 = json!({"start": 0, "total_size": 0, "entries": []});
+    let binaries = rebase(
+        json!({
+            "start": 0,
+            "entries": [{"binary_package_name": "mutter"}],
+        }),
+        &base,
+    );
+
+    let sources_mock = mock_get(
+        &mut server,
+        "/ubuntu/+archive/primary",
+        Matcher::AllOf(vec![
+            op("getPublishedSources"),
+            Matcher::Regex("status=Published&status=Superseded&status=Pending".into()),
+        ]),
+        &sources,
+    )
+    .await;
+    let builds1_mock = mock_get(
+        &mut server,
+        "/ubuntu/+archive/primary/+sourcepub/1",
+        op("getBuilds"),
+        &builds1,
+    )
+    .await;
+    let builds2_mock = mock_get(
+        &mut server,
+        "/ubuntu/+archive/primary/+sourcepub/2",
+        op("getBuilds"),
+        &builds2,
+    )
+    .await;
+    let binaries_mock = mock_get(
+        &mut server,
+        "/ubuntu/+archive/primary/+sourcepub/1",
+        op("getPublishedBinaries"),
+        &binaries,
+    )
+    .await;
+
+    let report = run(
+        &server,
+        &["package", "builds", "-s", "noble", "-n", "mutter"],
+    )
+    .await;
+    assert_eq!(report.records.rows.len(), 3);
+    assert_eq!(report.json["source_publications"], sources);
+    assert_eq!(report.json["builds"]["entries"], builds1["entries"].clone());
+    assert_eq!(report.json["lpcli"]["archive"], "ubuntu");
+    assert_eq!(report.json["lpcli"]["series"], "noble");
+    assert_eq!(report.json["lpcli"]["complete"], true);
+    let map = report.json["lpcli"]["sources"].as_object().unwrap();
+    assert_eq!(map.len(), 2);
+    assert_eq!(map[&pub1]["binaries_published"], true);
+    assert_eq!(map[&pub1]["builds"].as_array().unwrap().len(), 2);
+    assert_eq!(map[&pub2]["binaries_published"], false);
+    assert_eq!(map[&pub2]["builds"], json!([]));
+
+    // amd64 success, arm64 failure, then the pending source's placeholder.
+    assert_eq!(report.records.rows[0][3].as_deref(), Some("amd64"));
+    assert_eq!(
+        report.records.rows[1][5].as_deref(),
+        Some("Failed to build")
+    );
+    assert_eq!(report.records.rows[2][5].as_deref(), Some("No builds yet"));
+    assert_eq!(report.records.rows[2][6].as_deref(), Some("no"));
+
+    assert_modes(&report);
+    assert_tsv_invariants(&render(&report, OutputMode::Tsv), 3);
+    assert_json_report!("package_builds_json", stable(&report.json, &base));
+    insta::assert_snapshot!("package_builds_tsv", render(&report, OutputMode::Tsv));
+    insta::assert_snapshot!("package_builds_plain", render(&report, OutputMode::Plain));
+    insta::assert_snapshot!("package_builds_rich", render(&report, OutputMode::Rich));
+
+    // Local filters narrow the build entries and drop the no-builds placeholder.
+    let filtered = run(
+        &server,
+        &[
+            "package", "builds", "-s", "noble", "-n", "mutter", "--arch", "arm64",
+        ],
+    )
+    .await;
+    assert_eq!(filtered.records.rows.len(), 1);
+    assert_eq!(
+        filtered.json["builds"]["entries"].as_array().unwrap().len(),
+        1
+    );
+    assert!(filtered.json["lpcli"]["sources"].get(&pub2).is_none());
+
+    for mock in [sources_mock, builds1_mock, builds2_mock, binaries_mock] {
+        mock.expect_at_least(1).assert_async().await;
+    }
+}
+
+#[tokio::test]
+async fn package_builds_reports_sources_without_builds() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let mut source = rebase(source_json("mutter", "50.1-0ubuntu2.6", 3), &base);
+    source["status"] = json!("Pending");
+    let sources = rebase(
+        json!({"start": 0, "total_size": 1, "entries": [source]}),
+        &base,
+    );
+    let builds = json!({"start": 0, "total_size": 0, "entries": []});
+
+    let sources_mock = mock_get(
+        &mut server,
+        "/ubuntu/+archive/primary",
+        op("getPublishedSources"),
+        &sources,
+    )
+    .await;
+    let builds_mock = mock_get(
+        &mut server,
+        "/ubuntu/+archive/primary/+sourcepub/3",
+        op("getBuilds"),
+        &builds,
+    )
+    .await;
+    // No successful build, so lpcli must not ask for binaries.
+    let binaries_mock = server
+        .mock("GET", "/ubuntu/+archive/primary/+sourcepub/3")
+        .match_query(op("getPublishedBinaries"))
+        .expect(0)
+        .create_async()
+        .await;
+
+    let report = run(
+        &server,
+        &["package", "builds", "-s", "noble", "-n", "mutter"],
+    )
+    .await;
+    assert_eq!(report.records.rows.len(), 1);
+    assert_eq!(report.records.rows[0][5].as_deref(), Some("No builds yet"));
+    assert_eq!(report.records.rows[0][6].as_deref(), Some("no"));
+    assert_eq!(
+        report.json["lpcli"]["sources"][&format!("{base}/ubuntu/+archive/primary/+sourcepub/3")]["builds"],
+        json!([])
+    );
+    let plain = render(&report, OutputMode::Plain);
+    assert!(plain.contains("Build State: No builds yet"), "{plain}");
+    insta::assert_snapshot!("package_builds_no_builds_plain", plain);
+
+    sources_mock.assert_async().await;
+    builds_mock.assert_async().await;
+    binaries_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn package_builds_unknown_ppa_is_not_found() {
+    let mut server = isolated_mock_server().await;
+    let mock = server
+        .mock("GET", "/~jdoe/+archive/ubuntu/missing")
+        .with_status(404)
+        .with_body("{}")
+        .create_async()
+        .await;
+    let client = mock_read_client(&server, false);
+    let Command::Package(cmd) = parsed(&["package", "builds", "-o", "jdoe", "-p", "missing"])
+    else {
+        panic!("expected package command");
+    };
+    let error = package_report(&client, cmd).await.unwrap_err();
+    assert!(matches!(error, LpError::NotFound(_)), "{error:?}");
+    assert!(error.to_string().contains("PPA ~jdoe/missing not found."));
+    mock.assert_async().await;
 }
 
 // ---------------------------------------------------------------------------
