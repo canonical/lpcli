@@ -680,6 +680,14 @@ lpcli package ppa --owner my-username --ppa my-ppa
 # List source packages in a PPA
 lpcli package ppa-sources --owner my-username --ppa my-ppa --name curl
 
+# Show build results and log URLs for source packages in a PPA
+lpcli package builds --owner my-username --ppa my-ppa --name mutter
+lpcli package builds --owner my-username --ppa my-ppa --name mutter --version 50.1-0ubuntu2.8 --arch amd64
+lpcli package builds --owner my-username --ppa my-ppa --name mutter --state failed
+
+# Show build results in the primary archive
+lpcli package builds --series resolute --name mutter --version 50.1-0ubuntu2.5
+
 # Download source files for a published source package
 lpcli package download --name curl --series noble
 lpcli package download --name curl --series noble --version 8.5.0-2ubuntu10

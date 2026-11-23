@@ -14,15 +14,25 @@
 //! | Ubuntu distribution | `/ubuntu` |
 //! | Series | `/ubuntu/jammy` |
 //! | Source publications | `/ubuntu/+archive/primary?ws.op=getPublishedSources` |
+//! | Source builds | `/+sourcepub/{id}?ws.op=getBuilds` |
+//! | Published binaries | `/+sourcepub/{id}?ws.op=getPublishedBinaries` |
 //! | PPAs | `/~{person}/+archive/ubuntu/{ppa}` |
 //!
 //! Each read function that returns Launchpad data has a `_raw` counterpart
 //! that also returns the exact JSON Launchpad sent: an entry, or a collection
 //! with `start`, `entries`, and `total_size` or `total_size_link`.
-//! [`get_source_file_urls`], [`get_source_changelog_url`], and
-//! [`fetch_source_changelog`] have no `_raw` counterparts because Launchpad
-//! returns a URL list, an optional URL string, or plain changelog text rather
+//! [`get_source_file_urls`], [`get_source_changelog_url`],
+//! [`fetch_source_changelog`], and [`source_has_active_binaries`] have no
+//! `_raw` counterparts because Launchpad returns a URL list, an optional URL
+//! string, plain changelog text, or a value derived from a collection rather
 //! than an entry or collection.
+//!
+//! Build results are read per source publication with `getBuilds`. The
+//! archive-level `getBuildRecords` operation is not used because it times out
+//! on the primary archive; `getBuilds` is scoped to one source publication and
+//! works on both PPAs and the primary archive. `getBuilds` and
+//! `getPublishedBinaries` are ordinary `devel` GET operations; no beta header
+//! or beta service root is needed.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -102,6 +112,34 @@ pub struct BinaryPackagePublishingHistory {
     pub date_published: Option<Timestamp>,
 }
 
+/// A source package build record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceBuild {
+    /// API self-link.
+    pub self_link: Option<String>,
+    /// Launchpad web link.
+    pub web_link: Option<String>,
+    /// Architecture tag (e.g. `"amd64"`, `"arm64"`).
+    pub arch_tag: Option<String>,
+    /// Build state (e.g. `"Successfully built"`, `"Failed to build"`).
+    pub buildstate: Option<String>,
+    /// When the build finished, when it has finished.
+    #[serde(rename = "datebuilt")]
+    pub date_built: Option<Timestamp>,
+    /// Build duration, as Launchpad formats it (e.g. `"0:02:59.187629"`).
+    pub duration: Option<String>,
+    /// URL of the build log.
+    pub build_log_url: Option<String>,
+    /// Source package name.
+    pub source_package_name: Option<String>,
+    /// Source package version.
+    pub source_package_version: Option<String>,
+    /// API link to the build's distro series.
+    pub distro_series_link: Option<String>,
+    /// Pocket (e.g. `"Release"`, `"Updates"`).
+    pub pocket: Option<String>,
+}
+
 /// A Launchpad Personal Package Archive (PPA).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Archive {
@@ -156,6 +194,12 @@ pub struct SourceSearchParams<'a> {
     pub pocket: Option<&'a str>,
     /// Status filter (e.g. "Published").
     pub status: Option<&'a str>,
+    /// Status filters to send as repeated `status` parameters.
+    ///
+    /// When non-empty, each value is sent as its own `status` parameter and
+    /// [`Self::status`] is ignored. Launchpad returns publications in every
+    /// status when neither is set, including `Deleted` and `Obsolete`.
+    pub statuses: &'a [&'a str],
     /// Whether to require an exact match for the source name and version.
     pub exact_match: bool,
     /// Maximum number of results to return.
@@ -367,7 +411,11 @@ fn append_source_search_params(
     if include_pocket && let Some(pocket) = params.pocket {
         query.push_str(&format!("&pocket={}", enc(pocket)));
     }
-    if let Some(status) = params.status {
+    if !params.statuses.is_empty() {
+        for status in params.statuses {
+            query.push_str(&format!("&status={}", enc(status)));
+        }
+    } else if let Some(status) = params.status {
         query.push_str(&format!("&status={}", enc(status)));
     }
     if params.exact_match {
@@ -400,6 +448,48 @@ async fn fetch_sources_raw(
         },
         raw: all.raw,
     })
+}
+
+/// Get every build record created for a source package publication.
+///
+/// Calls `getBuilds` on a `source_package_publishing_history` entry. The
+/// collection is ordered by architecture tag and includes the build state,
+/// finish time, duration, and build log URL for each architecture.
+///
+/// `pub_self_link` is the API self-link of the
+/// `SourcePackagePublishingHistory`.
+pub async fn get_source_builds(
+    client: &LaunchpadClient,
+    pub_self_link: &str,
+) -> Result<Vec<SourceBuild>> {
+    Ok(get_source_builds_raw(client, pub_self_link).await?.value)
+}
+
+/// Like [`get_source_builds()`], but also keep Launchpad's collection JSON.
+pub async fn get_source_builds_raw(
+    client: &LaunchpadClient,
+    pub_self_link: &str,
+) -> Result<Raw<Vec<SourceBuild>>> {
+    client.ensure_same_api_origin(pub_self_link, "publication self_link")?;
+    let url = format!("{pub_self_link}?ws.op=getBuilds");
+    Collection::fetch_all_raw(client, &url).await
+}
+
+/// Whether a source package publication has active binary publications.
+///
+/// `getPublishedBinaries` defaults to active (`Published` or `Pending`) binary
+/// publications. Only one entry is requested: callers need the existence of
+/// binaries, not their details. A source that has not been built yet, whose
+/// builds failed, or whose binaries were superseded returns `false`.
+pub async fn source_has_active_binaries(
+    client: &LaunchpadClient,
+    pub_self_link: &str,
+) -> Result<bool> {
+    client.ensure_same_api_origin(pub_self_link, "publication self_link")?;
+    let url = format!("{pub_self_link}?ws.op=getPublishedBinaries&ws.size=1");
+    let page: Raw<Collection<BinaryPackagePublishingHistory>> =
+        Collection::fetch_page_raw(client, &url).await?;
+    Ok(!page.value.entries.is_empty())
 }
 
 /// Get the source file URLs for a source package publishing history entry.
@@ -1090,6 +1180,226 @@ mod tests {
             .to_string();
         assert!(changelog_err.contains("cross-origin"), "{changelog_err}");
         assert!(!changelog_err.contains("topsecret"), "{changelog_err}");
+
+        let builds_err = get_source_builds_raw(&client, &foreign_link)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(builds_err.contains("cross-origin"), "{builds_err}");
+        assert!(!builds_err.contains("topsecret"), "{builds_err}");
+
+        let binaries_err = source_has_active_binaries(&client, &foreign_link)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(binaries_err.contains("cross-origin"), "{binaries_err}");
+        assert!(!binaries_err.contains("topsecret"), "{binaries_err}");
+
+        api_hit.assert_async().await;
+        foreign_hit.assert_async().await;
+    }
+
+    #[test]
+    fn source_build_deserialise() {
+        let json = r#"{
+            "self_link": "https://api.launchpad.net/devel/ubuntu/+archive/primary/+build/33824576",
+            "web_link": "https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.5/+build/33824576",
+            "arch_tag": "amd64",
+            "buildstate": "Successfully built",
+            "datebuilt": "2026-10-08T09:04:54.281155+00:00",
+            "duration": "0:24:28.874821",
+            "build_log_url": "https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.5/+build/33824576/+files/buildlog_ubuntu-resolute-amd64.mutter_50.1-0ubuntu2.5_BUILDING.txt.gz",
+            "source_package_name": "mutter",
+            "source_package_version": "50.1-0ubuntu2.5",
+            "distro_series_link": "https://api.launchpad.net/devel/ubuntu/resolute",
+            "pocket": "Release"
+        }"#;
+        let build: SourceBuild = serde_json::from_str(json).unwrap();
+        assert_eq!(build.arch_tag.as_deref(), Some("amd64"));
+        assert_eq!(build.buildstate.as_deref(), Some("Successfully built"));
+        assert_eq!(
+            build.date_built.map(|ts| ts.to_string()),
+            Some("2026-10-08T09:04:54.281155Z".to_string())
+        );
+        assert_eq!(build.duration.as_deref(), Some("0:24:28.874821"));
+        assert!(build.build_log_url.is_some());
+    }
+
+    #[tokio::test]
+    async fn search_published_sources_sends_repeated_status_filters() {
+        let mut server = mockito::Server::new_async().await;
+        let body = serde_json::json!({"start": 0, "total_size": 0, "entries": []});
+        let mock = server
+            .mock("GET", "/ubuntu/+archive/primary")
+            .match_query(mockito::Matcher::Regex(
+                "status=Published&status=Superseded&status=Pending".into(),
+            ))
+            .with_status(200)
+            .with_body(body.to_string())
+            .create_async()
+            .await;
+
+        let client = LaunchpadClient::new(None).with_base_url(server.url());
+        let params = SourceSearchParams {
+            statuses: &["Published", "Superseded", "Pending"],
+            ..Default::default()
+        };
+        let found = search_published_sources_raw(&client, "ubuntu", "resolute", &params)
+            .await
+            .unwrap();
+        assert!(found.value.entries.is_empty());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn get_source_builds_raw_requests_getbuilds() {
+        let mut server = mockito::Server::new_async().await;
+        let base = server.url();
+        let pub_link = format!("{base}/ubuntu/+archive/primary/+sourcepub/18893206");
+        let body = serde_json::json!({
+            "start": 0,
+            "total_size": 2,
+            "entries": [
+                {
+                    "self_link": format!("{base}/ubuntu/+archive/primary/+build/1"),
+                    "arch_tag": "amd64",
+                    "buildstate": "Successfully built",
+                    "datebuilt": "2026-10-08T09:04:54.281155+00:00",
+                    "duration": "0:24:28.874821",
+                    "build_log_url": format!("{base}/+files/buildlog"),
+                    "source_package_name": "mutter",
+                    "source_package_version": "50.1-0ubuntu2.5",
+                    "distro_series_link": format!("{base}/ubuntu/resolute"),
+                    "pocket": "Release"
+                },
+                {
+                    "self_link": format!("{base}/ubuntu/+archive/primary/+build/2"),
+                    "arch_tag": "arm64",
+                    "buildstate": "Failed to build",
+                    "datebuilt": null,
+                    "duration": null,
+                    "build_log_url": null,
+                    "source_package_name": "mutter",
+                    "source_package_version": "50.1-0ubuntu2.5",
+                    "distro_series_link": format!("{base}/ubuntu/resolute"),
+                    "pocket": "Release"
+                }
+            ]
+        });
+        let mock = server
+            .mock("GET", "/ubuntu/+archive/primary/+sourcepub/18893206")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "ws.op".into(),
+                "getBuilds".into(),
+            ))
+            .with_status(200)
+            .with_body(body.to_string())
+            .create_async()
+            .await;
+
+        let client = LaunchpadClient::new(None).with_base_url(base);
+        let found = get_source_builds_raw(&client, &pub_link).await.unwrap();
+        assert_eq!(found.value.len(), 2);
+        assert_eq!(found.value[1].arch_tag.as_deref(), Some("arm64"));
+        assert_eq!(
+            found.value[1].buildstate.as_deref(),
+            Some("Failed to build")
+        );
+        assert_eq!(found.value[1].date_built, None);
+        assert_eq!(found.raw, body);
+
+        let builds = get_source_builds(&client, &pub_link).await.unwrap();
+        assert_eq!(builds, found.value);
+        mock.expect(2).assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn source_has_active_binaries_uses_one_entry_page() {
+        let mut server = mockito::Server::new_async().await;
+        let base = server.url();
+        let with_binaries = "/ubuntu/+archive/primary/+sourcepub/18893206";
+        let without_binaries = "/ubuntu/+archive/primary/+sourcepub/18973252";
+
+        let has_mock = server
+            .mock("GET", with_binaries)
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getPublishedBinaries".into()),
+                mockito::Matcher::UrlEncoded("ws.size".into(), "1".into()),
+            ]))
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "start": 0,
+                    "entries": [{"binary_package_name": "mutter"}]
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let none_mock = server
+            .mock("GET", without_binaries)
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getPublishedBinaries".into()),
+                mockito::Matcher::UrlEncoded("ws.size".into(), "1".into()),
+            ]))
+            .with_status(200)
+            .with_body(serde_json::json!({"start": 0, "entries": []}).to_string())
+            .create_async()
+            .await;
+
+        let client = LaunchpadClient::new(None).with_base_url(base.clone());
+        assert!(
+            source_has_active_binaries(&client, &format!("{base}{with_binaries}"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !source_has_active_binaries(&client, &format!("{base}{without_binaries}"))
+                .await
+                .unwrap()
+        );
+
+        has_mock.assert_async().await;
+        none_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn get_source_builds_and_binaries_reject_cross_origin_self_link() {
+        let mut api = mockito::Server::new_async().await;
+        let mut foreign = mockito::Server::new_async().await;
+        let api_hit = api
+            .mock("GET", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let foreign_hit = foreign
+            .mock("GET", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let client = LaunchpadClient::new(Some(crate::auth::Credentials::new(
+            "lpcli",
+            "tok",
+            "topsecret",
+        )))
+        .with_base_url(api.url());
+        let foreign_link = format!("{}/ubuntu/+sourcepub/1?token=leak", foreign.url());
+
+        for err in [
+            get_source_builds(&client, &foreign_link).await.unwrap_err(),
+            get_source_builds_raw(&client, &foreign_link)
+                .await
+                .unwrap_err(),
+            source_has_active_binaries(&client, &foreign_link)
+                .await
+                .unwrap_err(),
+        ] {
+            let msg = err.to_string();
+            assert!(msg.contains("cross-origin"), "{msg}");
+            assert!(!msg.contains("topsecret"), "{msg}");
+            assert!(!msg.contains("token=leak"), "{msg}");
+        }
 
         api_hit.assert_async().await;
         foreign_hit.assert_async().await;

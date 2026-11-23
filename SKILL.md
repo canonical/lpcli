@@ -197,6 +197,8 @@ retry only the parts that failed.
 | Show distribution info | `lpcli package distro` |
 | Show a PPA | `lpcli package ppa --owner my-username --ppa my-ppa` |
 | List PPA sources | `lpcli package ppa-sources --owner my-username --ppa my-ppa --name curl` |
+| Show PPA build results | `lpcli package builds --owner my-username --ppa my-ppa --name mutter --state failed` (also `--version`, `--arch`, and optional `--series`; `--state` accepts `failed`, `success`, `building`, `needs-build`, `dependency-wait`, …) |
+| Show primary-archive build results | `lpcli package builds --series resolute --name mutter --version 50.1-0ubuntu2.5` (`--series` is required for the primary archive) |
 | Download source files | `lpcli package download --name curl --series noble` |
 | Download specific version | `lpcli package download --name curl --series noble --version 8.5.0-2ubuntu10` |
 | Show package changelog | `lpcli package changelog --name unbound --series noble` (shows latest 5 entries; `--limit N`, `--full`, `--version`, `--pocket`, or `--ppa OWNER/NAME`) |
@@ -403,7 +405,60 @@ lpcli bug watches -b 2174521
 ```bash
 lpcli package search --series noble --name curl
 lpcli package search --series noble --pocket Security
+
+# Check whether an upload built, and get the log URL if it failed
+lpcli package builds --series noble --name mutter
+lpcli package builds --series noble --name mutter --state failed
+lpcli package builds --owner my-username --ppa my-ppa --name mutter --version 50.1-0ubuntu2.8 --state failed
+lpcli --format json --fields source_package_version,arch_tag,buildstate,datebuilt,duration,build_log_url package builds --series noble --name mutter
 ```
+
+`package builds` prints one row per source version and architecture with
+`Package`, `Version`, `Series`, `Arch`, `Publication` (Published, Superseded,
+or Pending), `Build State`, `Binaries`, `Finished`, `Duration`, and `Log`. Rich
+output puts the long log URLs in a separate "Build logs" table; `plain`, `tsv`,
+and `json` include the full URL. Use `--series` for the primary archive (or as
+a PPA filter), `--arch` to select one architecture, and `--state` with
+`failed`, `success`, `building`, `needs-build`, or `dependency-wait`.
+`--state` takes one state; `failed` means `Failed to build`, so name
+`failed-to-upload` or `chroot-problem` explicitly when needed. Sources with no
+builds yet show `No builds yet`.
+
+In JSON, `builds.entries[]` holds Launchpad's build entries with `arch_tag`,
+`buildstate`, `datebuilt`, `duration`, and `build_log_url`;
+`source_publications` holds the matching source publications; and
+`lpcli.sources` maps each source publication `self_link` to its `builds` links
+and `binaries_published`. For example, a failed PPA build's log URL is at
+`.builds.entries[].build_log_url`. `datebuilt` is an RFC 3339 timestamp (null
+until the build finishes) and `duration` is Launchpad's `H:MM:SS.ffffff`
+string. `lpcli package builds --help` lists every flag.
+
+`--version` matches exactly. The default listing includes Published,
+Superseded, and Pending source publications and checks up to `--limit` source
+publications (default 30); `--format tsv` prints the same columns. A matching
+source with no builds shows a `No builds yet` row; no matching source
+publications prints `No source publications found ...`, and an unknown PPA
+exits 4. Canonical build states are `Needs building`, `Successfully built`,
+`Failed to build`, `Dependency wait`, `Chroot problem`,
+`Build for superseded Source`, `Currently building`, `Failed to upload`,
+`Uploading build`, `Cancelling build`, `Cancelled build`, and
+`Gathering build output`. `--fields` selects Launchpad attributes in
+`builds.entries` and `source_publications`; the build version is
+`source_package_version`, the series is `distro_series_link`, and the `lpcli`
+member is unchanged. The primary-archive listing includes all pockets; there
+is no `--pocket` filter.
+PPA builds take `--owner OWNER --ppa NAME` (no leading `~`), not
+`--ppa OWNER/NAME` or `--archive`.
+`--public` reads a public PPA anonymously; your own or a private PPA needs
+authentication. `--name`, `--version`, and `--series` filter server-side
+before `--limit`; `--arch` and `--state` filter the fetched builds locally
+(raise `--limit` if `lpcli.complete` is false). `Binaries` in table rows is
+`yes` on succeeded builds whose source publication has active binaries (and `no`
+on failed/pending rows), while `lpcli.sources.<link>.binaries_published` is
+source-level. Failed builds are data, so the command exits 0; use
+`--state failed` to select them. `build_log_url` is present whenever Launchpad
+has a log, including successful builds, and may be null while a build is still
+running.
 
 ### Investigate a CVE
 
