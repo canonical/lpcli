@@ -173,6 +173,73 @@ fn parse_queue_arch(s: &str) -> Result<QueueArch, String> {
     s.parse()
 }
 
+/// Parse a build architecture argument for `package builds`.
+fn parse_build_arch(s: &str) -> Result<String, String> {
+    let value = s.trim();
+    Architecture::from_str(&value.to_ascii_lowercase())
+        .map(|arch| arch.as_str().to_string())
+        .map_err(|_| {
+            let valid: Vec<&str> = Architecture::ALL.iter().map(|arch| arch.as_str()).collect();
+            format!(
+                "invalid Ubuntu architecture '{value}'; valid architectures are: {}",
+                valid.join(", ")
+            )
+        })
+}
+
+/// Launchpad build states, in the API documentation's spelling.
+const BUILD_STATES: [&str; 12] = [
+    "Needs building",
+    "Successfully built",
+    "Failed to build",
+    "Dependency wait",
+    "Chroot problem",
+    "Build for superseded Source",
+    "Currently building",
+    "Failed to upload",
+    "Uploading build",
+    "Cancelling build",
+    "Cancelled build",
+    "Gathering build output",
+];
+
+/// Parse a build state argument for `package builds`.
+///
+/// Canonical Launchpad state names and common short forms are accepted
+/// case-insensitively, with hyphens and underscores treated as spaces. The
+/// result is Launchpad's canonical spelling for comparison with
+/// `buildstate` values.
+fn parse_build_state(s: &str) -> Result<String, String> {
+    let normalized = s
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', '_'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let canonical = match normalized.as_str() {
+        "success" | "built" | "successful" | "successfully built" => "Successfully built",
+        "failed" | "fail" | "failed to build" => "Failed to build",
+        "building" | "currently building" => "Currently building",
+        "needs build" | "needs building" | "pending" => "Needs building",
+        "dependency wait" | "dep wait" | "waiting" => "Dependency wait",
+        "chroot problem" => "Chroot problem",
+        "superseded" | "build for superseded source" => "Build for superseded Source",
+        "failed to upload" => "Failed to upload",
+        "uploading" | "uploading build" => "Uploading build",
+        "cancelling" | "cancelling build" => "Cancelling build",
+        "cancelled" | "cancelled build" => "Cancelled build",
+        "gathering" | "gathering build output" => "Gathering build output",
+        _ => {
+            return Err(format!(
+                "invalid build state '{s}'; valid states are: {}",
+                BUILD_STATES.map(str::to_ascii_lowercase).join(", ")
+            ));
+        }
+    };
+    Ok(canonical.to_string())
+}
+
 /// A Personal Package Archive reference accepted by `--ppa`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PpaRef {
@@ -1628,6 +1695,41 @@ enum PackageCommand {
         #[arg(short, long)]
         name: Option<String>,
     },
+    /// List build results for source packages in a PPA or the primary archive.
+    #[command(after_help = "Examples:
+  lpcli package builds --owner my-username --ppa my-ppa --name mutter
+  lpcli package builds --owner my-username --ppa my-ppa --name mutter --version 50.1-0ubuntu2.8 --arch amd64
+  lpcli package builds --series resolute --name mutter --version 50.1-0ubuntu2.5")]
+    Builds {
+        /// PPA owner (Launchpad name, without ~). Requires --ppa.
+        #[arg(short, long, requires = "ppa")]
+        owner: Option<String>,
+        /// PPA name. Requires --owner.
+        #[arg(short, long, requires = "owner")]
+        ppa: Option<String>,
+        /// Source package name filter.
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Exact source package version filter.
+        #[arg(short, long)]
+        version: Option<String>,
+        /// Ubuntu series codename. Required for the primary archive; optional PPA filter.
+        #[arg(short, long)]
+        series: Option<String>,
+        /// Only show builds for this architecture (e.g. "amd64").
+        #[arg(short, long, value_parser = parse_build_arch)]
+        arch: Option<String>,
+        /// Only show builds in this state (case-insensitive; e.g. "failed",
+        /// "success", "building", "needs-build", "dependency-wait").
+        #[arg(long, value_parser = parse_build_state)]
+        state: Option<String>,
+        /// Distribution name (default: "ubuntu").
+        #[arg(short, long, default_value = "ubuntu")]
+        distro: String,
+        /// Maximum number of source publications to check (default: 30).
+        #[arg(short, long, default_value = "30", value_parser = parse_positive_u32_limit)]
+        limit: u32,
+    },
     /// Show info about a distribution.
     Distro {
         /// Distribution name (default: "ubuntu").
@@ -2573,6 +2675,32 @@ fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
                     validate_optional_series_for_distro(distro, series.as_deref())
                 }
             }
+            PackageCommand::Builds {
+                owner,
+                ppa,
+                series,
+                distro,
+                ..
+            } => {
+                if (owner.is_some() || ppa.is_some()) && !distro.eq_ignore_ascii_case("ubuntu") {
+                    Err(format!(
+                        "PPA archives are only available for Ubuntu, not '{distro}'"
+                    ))
+                } else if owner.as_deref().is_some_and(|s| s.trim().is_empty()) {
+                    Err("--owner must not be empty".into())
+                } else if ppa.as_deref().is_some_and(|s| s.trim().is_empty()) {
+                    Err("--ppa must not be empty".into())
+                } else if owner.is_none() && ppa.is_none() && series.is_none() {
+                    Err(
+                        "specify --series for the primary archive or --owner and --ppa for a PPA"
+                            .into(),
+                    )
+                } else if let Some(series) = series {
+                    validate_series_for_distro(distro, series)
+                } else {
+                    Ok(())
+                }
+            }
             _ => Ok(()),
         },
         Command::Translation(cmd) => match cmd {
@@ -2712,6 +2840,11 @@ fn parse_positive_limit(value: &str) -> Result<usize, String> {
         return Err("limit must be a positive number".to_string());
     }
     Ok(limit)
+}
+
+fn parse_positive_u32_limit(value: &str) -> Result<u32, String> {
+    let limit = parse_positive_limit(value)?;
+    u32::try_from(limit).map_err(|_| format!("limit must be at most {}", u32::MAX))
 }
 
 // ---------------------------------------------------------------------------
@@ -2945,7 +3078,12 @@ fn read_auth_policy(command: &Command, authenticated: bool, public: bool) -> Rea
             | PackageCommand::Search { .. }
             | PackageCommand::Distro { .. }
             | PackageCommand::Download { .. }
-            | PackageCommand::Changelog { ppa: None, .. },
+            | PackageCommand::Changelog { ppa: None, .. }
+            | PackageCommand::Builds {
+                owner: None,
+                ppa: None,
+                ..
+            },
         )
         | Command::Translation(_)
         | Command::Bug(BugCommand::RemoteBugTrackers { .. }) => Anonymous,

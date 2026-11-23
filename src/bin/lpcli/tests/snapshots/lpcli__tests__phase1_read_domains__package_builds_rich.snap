@@ -1,0 +1,29 @@
+---
+source: src/bin/lpcli/tests/phase1_read_domains.rs
+expression: "render(&report, OutputMode::Rich)"
+---
+Builds for ubuntu
+─────────────────
+  Series: noble
+3 build results found.
+
+ Package ┆ Version    ┆ Series ┆ Arch  ┆ Publicatio ┆ Build      ┆ Binaries ┆ Finished  ┆ Duration  
+         ┆            ┆        ┆       ┆ n          ┆ State      ┆          ┆           ┆           
+─────────┼────────────┼────────┼───────┼────────────┼────────────┼──────────┼───────────┼───────────
+ mutter  ┆ 50.1-0ubun ┆ noble  ┆ amd64 ┆ Published  ┆ Successful ┆ yes      ┆ 2026-10-0 ┆ 0:24:28.8 
+         ┆ tu2.5      ┆        ┆       ┆            ┆ ly built   ┆          ┆ 8 09:04   ┆ 74821     
+ mutter  ┆ 50.1-0ubun ┆ noble  ┆ arm64 ┆ Published  ┆ Failed to  ┆ no       ┆ 2026-10-1 ┆ 0:24:28.8 
+         ┆ tu2.5      ┆        ┆       ┆            ┆ build      ┆          ┆ 4 05:51   ┆ 74821     
+ mutter  ┆ 50.1-0ubun ┆ noble  ┆ none  ┆ Pending    ┆ No builds  ┆ no       ┆ none      ┆ none      
+         ┆ tu2.6      ┆        ┆       ┆            ┆ yet        ┆          ┆           ┆           
+
+2 build logs found.
+
+ Build                                ┆ Log                                                         
+──────────────────────────────────────┼─────────────────────────────────────────────────────────────
+ mutter 50.1-0ubuntu2.5 (noble/amd64) ┆ https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.5 
+                                      ┆ /+build/10/+files/buildlog_ubuntu-noble-amd64.mutter_50.1-0 
+                                      ┆ ubuntu2.5_BUILDING.txt.gz                                   
+ mutter 50.1-0ubuntu2.5 (noble/arm64) ┆ https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.5 
+                                      ┆ /+build/11/+files/buildlog_ubuntu-noble-arm64.mutter_50.1-0 
+                                      ┆ ubuntu2.5_BUILDING.txt.gz
