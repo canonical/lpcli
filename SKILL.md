@@ -197,8 +197,12 @@ retry only the parts that failed.
 | Show distribution info | `lpcli package distro` |
 | Show a PPA | `lpcli package ppa --owner my-username --ppa my-ppa` |
 | List PPA sources | `lpcli package ppa-sources --owner my-username --ppa my-ppa --name curl` |
-| Show PPA build results | `lpcli package builds --owner my-username --ppa my-ppa --name mutter --state failed` (also `--version`, `--arch`, and optional `--series`; `--state` accepts `failed`, `success`, `building`, `needs-build`, `dependency-wait`, …) |
+| Show PPA build results | `lpcli package builds --ppa my-username/my-ppa --name mutter --state failed --exclude-state dependency-wait` (supports `--owner`+`--ppa` or `--ppa OWNER/NAME`, repeatable `--arch`/`--state`/`--exclude-state`, `--version`, `--pocket`, and optional `--series`) |
 | Show primary-archive build results | `lpcli package builds --series resolute --name mutter --version 50.1-0ubuntu2.5` (`--series` is required for the primary archive) |
+| Show a single build record | `lpcli package build show --build-id 33824576 --ppa my-username/my-ppa` (or `--build-url <SELF_LINK>`, or omit `--ppa` for primary archive) |
+| Download build logs | `lpcli package build logs --ppa my-username/my-ppa --series noble --state failed -O ./logs` (supports `--build-id`, `--build-url`, `--include-upload-logs`, and all build filters) |
+| Dry-run bulk build retries | `lpcli package build retry --ppa my-username/my-ppa --series noble --arch amd64 --state failed --dry-run` (bulk retry requires explicit `--state`) |
+| Retry failed builds and back up logs | `lpcli package build retry --ppa my-username/my-ppa --series noble --arch amd64 --state failed --save-logs ./logs --yes` (`--save-logs` saves each log before calling `retry`; omit `--yes` for interactive confirmation) |
 | Download source files | `lpcli package download --name curl --series noble` |
 | Download specific version | `lpcli package download --name curl --series noble --version 8.5.0-2ubuntu10` |
 | Show package changelog | `lpcli package changelog --name unbound --series noble` (shows latest 5 entries; `--limit N`, `--full`, `--version`, `--pocket`, or `--ppa OWNER/NAME`) |

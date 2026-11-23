@@ -176,6 +176,26 @@ fn write_stderr_line(line: &str) {
     let _ = stderr.write_all(b"\n");
 }
 
+/// A file download pairing a source URL with an explicit destination filename.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedDownload {
+    /// Source URL to download.
+    pub url: String,
+    /// Relative destination filename within the output directory.
+    pub filename: String,
+}
+
+/// Extract and validate a safe filename from the final path segment of `url`.
+pub fn extract_safe_filename(url: &str) -> Result<String> {
+    extract_filename(url)
+}
+
+/// Check whether `name` is a single normal path component without traversal,
+/// directory separators, control characters, or bidi overrides.
+pub fn is_valid_filename(name: &str) -> bool {
+    is_safe_filename(name)
+}
+
 /// Download a list of files from the given URLs into `output_dir` in parallel
 /// using animated terminal progress bars ([`ProgressMode::Rich`]).
 ///
@@ -211,7 +231,117 @@ pub async fn download_files_with_progress(
     output_dir: &Path,
     progress: ProgressMode,
 ) -> Result<Vec<DownloadOutcome>> {
-    if urls.is_empty() {
+    let prepared: Vec<(String, Result<String>, String)> = urls
+        .iter()
+        .map(|url| {
+            (
+                redact_url_for_display(url),
+                extract_filename(url),
+                url.clone(),
+            )
+        })
+        .collect();
+    run_download_batch(client, prepared, output_dir, progress, false).await
+}
+
+/// Download public files with explicit target filenames from trusted Launchpad
+/// or Librarian URLs into `output_dir` without sending credentials.
+///
+/// Does not create `output_dir` if `items` is empty. Validates each filename
+/// and cleans up partial files on transfer errors.
+///
+/// # Errors
+///
+/// Returns a hard error only if the output directory cannot be created.
+/// Individual file validation or download failures are captured in the
+/// returned outcomes.
+pub async fn download_named_public_files_with_progress(
+    client: &LaunchpadClient,
+    items: &[NamedDownload],
+    output_dir: &Path,
+    progress: ProgressMode,
+) -> Result<Vec<DownloadOutcome>> {
+    let prepared: Vec<(String, Result<String>, String)> = items
+        .iter()
+        .map(|item| {
+            let name_res = validate_target_filename(&item.filename, &item.url);
+            (
+                sanitize_plain_fragment(&item.filename),
+                name_res,
+                item.url.clone(),
+            )
+        })
+        .collect();
+    run_download_batch(client, prepared, output_dir, progress, true).await
+}
+
+/// Download a single public file from a trusted Launchpad or Librarian URL
+/// directly to `dest` without sending credentials, creating parent directories
+/// after URL trust validation and removing any partial file on failure.
+pub async fn download_public_file(
+    client: &LaunchpadClient,
+    url: &str,
+    dest: &Path,
+) -> Result<DownloadedFile> {
+    let filename = dest
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| is_safe_filename(name))
+        .ok_or_else(|| {
+            LpError::Other(format!(
+                "Unsafe destination filename '{}'",
+                sanitize_plain_fragment(&dest.display().to_string())
+            ))
+        })?;
+    let _ = filename;
+    client.validate_public_url(url)?;
+    if let Some(parent) = dest.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            LpError::Io(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "Failed to create output directory '{}': {e}",
+                    parent.display()
+                ),
+            ))
+        })?;
+    }
+    match client
+        .download_public_to_file_with_progress(url, dest, |_, _| {})
+        .await
+    {
+        Ok(size) => Ok(DownloadedFile {
+            path: dest.to_path_buf(),
+            size,
+        }),
+        Err(e) => {
+            let _ = tokio::fs::remove_file(dest).await;
+            Err(e)
+        }
+    }
+}
+
+fn validate_target_filename(filename: &str, url: &str) -> Result<String> {
+    if !is_safe_filename(filename) {
+        return Err(LpError::Other(format!(
+            "Unsafe filename '{}' for URL: {}",
+            sanitize_plain_fragment(filename),
+            redact_url_for_display(url)
+        )));
+    }
+    Ok(filename.to_string())
+}
+
+async fn run_download_batch(
+    client: &LaunchpadClient,
+    items: Vec<(String, Result<String>, String)>,
+    output_dir: &Path,
+    progress: ProgressMode,
+    public_only: bool,
+) -> Result<Vec<DownloadOutcome>> {
+    if items.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -226,24 +356,24 @@ pub async fn download_files_with_progress(
         ))
     })?;
 
-    let total_files = urls.len();
+    let total_files = items.len();
     if progress == ProgressMode::Plain {
         write_stderr_line(&format_plain_start(total_files, output_dir));
     }
 
     let multi = (progress == ProgressMode::Rich).then(MultiProgress::new);
 
-    // Prepare tasks: extract filenames upfront so we can report errors
-    // immediately for malformed URLs without spawning a task.
+    // Prepare tasks: validate filenames upfront so invalid entries are
+    // reported immediately without spawning a task.
     let mut tasks = Vec::with_capacity(total_files);
     let mut immediate_failures = Vec::new();
 
-    for (idx, url) in urls.iter().enumerate() {
-        let filename = match extract_filename(url) {
+    for (idx, (fallback_name, filename_res, url)) in items.into_iter().enumerate() {
+        let filename = match filename_res {
             Ok(f) => f,
             Err(e) => {
                 let outcome = DownloadOutcome::Failed {
-                    filename: redact_url_for_display(url),
+                    filename: fallback_name,
                     error: crate::error::redact_secrets(&e.to_string()),
                 };
                 if progress == ProgressMode::Plain {
@@ -267,33 +397,37 @@ pub async fn download_files_with_progress(
 
         let dest = output_dir.join(&filename);
         let client_clone = client.clone();
-        let url_clone = url.clone();
 
         let handle = tokio::spawn(async move {
             let milestone_reported = AtomicBool::new(false);
-            let result = client_clone
-                .download_to_file_with_progress(&url_clone, &dest, |downloaded, total| {
-                    if let Some(pb) = &pb {
-                        if let Some(total_size) = total
-                            && pb.length() != Some(total_size)
-                        {
-                            pb.set_length(total_size);
-                        }
-                        pb.set_position(downloaded);
-                    }
-                    if progress == ProgressMode::Plain
-                        && let Some(total_size) = total
-                        && total_size > 0
-                        && downloaded < total_size
-                        && downloaded.saturating_mul(2) >= total_size
-                        && !milestone_reported.swap(true, Ordering::Relaxed)
+            let on_progress = |downloaded: u64, total: Option<u64>| {
+                if let Some(pb) = &pb {
+                    if let Some(total_size) = total
+                        && pb.length() != Some(total_size)
                     {
-                        write_stderr_line(&format_plain_milestone(
-                            &filename, downloaded, total_size,
-                        ));
+                        pb.set_length(total_size);
                     }
-                })
-                .await;
+                    pb.set_position(downloaded);
+                }
+                if progress == ProgressMode::Plain
+                    && let Some(total_size) = total
+                    && total_size > 0
+                    && downloaded < total_size
+                    && downloaded.saturating_mul(2) >= total_size
+                    && !milestone_reported.swap(true, Ordering::Relaxed)
+                {
+                    write_stderr_line(&format_plain_milestone(&filename, downloaded, total_size));
+                }
+            };
+            let result = if public_only {
+                client_clone
+                    .download_public_to_file_with_progress(&url, &dest, on_progress)
+                    .await
+            } else {
+                client_clone
+                    .download_to_file_with_progress(&url, &dest, on_progress)
+                    .await
+            };
 
             match result {
                 Ok(size) => {
@@ -621,5 +755,103 @@ mod tests {
             }
             DownloadOutcome::Success(_) => panic!("expected traversal URL to fail"),
         }
+    }
+
+    #[tokio::test]
+    async fn download_named_public_files_and_single_public_file_enforce_safety() {
+        let mut server = mockito::Server::new_async().await;
+        let base = server.url();
+        let ok_mock = server
+            .mock("GET", "/+files/log.txt.gz")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_status(200)
+            .with_body(b"log-data")
+            .expect(2)
+            .create_async()
+            .await;
+        let err_mock = server
+            .mock("GET", "/+files/broken.txt.gz")
+            .with_status(500)
+            .with_body("boom")
+            .create_async()
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let empty_dir = dir.path().join("empty-logs");
+        let client = LaunchpadClient::new(Some(crate::auth::Credentials::new(
+            "lpcli",
+            "tok",
+            "topsecret",
+        )))
+        .with_base_url(base.clone());
+
+        assert!(
+            download_named_public_files_with_progress(&client, &[], &empty_dir, ProgressMode::None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !empty_dir.exists(),
+            "empty batch must not create output directory"
+        );
+
+        let batch_dir = dir.path().join("batch");
+        let outcomes = download_named_public_files_with_progress(
+            &client,
+            &[
+                NamedDownload {
+                    url: format!("{base}/+files/log.txt.gz"),
+                    filename: "build-1_log.txt.gz".into(),
+                },
+                NamedDownload {
+                    url: format!("{base}/+files/log.txt.gz"),
+                    filename: "../escape.log".into(),
+                },
+                NamedDownload {
+                    url: format!("{base}/+files/broken.txt.gz"),
+                    filename: "broken.txt.gz".into(),
+                },
+                NamedDownload {
+                    url: "https://untrusted.invalid/+files/evil.log".into(),
+                    filename: "evil.log".into(),
+                },
+            ],
+            &batch_dir,
+            ProgressMode::None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcomes.len(), 4);
+        assert!(matches!(outcomes[0], DownloadOutcome::Success(_)));
+        assert!(matches!(outcomes[1], DownloadOutcome::Failed { .. }));
+        assert!(matches!(outcomes[2], DownloadOutcome::Failed { .. }));
+        assert!(matches!(outcomes[3], DownloadOutcome::Failed { .. }));
+        assert_eq!(
+            std::fs::read(batch_dir.join("build-1_log.txt.gz")).unwrap(),
+            b"log-data"
+        );
+        assert!(!batch_dir.join("broken.txt.gz").exists());
+
+        // Single-file public helper creates parent dir on trusted URL and saves verbatim.
+        let nested = dir.path().join("backup").join("saved.txt.gz");
+        let downloaded =
+            download_public_file(&client, &format!("{base}/+files/log.txt.gz"), &nested)
+                .await
+                .unwrap();
+        assert_eq!(downloaded.size, 8);
+        assert_eq!(std::fs::read(&nested).unwrap(), b"log-data");
+
+        // Untrusted URL fails before creating nested directory.
+        let uncreated = dir.path().join("never-backup").join("bad.log");
+        assert!(
+            download_public_file(&client, "https://untrusted.invalid/bad.log", &uncreated,)
+                .await
+                .is_err()
+        );
+        assert!(!dir.path().join("never-backup").exists());
+
+        ok_mock.assert_async().await;
+        err_mock.assert_async().await;
     }
 }

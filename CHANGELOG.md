@@ -14,12 +14,24 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 - `lpcli package builds` (and library helpers `get_source_builds`,
   `get_source_builds_raw`, `source_has_active_binaries`, and `SourceBuild`) to
-  list one row per architecture with the source version, series, build state,
-  binaries-published flag, finish time, duration, and build log URL for a PPA
-  (`--owner`/`--ppa`) or the primary archive (`--series`). Filters are
-  `--name`, `--version`, `--arch`, and `--state`; sources with no builds yet
-  show `No builds yet`. `SourceSearchParams::statuses` adds repeated `status`
-  filters, used to exclude deleted and obsolete publications.
+  list one row per architecture with the build ID, source version, series,
+  build state, binaries-published flag, finish time, duration, and build log
+  URL for a PPA (`--owner`/`--ppa` or `--ppa OWNER/NAME`) or the primary archive
+  (`--series`). Filters include `--name`, `--version`, repeatable `--arch`,
+  repeatable `--state`, `--exclude-state`, and `--pocket`; sources with no
+  builds yet show `No builds yet`. `SourceSearchParams::statuses` adds repeated
+  `status` filters, used to exclude deleted and obsolete publications.
+- `lpcli package build show`, `lpcli package build logs`, and
+  `lpcli package build retry` (alongside library helpers `get_ppa_build_records`,
+  `get_ppa_build_records_raw`, `get_build`, `get_build_raw`, `get_ppa_build`,
+  `get_ppa_build_raw`, `get_primary_build`, `get_primary_build_raw`,
+  `retry_build`, `retry_build_raw`, `BuildRecordSearchParams`,
+  `LaunchpadClient::download_public_to_file_with_progress`, and
+  `download::download_named_public_files_with_progress`) to inspect build
+  records, download build and upload logs without sending credentials, preview
+  bulk retries with `--dry-run`, confirm bulk retries interactively (or skip with
+  `--yes`), require an explicit `--state` on bulk retries, and preserve
+  existing logs (`--save-logs`) before calling Launchpad's `retry` operation.
 
 ## [0.5.1] - 2026-11-20
 

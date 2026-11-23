@@ -682,11 +682,24 @@ lpcli package ppa-sources --owner my-username --ppa my-ppa --name curl
 
 # Show build results and log URLs for source packages in a PPA
 lpcli package builds --owner my-username --ppa my-ppa --name mutter
-lpcli package builds --owner my-username --ppa my-ppa --name mutter --version 50.1-0ubuntu2.8 --arch amd64
-lpcli package builds --owner my-username --ppa my-ppa --name mutter --state failed
+lpcli package builds --ppa my-username/my-ppa --name mutter --version 50.1-0ubuntu2.8 --arch amd64
+lpcli package builds --ppa my-username/my-ppa --name mutter --state failed --exclude-state dependency-wait
 
 # Show build results in the primary archive
 lpcli package builds --series resolute --name mutter --version 50.1-0ubuntu2.5
+
+# Show full details of an individual build record
+lpcli package build show --build-id 33824576
+lpcli package build show --build-id 33961943 --ppa my-username/my-ppa
+
+# Download build logs for a single build or filtered builds
+lpcli package build logs --build-id 33961943 --ppa my-username/my-ppa -O ./logs
+lpcli package build logs --ppa my-username/my-ppa --series noble --arch amd64 --state failed -O ./logs
+
+# Preview or retry failed builds (bulk retries require --state and prompt unless --yes or --dry-run is set)
+lpcli package build retry --build-id 33961943 --ppa my-username/my-ppa
+lpcli package build retry --ppa my-username/my-ppa --series noble --arch amd64 --state failed --dry-run
+lpcli package build retry --ppa my-username/my-ppa --series noble --arch amd64 --state failed --save-logs ./logs --yes
 
 # Download source files for a published source package
 lpcli package download --name curl --series noble

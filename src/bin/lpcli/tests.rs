@@ -2079,10 +2079,243 @@ fn package_builds_cli_validation() {
         &[
             "lpcli", "package", "builds", "--owner", "jdoe", "--ppa", "ppa", "--series", "24.04",
         ][..],
+        &[
+            "lpcli",
+            "package",
+            "builds",
+            "--ppa",
+            "jdoe/ppa",
+            "--arch",
+            "amd64",
+            "--arch",
+            "arm64",
+            "--state",
+            "failed",
+            "--exclude-state",
+            "dep-wait",
+            "--pocket",
+            "release",
+        ][..],
     ] {
         let cli = Cli::try_parse_from(good).unwrap_or_else(|e| panic!("{good:?}: {e}"));
         validate_cli(&cli).unwrap_or_else(|e| panic!("{good:?}: {e}"));
     }
+}
+
+#[test]
+fn resolve_ppa_args_supports_both_conventions_and_rejects_ambiguous() {
+    assert_eq!(resolve_ppa_args(None, None).unwrap(), None);
+    let slash = resolve_ppa_args(None, Some("jdoe/my-ppa"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(slash.label(), "~jdoe/my-ppa");
+    let split = resolve_ppa_args(Some("jdoe"), Some("my-ppa"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(split, slash);
+
+    for bad in [
+        (Some("jdoe"), None),
+        (None, Some("my-ppa")),
+        (Some("jdoe"), Some("jdoe/my-ppa")),
+        (Some("~jdoe"), Some("my-ppa")),
+        (Some(""), Some("my-ppa")),
+        (Some("jdoe"), Some("")),
+    ] {
+        assert!(resolve_ppa_args(bad.0, bad.1).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn package_build_subcommands_validation_policy_and_no_input() {
+    for bad in [
+        &["lpcli", "package", "build", "show"][..],
+        &["lpcli", "package", "build", "show", "--build-id", "0"][..],
+        &[
+            "lpcli",
+            "package",
+            "build",
+            "show",
+            "--build-url",
+            "ftp://example.com/build/1",
+        ][..],
+        &[
+            "lpcli",
+            "package",
+            "build",
+            "show",
+            "--build-id",
+            "1",
+            "--build-url",
+            "https://api.launchpad.net/devel/ubuntu/+archive/primary/+build/1",
+        ][..],
+        &["lpcli", "package", "build", "logs"][..],
+        &[
+            "lpcli",
+            "package",
+            "build",
+            "logs",
+            "--build-id",
+            "1",
+            "--state",
+            "failed",
+        ][..],
+        // Bulk retry requires explicit --state.
+        &[
+            "lpcli",
+            "package",
+            "build",
+            "retry",
+            "--ppa",
+            "jdoe/myppa",
+            "--series",
+            "noble",
+        ][..],
+        // Bulk retry without --yes / --dry-run rejects --no-input.
+        &[
+            "lpcli",
+            "--no-input",
+            "package",
+            "build",
+            "retry",
+            "--ppa",
+            "jdoe/myppa",
+            "--state",
+            "failed",
+        ][..],
+        // Mutations forbid --public.
+        &[
+            "lpcli",
+            "--public",
+            "package",
+            "build",
+            "retry",
+            "--build-id",
+            "42",
+        ][..],
+        // --save-logs must not be empty.
+        &[
+            "lpcli",
+            "package",
+            "build",
+            "retry",
+            "--build-id",
+            "42",
+            "--save-logs",
+            "  ",
+        ][..],
+        // TSV is not supported for single/logs/retry.
+        &[
+            "lpcli",
+            "--format",
+            "tsv",
+            "package",
+            "build",
+            "show",
+            "--build-id",
+            "42",
+        ][..],
+    ] {
+        let result = Cli::try_parse_from(bad).and_then(|cli| validate_cli(&cli));
+        assert!(result.is_err(), "expected validation failure for {bad:?}");
+    }
+
+    for good in [
+        &[
+            "lpcli",
+            "--public",
+            "package",
+            "build",
+            "show",
+            "--build-id",
+            "42",
+        ][..],
+        &[
+            "lpcli",
+            "--public",
+            "package",
+            "build",
+            "logs",
+            "--ppa",
+            "jdoe/myppa",
+            "--state",
+            "failed",
+            "-O",
+            "./logs",
+            "--include-upload-logs",
+        ][..],
+        &[
+            "lpcli",
+            "--no-input",
+            "package",
+            "build",
+            "retry",
+            "--build-id",
+            "42",
+            "--quiet",
+        ][..],
+        &[
+            "lpcli",
+            "--no-input",
+            "package",
+            "build",
+            "retry",
+            "--ppa",
+            "jdoe/myppa",
+            "--state",
+            "failed",
+            "--dry-run",
+        ][..],
+        &[
+            "lpcli",
+            "--no-input",
+            "package",
+            "build",
+            "retry",
+            "--ppa",
+            "jdoe/myppa",
+            "--state",
+            "failed",
+            "--save-logs",
+            "./logs",
+            "--yes",
+            "--quiet",
+        ][..],
+    ] {
+        let cli = Cli::try_parse_from(good).unwrap_or_else(|e| panic!("{good:?}: {e}"));
+        validate_cli(&cli).unwrap_or_else(|e| panic!("{good:?}: {e}"));
+    }
+
+    // Auth policies: primary archive read commands default Anonymous; PPAs and build-url default Authenticated; retry always Authenticated.
+    assert_eq!(
+        parsed_read_policy(&["lpcli", "package", "build", "show", "--build-id", "42"]),
+        ReadAuthPolicy::Anonymous
+    );
+    assert_eq!(
+        parsed_read_policy(&[
+            "lpcli",
+            "package",
+            "build",
+            "show",
+            "--build-id",
+            "42",
+            "--ppa",
+            "jdoe/myppa"
+        ]),
+        ReadAuthPolicy::Authenticated
+    );
+    assert_eq!(
+        parsed_read_policy(&["lpcli", "package", "build", "logs", "--series", "noble"]),
+        ReadAuthPolicy::Anonymous
+    );
+    assert_eq!(
+        parsed_read_policy(&["lpcli", "package", "build", "logs", "--ppa", "jdoe/myppa"]),
+        ReadAuthPolicy::Authenticated
+    );
+    assert_eq!(
+        parsed_read_policy(&["lpcli", "package", "build", "retry", "--build-id", "42",]),
+        ReadAuthPolicy::Authenticated
+    );
 }
 
 #[test]
@@ -5293,6 +5526,8 @@ fn early_error_output_tolerates_fields_until_configuration_selects_json() {
 
 #[path = "tests/phase1_bug.rs"]
 mod phase1_bug;
+#[path = "tests/phase1_builds.rs"]
+mod phase1_builds;
 #[path = "tests/phase1_git.rs"]
 mod phase1_git;
 #[path = "tests/phase1_identity.rs"]

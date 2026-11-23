@@ -80,16 +80,26 @@ are placed under `lpcli` and are never added to Launchpad entries.
 | `package download` | `source_package_publishing_history`, `lpcli` (`source_file_urls`, output directory, per-file `downloads`, `downloaded`, `failed`) |
 | `package changelog` | `source_package_publishing_history`, `lpcli` (`archive`, `series`, `changelog_url`, `changelog`, `total_entries`, `truncated`, `entries`) |
 | `package builds` | `source_publications`, `builds`, `lpcli` (`archive`, `series`, `complete`, `sources`) |
+| `package build logs` | `builds`, `lpcli` (`archive`, `series`, `complete`, `output_directory`, `downloads`, `downloaded`, `skipped_no_log`, `failed`) |
+| `package build retry` | `builds`, `lpcli` (`archive`, `series`, `dry_run`, `cancelled`, `eligible`, `retried`, `skipped`, `saved_logs`, `failures`) |
 
 `package builds` prints `builds.entries` from the `getBuilds` entries of the
-listed source publications, in source and architecture order. `--arch` and
-`--state` filter those entries locally, so `builds` omits `start` and
-`total_size`. `lpcli.sources` is keyed by the source publication's `self_link`
-and records the build `self_link`s listed for that source plus whether
+listed source publications, in source and architecture order. `--arch`,
+`--state`, and `--exclude-state` filter those entries locally, so `builds` omits
+`start` and `total_size`. `lpcli.sources` is keyed by the source publication's
+`self_link` and records the build `self_link`s listed for that source plus whether
 Launchpad reports active binary publications; an empty `builds` list means the
 source has no builds yet. `lpcli.complete` is false when `--limit` cut the
 source publications short; `source_publications.next_collection_link` then
 continues the unfiltered source list.
+
+`package build show` prints Launchpad's `build` entry unchanged.
+`package build logs` downloads build logs into `output_directory` without
+sending Launchpad credentials and prints matching `builds.entries` alongside
+per-file outcomes under `lpcli.downloads`.
+`package build retry` prints the retried build entries in `builds.entries` (or
+eligible preview entries during `--dry-run` / cancelled runs) alongside
+`lpcli.retried`, `lpcli.skipped`, `lpcli.saved_logs`, and `lpcli.failures`.
 
 `status` prints:
 

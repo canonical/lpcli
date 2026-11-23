@@ -1,0 +1,11 @@
+---
+source: src/bin/lpcli/tests/phase1_builds.rs
+expression: "stable_text(&render(&dry_run.report, OutputMode::Plain), &base)"
+---
+Build retry dry run for ~jdoe/test
+Series: noble
+OK: Dry run: 2 eligible build(s) would be retried, 1 skipped.
+Would retry #301 mutter 50.1-1~ppa1 (noble/amd64, Failed to build)
+Would retry #302 mutter 50.1-1~ppa1 (noble/amd64, Failed to build)
+Would back up 2 existing log(s) before retrying.
+Skipped #303 mutter 50.1-1~ppa1 (noble/amd64): not retryable (state: Failed to build, can_be_retried is false)
