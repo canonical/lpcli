@@ -67,7 +67,7 @@ dirs = "7"
 toml = "1.0"
 
 # URL handling
-url = { version = "2", features = ["serde"] }
+url = { version = ">=2.5.9", features = ["serde"] }
 percent-encoding = "2"
 
 # Time
