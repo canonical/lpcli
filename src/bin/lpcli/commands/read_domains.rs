@@ -564,11 +564,43 @@ struct PackageBuildsRequest {
 /// The source publications come from `getPublishedSources`; each source's
 /// builds come from its `getBuilds` operation, scoped to one publication so
 /// that the primary archive does not time out. Active binary publications are
-/// checked per source, and only when at least one build succeeded.
+/// checked per source, only for sources with visible rows and at least one
+/// successful build.
 async fn package_builds(
     client: &LaunchpadClient,
     request: &PackageBuildsRequest,
 ) -> lpcli::error::Result<Report> {
+    use futures_util::TryStreamExt as _;
+
+    if request.limit == 0 {
+        return Err(LpError::Usage("--limit must be at least 1.".into()));
+    }
+    if (request.owner.is_some() || request.ppa.is_some())
+        && !request.distro.eq_ignore_ascii_case("ubuntu")
+    {
+        return Err(LpError::Usage(format!(
+            "PPA archives are only available for Ubuntu, not '{}'.",
+            request.distro
+        )));
+    }
+    if request.owner.is_some() != request.ppa.is_some() {
+        return Err(LpError::Usage(
+            "--owner and --ppa must be provided together.".into(),
+        ));
+    }
+    let owner = request.owner.as_deref().map(str::trim);
+    let ppa = request.ppa.as_deref().map(str::trim);
+    if owner.is_some_and(str::is_empty) {
+        return Err(LpError::Usage("--owner must not be empty.".into()));
+    }
+    if ppa.is_some_and(str::is_empty) {
+        return Err(LpError::Usage("--ppa must not be empty.".into()));
+    }
+
+    let canonical_series_name = request
+        .series
+        .as_deref()
+        .map(|s| canonical_series(&request.distro, s));
     let params = SourceSearchParams {
         source_name: request.name.as_deref(),
         version: request.version.as_deref(),
@@ -578,24 +610,19 @@ async fn package_builds(
         ..Default::default()
     };
 
-    let (page, archive_label) = if let (Some(owner), Some(ppa)) = (&request.owner, &request.ppa) {
+    let (page, archive_label) = if let (Some(owner), Some(ppa)) = (owner, ppa) {
         if let Err(error) = packages::get_ppa_raw(client, owner, ppa).await {
             return Err(match error {
                 LpError::NotFound(_) => LpError::NotFound(format!("PPA ~{owner}/{ppa} not found.")),
                 other => other,
             });
         }
-        let page = packages::search_ppa_sources_raw(
-            client,
-            owner,
-            ppa,
-            request.series.as_deref(),
-            &params,
-        )
-        .await?;
+        let page =
+            packages::search_ppa_sources_raw(client, owner, ppa, canonical_series_name, &params)
+                .await?;
         (page, format!("~{owner}/{ppa}"))
     } else {
-        let series = request.series.as_deref().ok_or_else(|| {
+        let series = canonical_series_name.ok_or_else(|| {
             LpError::Usage(
                 "specify --series for the primary archive or --owner and --ppa for a PPA".into(),
             )
@@ -607,24 +634,23 @@ async fn package_builds(
 
     let sources = &page.value.entries;
 
-    // Fetch each source's builds concurrently, preserving source order.
-    let fetched: Vec<lpcli::error::Result<Raw<Vec<packages::SourceBuild>>>> =
-        futures_util::stream::iter(sources)
-            .map(|source| async move {
-                let link = source
-                    .self_link
-                    .as_deref()
-                    .ok_or_else(|| LpError::Other("source publication has no self_link".into()))?;
-                packages::get_source_builds_raw(client, link).await
-            })
-            .buffered(8)
-            .collect()
-            .await;
+    // Fetch each source's builds concurrently, preserving source order and
+    // short-circuiting on the first failure (e.g. 429 or auth error).
+    let fetched: Vec<Raw<Vec<packages::SourceBuild>>> = futures_util::stream::iter(sources)
+        .map(|source| async move {
+            let link = source
+                .self_link
+                .as_deref()
+                .ok_or_else(|| LpError::Other("source publication has no self_link".into()))?;
+            packages::get_source_builds_raw(client, link).await
+        })
+        .buffered(8)
+        .try_collect()
+        .await?;
 
     let mut source_builds: Vec<(Vec<packages::SourceBuild>, Vec<Value>)> =
         Vec::with_capacity(fetched.len());
-    for result in fetched {
-        let raw = result?;
+    for raw in fetched {
         let entries = raw
             .raw
             .get("entries")
@@ -634,41 +660,57 @@ async fn package_builds(
         source_builds.push((raw.value, entries));
     }
 
-    // Only sources with a successful build can have active binaries. A source
-    // with no builds, or only failed/pending builds, is definitely "no".
+    let arch_filter = request.arch.as_deref();
+    let state_filter = request.state.as_deref();
+    let visible_per_source: Vec<Vec<usize>> = source_builds
+        .iter()
+        .map(|(builds, _)| {
+            builds
+                .iter()
+                .enumerate()
+                .filter(|(_, build)| {
+                    arch_filter.is_none_or(|arch| build.arch_tag.as_deref() == Some(arch))
+                })
+                .filter(|(_, build)| {
+                    state_filter.is_none_or(|state| build.buildstate.as_deref() == Some(state))
+                })
+                .map(|(idx, _)| idx)
+                .collect()
+        })
+        .collect();
+
+    // Only sources with at least one visible build row AND a successful build
+    // can have active binaries worth querying.
     let checks: Vec<usize> = source_builds
         .iter()
         .enumerate()
-        .filter(|(_, (builds, _))| {
-            builds
-                .iter()
-                .any(|build| build.buildstate.as_deref() == Some("Successfully built"))
+        .filter(|(idx, (builds, _))| {
+            !visible_per_source[*idx].is_empty()
+                && builds
+                    .iter()
+                    .any(|build| build.buildstate.as_deref() == Some("Successfully built"))
         })
         .map(|(idx, _)| idx)
         .collect();
     let mut binaries = vec![false; sources.len()];
-    let checked: Vec<(usize, lpcli::error::Result<bool>)> = futures_util::stream::iter(checks)
+    let checked: Vec<(usize, bool)> = futures_util::stream::iter(checks)
         .map(|idx| async move {
-            let Some(link) = sources[idx].self_link.as_deref() else {
-                return (
-                    idx,
-                    Err(LpError::Other("source publication has no self_link".into())),
-                );
-            };
-            (
+            let link = sources[idx]
+                .self_link
+                .as_deref()
+                .ok_or_else(|| LpError::Other("source publication has no self_link".into()))?;
+            Ok::<_, LpError>((
                 idx,
-                packages::source_has_active_binaries(client, link).await,
-            )
+                packages::source_has_active_binaries(client, link).await?,
+            ))
         })
         .buffered(8)
-        .collect()
-        .await;
-    for (idx, result) in checked {
-        binaries[idx] = result?;
+        .try_collect()
+        .await?;
+    for (idx, has_binaries) in checked {
+        binaries[idx] = has_binaries;
     }
 
-    let arch_filter = request.arch.as_deref();
-    let state_filter = request.state.as_deref();
     let mut rows = Vec::new();
     let mut raw_builds = Vec::new();
     let mut log_rows = Vec::new();
@@ -677,26 +719,24 @@ async fn package_builds(
     for (idx, source) in sources.iter().enumerate() {
         let (builds, builds_json) = &source_builds[idx];
         let series = output::link_name(source.distro_series_link.as_deref());
-        let visible: Vec<usize> = builds
-            .iter()
-            .enumerate()
-            .filter(|(_, build)| {
-                arch_filter.is_none_or(|arch| build.arch_tag.as_deref() == Some(arch))
-            })
-            .filter(|(_, build)| {
-                state_filter.is_none_or(|state| build.buildstate.as_deref() == Some(state))
-            })
-            .map(|(idx, _)| idx)
-            .collect();
+        let visible = &visible_per_source[idx];
 
         let mut visible_links = Vec::with_capacity(visible.len());
-        for &build_idx in &visible {
+        for &build_idx in visible {
             let build = &builds[build_idx];
             if let Some(raw) = builds_json.get(build_idx) {
                 raw_builds.push(raw.clone());
             }
             let build_series =
                 output::link_name(build.distro_series_link.as_deref()).or_else(|| series.clone());
+            let package = build
+                .source_package_name
+                .as_deref()
+                .or(source.source_package_name.as_deref());
+            let version = build
+                .source_package_version
+                .as_deref()
+                .or(source.source_package_version.as_deref());
             visible_links.push(
                 build
                     .self_link
@@ -705,31 +745,27 @@ async fn package_builds(
                     .unwrap_or(Value::Null),
             );
             if let Some(log_url) = &build.build_log_url {
-                let package = build
-                    .source_package_name
-                    .as_deref()
-                    .or(source.source_package_name.as_deref())
-                    .unwrap_or("");
-                let version = build
-                    .source_package_version
-                    .as_deref()
-                    .or(source.source_package_version.as_deref())
-                    .unwrap_or("");
                 let arch = build.arch_tag.as_deref().unwrap_or("");
                 let build_series = build_series.as_deref().unwrap_or("");
                 log_rows.push(vec![
-                    Some(format!("{package} {version} ({build_series}/{arch})")),
+                    Some(format!(
+                        "{} {} ({build_series}/{arch})",
+                        package.unwrap_or(""),
+                        version.unwrap_or(""),
+                    )),
                     Some(log_url.clone()),
                 ]);
             }
+            let row_binaries =
+                build.buildstate.as_deref() == Some("Successfully built") && binaries[idx];
             rows.push(vec![
-                build.source_package_name.clone(),
-                build.source_package_version.clone(),
+                package.map(str::to_string),
+                version.map(str::to_string),
                 build_series,
                 build.arch_tag.clone(),
                 source.status.clone(),
                 build.buildstate.clone(),
-                Some(binaries_word(binaries[idx])),
+                Some(binaries_word(row_binaries)),
                 build.date_built.map(|ts| ts.to_string()),
                 build.duration.clone(),
                 build.build_log_url.clone(),
@@ -771,15 +807,15 @@ async fn package_builds(
         "builds": {"entries": raw_builds},
         "lpcli": {
             "archive": archive_label,
-            "series": request.series,
+            "series": canonical_series_name,
             "complete": complete,
             "sources": source_map,
         },
     });
 
     let mut blocks = vec![Block::Heading(format!("Builds for {archive_label}"))];
-    if let Some(series) = &request.series {
-        blocks.push(Block::Field("Series", series.clone()));
+    if let Some(series) = canonical_series_name {
+        blocks.push(Block::Field("Series", series.to_string()));
     }
     let hint = (!complete)
         .then(|| "More source publications match; raise --limit to see them.".to_string());
@@ -796,7 +832,6 @@ async fn package_builds(
         hint,
     });
     if !log_rows.is_empty() {
-        blocks.push(Block::Break);
         blocks.push(Block::RichTable {
             records: Records {
                 columns: vec![column("Build", "build"), column("Log", "build_log_url")],

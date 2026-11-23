@@ -23,7 +23,7 @@ Series: noble
 Arch: arm64
 Publication: Published
 Build State: Failed to build
-Binaries: yes
+Binaries: no
 Finished: 2026-10-14 05:51
 Duration: 0:24:28.874821
 Log: https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.5/+build/11/+files/buildlog_ubuntu-noble-arm64.mutter_50.1-0ubuntu2.5_BUILDING.txt.gz

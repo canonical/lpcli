@@ -12,7 +12,7 @@ Builds for ubuntu
 ─────────┼────────────┼────────┼───────┼────────────┼────────────┼──────────┼───────────┼───────────
  mutter  ┆ 50.1-0ubun ┆ noble  ┆ amd64 ┆ Published  ┆ Successful ┆ yes      ┆ 2026-10-0 ┆ 0:24:28.8 
          ┆ tu2.5      ┆        ┆       ┆            ┆ ly built   ┆          ┆ 8 09:04   ┆ 74821     
- mutter  ┆ 50.1-0ubun ┆ noble  ┆ arm64 ┆ Published  ┆ Failed to  ┆ yes      ┆ 2026-10-1 ┆ 0:24:28.8 
+ mutter  ┆ 50.1-0ubun ┆ noble  ┆ arm64 ┆ Published  ┆ Failed to  ┆ no       ┆ 2026-10-1 ┆ 0:24:28.8 
          ┆ tu2.5      ┆        ┆       ┆            ┆ build      ┆          ┆ 4 05:51   ┆ 74821     
  mutter  ┆ 50.1-0ubun ┆ noble  ┆ none  ┆ Pending    ┆ No builds  ┆ no       ┆ none      ┆ none      
          ┆ tu2.6      ┆        ┆       ┆            ┆ yet        ┆          ┆           ┆           

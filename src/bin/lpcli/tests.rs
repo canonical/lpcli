@@ -2055,6 +2055,37 @@ fn build_arch_parser_normalizes_and_rejects_unknown() {
 }
 
 #[test]
+fn package_builds_cli_validation() {
+    for bad in [
+        &[
+            "lpcli", "package", "builds", "--series", "noble", "--limit", "0",
+        ][..],
+        &["lpcli", "package", "builds"][..],
+        &[
+            "lpcli", "package", "builds", "--owner", "jdoe", "--ppa", "ppa", "--distro", "debian",
+        ][..],
+        &["lpcli", "package", "builds", "--owner", " ", "--ppa", "ppa"][..],
+        &["lpcli", "package", "builds", "--owner", "jdoe", "--ppa", ""][..],
+    ] {
+        let result = Cli::try_parse_from(bad).and_then(|cli| validate_cli(&cli));
+        assert!(result.is_err(), "expected validation failure for {bad:?}");
+    }
+
+    for good in [
+        &["lpcli", "package", "builds", "--series", "24.04"][..],
+        &[
+            "lpcli", "package", "builds", "--series", "Noble", "--limit", "1",
+        ][..],
+        &[
+            "lpcli", "package", "builds", "--owner", "jdoe", "--ppa", "ppa", "--series", "24.04",
+        ][..],
+    ] {
+        let cli = Cli::try_parse_from(good).unwrap_or_else(|e| panic!("{good:?}: {e}"));
+        validate_cli(&cli).unwrap_or_else(|e| panic!("{good:?}: {e}"));
+    }
+}
+
+#[test]
 fn cli_queue_search_accepts_lowercase_status() {
     let cli = Cli::try_parse_from([
         "lpcli", "queue", "search", "--pocket", "proposed", "--status", "new",

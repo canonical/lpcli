@@ -65,20 +65,6 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
   milestones, per-file results, and a summary; `--progress none` disables
   progress output).
 
-### Fixed
-
-- `git default` now handles `null` API responses as exit-code-4 not-found
-  errors when a target has no default Git repository configured (with a hint
-  to try `ubuntu/+source/<pkg>` for source packages), maps invalid bare
-  distribution/series targets to usage errors (exit 2) and missing targets to
-  not-found errors (exit 4), rejects empty, repository-path, and `~person`
-  targets locally, and updates help and docs to show project and
-  `ubuntu/+source/<pkg>` targets instead of bare distribution names.
-- `git list-person-repos` queried `~person/+git`, which is a web-UI page
-  that does not exist on the API host, and failed for every name. It now
-  uses the root `/+git` collection's `getRepositories` operation with a
-  `~owner` target, so person and team listings work.
-
 ### Changed
 
 - Expanded `plain` sanitization (`clean_plain`, `download` progress messages,
@@ -113,6 +99,20 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 - Clearer assistive-technology wording in the security-key selection prompt
   (`Choose a ... (enter a number from 1 to N): `) and grant-secret prompt
   (`Enter grant secret (oauth_token_secret): `).
+
+### Fixed
+
+- `git default` now handles `null` API responses as exit-code-4 not-found
+  errors when a target has no default Git repository configured (with a hint
+  to try `ubuntu/+source/<pkg>` for source packages), maps invalid bare
+  distribution/series targets to usage errors (exit 2) and missing targets to
+  not-found errors (exit 4), rejects empty, repository-path, and `~person`
+  targets locally, and updates help and docs to show project and
+  `ubuntu/+source/<pkg>` targets instead of bare distribution names.
+- `git list-person-repos` queried `~person/+git`, which is a web-UI page
+  that does not exist on the API host, and failed for every name. It now
+  uses the root `/+git` collection's `getRepositories` operation with a
+  `~owner` target, so person and team listings work.
 
 ## [0.5.0] - 2026-11-17
 
@@ -344,7 +344,8 @@ The JSON output contract is documented in
 
 First tagged release.
 
-[Unreleased]: https://github.com/canonical/lpcli/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/canonical/lpcli/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/canonical/lpcli/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/canonical/lpcli/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/canonical/lpcli/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/canonical/lpcli/compare/v0.3.1...v0.3.2

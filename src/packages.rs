@@ -1363,6 +1363,48 @@ mod tests {
         none_mock.assert_async().await;
     }
 
+    #[tokio::test]
+    async fn get_source_builds_and_binaries_reject_cross_origin_self_link() {
+        let mut api = mockito::Server::new_async().await;
+        let mut foreign = mockito::Server::new_async().await;
+        let api_hit = api
+            .mock("GET", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let foreign_hit = foreign
+            .mock("GET", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let client = LaunchpadClient::new(Some(crate::auth::Credentials::new(
+            "lpcli",
+            "tok",
+            "topsecret",
+        )))
+        .with_base_url(api.url());
+        let foreign_link = format!("{}/ubuntu/+sourcepub/1?token=leak", foreign.url());
+
+        for err in [
+            get_source_builds(&client, &foreign_link).await.unwrap_err(),
+            get_source_builds_raw(&client, &foreign_link)
+                .await
+                .unwrap_err(),
+            source_has_active_binaries(&client, &foreign_link)
+                .await
+                .unwrap_err(),
+        ] {
+            let msg = err.to_string();
+            assert!(msg.contains("cross-origin"), "{msg}");
+            assert!(!msg.contains("topsecret"), "{msg}");
+            assert!(!msg.contains("token=leak"), "{msg}");
+        }
+
+        api_hit.assert_async().await;
+        foreign_hit.assert_async().await;
+    }
+
     #[test]
     fn parse_debian_changelog_handles_emacs_local_variables_on_trailerless_and_leading_blocks() {
         let raw = concat!(

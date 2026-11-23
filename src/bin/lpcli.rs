@@ -1727,7 +1727,7 @@ enum PackageCommand {
         #[arg(short, long, default_value = "ubuntu")]
         distro: String,
         /// Maximum number of source publications to check (default: 30).
-        #[arg(short, long, default_value = "30")]
+        #[arg(short, long, default_value = "30", value_parser = parse_positive_u32_limit)]
         limit: u32,
     },
     /// Show info about a distribution.
@@ -2682,10 +2682,14 @@ fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
                 distro,
                 ..
             } => {
-                if ppa.is_some() && !distro.eq_ignore_ascii_case("ubuntu") {
+                if (owner.is_some() || ppa.is_some()) && !distro.eq_ignore_ascii_case("ubuntu") {
                     Err(format!(
                         "PPA archives are only available for Ubuntu, not '{distro}'"
                     ))
+                } else if owner.as_deref().is_some_and(|s| s.trim().is_empty()) {
+                    Err("--owner must not be empty".into())
+                } else if ppa.as_deref().is_some_and(|s| s.trim().is_empty()) {
+                    Err("--ppa must not be empty".into())
                 } else if owner.is_none() && ppa.is_none() && series.is_none() {
                     Err(
                         "specify --series for the primary archive or --owner and --ppa for a PPA"
@@ -2836,6 +2840,11 @@ fn parse_positive_limit(value: &str) -> Result<usize, String> {
         return Err("limit must be a positive number".to_string());
     }
     Ok(limit)
+}
+
+fn parse_positive_u32_limit(value: &str) -> Result<u32, String> {
+    let limit = parse_positive_limit(value)?;
+    u32::try_from(limit).map_err(|_| format!("limit must be at most {}", u32::MAX))
 }
 
 // ---------------------------------------------------------------------------

@@ -450,10 +450,15 @@ is no `--pocket` filter.
 PPA builds take `--owner OWNER --ppa NAME` (no leading `~`), not
 `--ppa OWNER/NAME` or `--archive`.
 `--public` reads a public PPA anonymously; your own or a private PPA needs
-authentication. Filters are applied before `--limit`. Failed builds are data,
-so the command exits 0; use `--state failed` to select them. `build_log_url`
-is present whenever Launchpad has a log, including successful builds, and may
-be null while a build is still running.
+authentication. `--name`, `--version`, and `--series` filter server-side
+before `--limit`; `--arch` and `--state` filter the fetched builds locally
+(raise `--limit` if `lpcli.complete` is false). `Binaries` in table rows is
+`yes` on succeeded builds whose source publication has active binaries (and `no`
+on failed/pending rows), while `lpcli.sources.<link>.binaries_published` is
+source-level. Failed builds are data, so the command exits 0; use
+`--state failed` to select them. `build_log_url` is present whenever Launchpad
+has a log, including successful builds, and may be null while a build is still
+running.
 
 ### Investigate a CVE
 

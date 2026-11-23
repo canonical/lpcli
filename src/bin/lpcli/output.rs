@@ -1377,16 +1377,45 @@ pub fn status_style(status: &str) -> Option<AnsiStyle> {
         | "Beta available"
         | "Implemented"
         | "Online"
-        | "Started" => Some(OK),
-        "In Progress" | "Triaged" | "Confirmed" | "Needs review" | "Needs Review"
-        | "Needs Approval" | "Pending" | "Unapproved" | "Incomplete" | "Work in progress"
-        | "Slow progress" | "Blocked" => Some(WARNING),
-        "Rejected" | "Failed" | "Expired" | "Invalid" | "Won't Fix" | "revoked" | "Unreachable"
-        | "Abandoned" | "Superseded" | "Obsolete" | "Deactivated" => Some(ERROR),
+        | "Started"
+        | "Successfully built" => Some(OK),
+        "In Progress"
+        | "Triaged"
+        | "Confirmed"
+        | "Needs review"
+        | "Needs Review"
+        | "Needs Approval"
+        | "Pending"
+        | "Unapproved"
+        | "Incomplete"
+        | "Work in progress"
+        | "Slow progress"
+        | "Blocked"
+        | "Currently building"
+        | "Uploading build"
+        | "Gathering build output"
+        | "Dependency wait"
+        | "Needs building"
+        | "Cancelling build" => Some(WARNING),
+        "Rejected"
+        | "Failed"
+        | "Expired"
+        | "Invalid"
+        | "Won't Fix"
+        | "revoked"
+        | "Unreachable"
+        | "Abandoned"
+        | "Superseded"
+        | "Obsolete"
+        | "Deactivated"
+        | "Failed to build"
+        | "Failed to upload"
+        | "Chroot problem"
+        | "Cancelled build"
+        | "Build for superseded Source" => Some(ERROR),
         "New" | "Opinion" | "Open" | "Needs information" | "Unknown" | "open" | "Not started"
-        | "Informational" | "Deferred" | "Entry" | "Development Focus" | "Pre-release Freeze" => {
-            Some(NAME)
-        }
+        | "Informational" | "Deferred" | "Entry" | "Development Focus" | "Pre-release Freeze"
+        | "No builds yet" => Some(NAME),
         _ => None,
     }
 }
@@ -1404,9 +1433,8 @@ pub fn importance_style(importance: &str) -> Option<AnsiStyle> {
 /// Map a field/column label and its sanitized value to an optional semantic color style.
 fn field_value_style(label: &str, value: &str) -> Option<AnsiStyle> {
     match label {
-        "Status" | "Lifecycle" | "Implementation" | "Impl" | "Upload Status" | "Definition" => {
-            status_style(value)
-        }
+        "Status" | "Publication" | "Build State" | "Lifecycle" | "Implementation" | "Impl"
+        | "Upload Status" | "Definition" => status_style(value),
         "Importance" | "Priority" => importance_style(value),
         "Tags" | "Author" | "Person" | "Subscribed By" | "Assignee" | "Member" | "Maintainer" => {
             (!matches!(value, "none" | "—" | "unknown" | "(none)")).then_some(NAME)
@@ -2222,6 +2250,9 @@ impl Renderer for RichRenderer {
                     empty,
                     hint,
                 } => {
+                    if !out.is_empty() && !out.ends_with("\n\n") {
+                        out.push('\n');
+                    }
                     self.list(&mut out, records, *noun, empty, hint.as_deref());
                 }
                 Block::Comments {
