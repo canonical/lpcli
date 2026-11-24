@@ -57,7 +57,7 @@ fn unmodelled_fields(raw: &Value, typed: &impl Serialize) -> BTreeSet<String> {
 #[tokio::test]
 async fn entry_raw_keeps_unknown_fields_nulls_and_timestamps() {
     let server = MockServer::start_async().await;
-    let fixture = Fixture::load("raw_read_domains/team_launchpad", "/~launchpad").await;
+    let fixture = Fixture::load_or_record("raw_read_domains/team_launchpad", "/~launchpad").await;
     let team = fixture.json();
     let mock = fixture.serve(&server, "/~launchpad", |when| when).await;
 
@@ -82,7 +82,7 @@ async fn entry_raw_keeps_unknown_fields_nulls_and_timestamps() {
 #[tokio::test]
 async fn typed_wrappers_still_decode_the_same_entries() {
     let server = MockServer::start_async().await;
-    let fixture = Fixture::load("raw_read_domains/project_launchpad", "/launchpad").await;
+    let fixture = Fixture::load_or_record("raw_read_domains/project_launchpad", "/launchpad").await;
     let mock = fixture.serve(&server, "/launchpad", |when| when).await;
     let client = client(&server);
 
@@ -299,7 +299,7 @@ fn publication(version: &str) -> Value {
 #[tokio::test]
 async fn limited_source_search_fetches_one_page_and_keeps_next_link() {
     let server = MockServer::start_async().await;
-    let fixture = Fixture::load(
+    let fixture = Fixture::load_or_record(
         "raw_read_domains/hello_noble_sources_page",
         concat!(
             "/ubuntu/+archive/primary?ws.op=getPublishedSources",
