@@ -2144,6 +2144,38 @@ fn package_build_subcommands_validation_policy_and_no_input() {
             "package",
             "build",
             "show",
+            "--build-url",
+            "https://api.launchpad.net/devel/ubuntu/noble",
+        ][..],
+        &[
+            "lpcli",
+            "package",
+            "build",
+            "show",
+            "--build-url",
+            "https://api.launchpad.net/devel/ubuntu/+archive/primary/+build/0",
+        ][..],
+        &[
+            "lpcli",
+            "package",
+            "build",
+            "show",
+            "--build-url",
+            "https://api.launchpad.net/devel/ubuntu/+archive/primary/+build/42?ws.op=cancel",
+        ][..],
+        &[
+            "lpcli",
+            "package",
+            "build",
+            "show",
+            "--build-url",
+            "https://api.launchpad.net/devel/ubuntu/+archive/primary/+build/42#frag",
+        ][..],
+        &[
+            "lpcli",
+            "package",
+            "build",
+            "show",
             "--build-id",
             "1",
             "--build-url",
@@ -2219,6 +2251,20 @@ fn package_build_subcommands_validation_policy_and_no_input() {
         let result = Cli::try_parse_from(bad).and_then(|cli| validate_cli(&cli));
         assert!(result.is_err(), "expected validation failure for {bad:?}");
     }
+
+    // Credentials embedded in --build-url are rejected without echoing the secret.
+    let creds_url_err = Cli::try_parse_from([
+        "lpcli",
+        "package",
+        "build",
+        "show",
+        "--build-url",
+        "https://user:supersecretpw@api.launchpad.net/devel/ubuntu/+archive/primary/+build/42",
+    ])
+    .and_then(|cli| validate_cli(&cli))
+    .unwrap_err()
+    .to_string();
+    assert!(!creds_url_err.contains("supersecretpw"), "{creds_url_err}");
 
     for good in [
         &[

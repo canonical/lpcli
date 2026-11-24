@@ -1085,7 +1085,7 @@ impl LaunchpadClient {
             });
         }
 
-        stream_response_to_file(resp, &safe_url, dest, on_progress).await
+        stream_response_to_file(resp, &safe_url, dest, false, on_progress).await
     }
 
     /// Validate that `url` is a trusted Launchpad or Librarian URL suitable for
@@ -1106,8 +1106,11 @@ impl LaunchpadClient {
     ///
     /// Both the initial URL and any redirect hops are restricted to HTTPS URLs
     /// under `launchpad.net` or `launchpadlibrarian.net`, or the client's
-    /// configured `base_url` origin (for local test servers). Invokes
-    /// `on_progress` with `(bytes_downloaded_so_far, total_size)`.
+    /// configured `base_url` origin (for local test servers). Creates `dest`
+    /// exclusively (`create_new(true)`) so existing files and symlinks are not
+    /// overwritten or followed, and removes any partial file it created if the
+    /// transfer fails. Invokes `on_progress` with
+    /// `(bytes_downloaded_so_far, total_size)`.
     pub async fn download_public_to_file_with_progress<F>(
         &self,
         url: &str,
@@ -1162,7 +1165,7 @@ impl LaunchpadClient {
             });
         }
 
-        stream_response_to_file(resp, &safe_url, dest, on_progress).await
+        stream_response_to_file(resp, &safe_url, dest, true, on_progress).await
     }
 
     /// Perform an authenticated GET against an absolute URL and return the
@@ -1500,6 +1503,7 @@ async fn stream_response_to_file<F>(
     resp: reqwest::Response,
     safe_url: &str,
     dest: &std::path::Path,
+    create_new: bool,
     mut on_progress: F,
 ) -> Result<u64>
 where
@@ -1509,42 +1513,61 @@ where
     use tokio::io::AsyncWriteExt;
 
     let content_length = resp.content_length();
-    let mut file = tokio::fs::File::create(dest).await.map_err(|e| {
+    let mut file = if create_new {
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dest)
+            .await
+    } else {
+        tokio::fs::File::create(dest).await
+    }
+    .map_err(|e| {
         LpError::Io(std::io::Error::new(
             e.kind(),
             format!("Failed to create file '{}': {e}", dest.display()),
         ))
     })?;
 
-    let mut total_bytes: u64 = 0;
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            LpError::Other(format!(
-                "Network error while downloading '{}': {e}",
-                dest.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| safe_url.to_string()),
-            ))
-        })?;
-        file.write_all(&chunk).await.map_err(|e| {
+    let result: Result<u64> = async {
+        let mut total_bytes: u64 = 0;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| {
+                LpError::Other(format!(
+                    "Network error while downloading '{}': {e}",
+                    dest.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| safe_url.to_string()),
+                ))
+            })?;
+            file.write_all(&chunk).await.map_err(|e| {
+                LpError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("Failed to write to '{}': {e}", dest.display()),
+                ))
+            })?;
+            total_bytes += chunk.len() as u64;
+            on_progress(total_bytes, content_length);
+        }
+
+        file.flush().await.map_err(|e| {
             LpError::Io(std::io::Error::new(
                 e.kind(),
-                format!("Failed to write to '{}': {e}", dest.display()),
+                format!("Failed to flush file '{}': {e}", dest.display()),
             ))
         })?;
-        total_bytes += chunk.len() as u64;
-        on_progress(total_bytes, content_length);
+
+        Ok(total_bytes)
+    }
+    .await;
+
+    if result.is_err() {
+        drop(file);
+        let _ = tokio::fs::remove_file(dest).await;
     }
 
-    file.flush().await.map_err(|e| {
-        LpError::Io(std::io::Error::new(
-            e.kind(),
-            format!("Failed to flush file '{}': {e}", dest.display()),
-        ))
-    })?;
-
-    Ok(total_bytes)
+    result
 }
 
 /// Encode a slice of key-value tuples as URL form-encoded data, allowing
@@ -3020,5 +3043,135 @@ mod tests {
         bad_redirect_mock.assert_async().await;
         untrusted_mock.assert_async().await;
         missing_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn download_public_to_file_refuses_overwrite_symlinks_and_cleans_up_partial_writes() {
+        let mut server = mockito::Server::new_async().await;
+        let dir = tempfile::tempdir().unwrap();
+
+        let ok_mock = server
+            .mock("GET", "/pub/buildlog.txt.gz")
+            .with_status(200)
+            .with_body(b"fresh-log")
+            .expect(if cfg!(unix) { 3 } else { 1 })
+            .create_async()
+            .await;
+        let not_found_mock = server
+            .mock("GET", "/pub/missing.txt.gz")
+            .with_status(404)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = LaunchpadClient::new(None).with_base_url(server.url());
+
+        // Pre-existing file is not overwritten or removed on AlreadyExists or 404.
+        let existing = dir.path().join("existing.txt.gz");
+        std::fs::write(&existing, b"keep-me").unwrap();
+
+        let err_exists = client
+            .download_public_to_file_with_progress(
+                &format!("{}/pub/buildlog.txt.gz", server.url()),
+                &existing,
+                |_, _| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err_exists, LpError::Io(io_err) if io_err.kind() == std::io::ErrorKind::AlreadyExists),
+            "{err_exists:?}"
+        );
+        assert_eq!(std::fs::read(&existing).unwrap(), b"keep-me");
+
+        let err_404 = client
+            .download_public_to_file_with_progress(
+                &format!("{}/pub/missing.txt.gz", server.url()),
+                &existing,
+                |_, _| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err_404, LpError::NotFound(_)), "{err_404:?}");
+        assert_eq!(std::fs::read(&existing).unwrap(), b"keep-me");
+
+        // Symlinks (pointing to a file or dangling) are rejected without modifying target.
+        #[cfg(unix)]
+        {
+            let target = dir.path().join("target.txt");
+            std::fs::write(&target, b"untouched").unwrap();
+            let symlink = dir.path().join("link.txt");
+            std::os::unix::fs::symlink(&target, &symlink).unwrap();
+            let err_link = client
+                .download_public_to_file_with_progress(
+                    &format!("{}/pub/buildlog.txt.gz", server.url()),
+                    &symlink,
+                    |_, _| {},
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err_link, LpError::Io(io_err) if io_err.kind() == std::io::ErrorKind::AlreadyExists),
+                "{err_link:?}"
+            );
+            assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
+
+            let dangling = dir.path().join("dangling.txt");
+            std::os::unix::fs::symlink(dir.path().join("missing-target"), &dangling).unwrap();
+            let err_dangling = client
+                .download_public_to_file_with_progress(
+                    &format!("{}/pub/buildlog.txt.gz", server.url()),
+                    &dangling,
+                    |_, _| {},
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err_dangling, LpError::Io(io_err) if io_err.kind() == std::io::ErrorKind::AlreadyExists),
+                "{err_dangling:?}"
+            );
+            assert!(dangling.symlink_metadata().is_ok());
+        }
+
+        // Mid-stream EOF removes the partial file created by this download.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept_task = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nhello",
+                    )
+                    .await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let trunc_base = format!("http://{addr}");
+        let trunc_client = LaunchpadClient::new(None).with_base_url(trunc_base.clone());
+        let partial_dest = dir.path().join("truncated.txt.gz");
+        let trunc_err = trunc_client
+            .download_public_to_file_with_progress(
+                &format!("{trunc_base}/truncated.txt.gz"),
+                &partial_dest,
+                |_, _| {},
+            )
+            .await
+            .unwrap_err();
+        accept_task.await.unwrap();
+        assert!(
+            trunc_err.to_string().contains("Network error"),
+            "{trunc_err:?}"
+        );
+        assert!(
+            !partial_dest.exists(),
+            "partial file must be removed after stream error"
+        );
+
+        ok_mock.assert_async().await;
+        not_found_mock.assert_async().await;
     }
 }

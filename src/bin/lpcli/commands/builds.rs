@@ -455,7 +455,7 @@ pub(crate) async fn package_builds(
                         &request.arch,
                         &request.state,
                         &request.exclude_state,
-                        None,
+                        request.pocket,
                     )
                 })
                 .map(|(idx, _)| idx)
@@ -664,12 +664,12 @@ fn binaries_word(published: bool) -> String {
 // Single / filtered build resolution
 // ---------------------------------------------------------------------------
 
-struct ResolvedBuilds {
-    is_single: bool,
-    archive_label: String,
-    series: Option<String>,
-    complete: bool,
-    builds: Vec<Raw<SourceBuild>>,
+pub(crate) struct ResolvedBuilds {
+    pub(crate) is_single: bool,
+    pub(crate) archive_label: String,
+    pub(crate) series: Option<String>,
+    pub(crate) complete: bool,
+    pub(crate) builds: Vec<Raw<SourceBuild>>,
 }
 
 async fn resolve_single_build(
@@ -723,11 +723,30 @@ async fn resolve_single_build(
     }
 }
 
+const MAX_PPA_BUILD_RECORD_SCAN_PAGES: usize = 20;
+
 async fn resolve_ppa_build_records_filtered(
     client: &LaunchpadClient,
     ppa: &PpaRef,
     filter: &BuildFilterRequest,
     canonical_series_name: Option<&str>,
+) -> lpcli::error::Result<ResolvedBuilds> {
+    resolve_ppa_build_records_filtered_with_max_pages(
+        client,
+        ppa,
+        filter,
+        canonical_series_name,
+        MAX_PPA_BUILD_RECORD_SCAN_PAGES,
+    )
+    .await
+}
+
+pub(crate) async fn resolve_ppa_build_records_filtered_with_max_pages(
+    client: &LaunchpadClient,
+    ppa: &PpaRef,
+    filter: &BuildFilterRequest,
+    canonical_series_name: Option<&str>,
+    max_pages: usize,
 ) -> lpcli::error::Result<ResolvedBuilds> {
     verify_ppa_exists(client, ppa).await?;
 
@@ -745,6 +764,8 @@ async fn resolve_ppa_build_records_filtered(
         packages::get_ppa_build_records_raw(client, &ppa.owner, &ppa.name, &params).await?;
     let mut matched = Vec::new();
     let mut hit_limit_with_more = false;
+    let mut visited_links: HashSet<String> = HashSet::new();
+    let mut pages_fetched = 1usize;
 
     loop {
         let raw_list = raw_entries(&page.raw);
@@ -782,6 +803,17 @@ async fn resolve_ppa_build_records_filtered(
         let Some(next) = next_link else {
             break;
         };
+        if !visited_links.insert(next.clone()) {
+            return Err(LpError::Other(
+                "Launchpad returned a cyclic next_collection_link while listing PPA build records."
+                    .into(),
+            ));
+        }
+        if pages_fetched >= max_pages {
+            hit_limit_with_more = true;
+            break;
+        }
+        pages_fetched += 1;
         page = packages::get_build_records_page_raw(client, &next).await?;
     }
 
@@ -863,8 +895,9 @@ async fn resolve_target_builds(
             .await?;
 
             let mut matched = Vec::new();
+            let mut seen_links: HashSet<String> = HashSet::new();
             let mut hit_limit_with_more = fetched.page.value.next_collection_link.is_some();
-            for (builds, raw_entries) in fetched.source_builds {
+            'sources: for (builds, raw_entries) in fetched.source_builds {
                 for (idx, build) in builds.into_iter().enumerate() {
                     if !build_matches_filters(
                         &build,
@@ -877,17 +910,19 @@ async fn resolve_target_builds(
                     ) {
                         continue;
                     }
+                    if let Some(link) = &build.self_link
+                        && !seen_links.insert(link.clone())
+                    {
+                        continue;
+                    }
                     if matched.len() >= filter.limit as usize {
                         hit_limit_with_more = true;
-                        break;
+                        break 'sources;
                     }
                     let raw = raw_entries.get(idx).cloned().ok_or_else(|| {
                         LpError::Other("missing raw JSON for build record".into())
                     })?;
                     matched.push(Raw { value: build, raw });
-                }
-                if matched.len() >= filter.limit as usize {
-                    break;
                 }
             }
 
@@ -1080,6 +1115,7 @@ pub(crate) async fn execute_build_logs(
     }
 
     let mut used_filenames: HashSet<String> = HashSet::new();
+    let mut build_log_bases: HashSet<(Option<String>, String)> = HashSet::new();
     let mut items = Vec::with_capacity(raw_urls.len());
     let mut named_downloads = Vec::new();
     let mut valid_indices = Vec::new();
@@ -1094,10 +1130,30 @@ pub(crate) async fn execute_build_logs(
                         None => base_name.clone(),
                     }
                 } else {
-                    base_name
+                    base_name.clone()
                 };
-                if !used_filenames.insert(candidate.clone()) {
-                    candidate = disambiguate_in_set(&candidate, &mut used_filenames);
+                if kind == "build_log" {
+                    build_log_bases.insert((build_self_link.clone(), base_name.clone()));
+                } else if kind == "upload_log"
+                    && (build_log_bases.contains(&(build_self_link.clone(), base_name.clone()))
+                        || used_filenames.contains(&candidate))
+                {
+                    candidate = match build_id.as_deref() {
+                        Some(id) => format!("build-{id}_upload_{base_name}"),
+                        None => format!("upload_{base_name}"),
+                    };
+                }
+                if !used_filenames.contains(&candidate)
+                    && request
+                        .output_dir
+                        .join(&candidate)
+                        .symlink_metadata()
+                        .is_err()
+                {
+                    used_filenames.insert(candidate.clone());
+                } else {
+                    candidate =
+                        disambiguate_filename(&candidate, &request.output_dir, &mut used_filenames);
                 }
                 valid_indices.push(items.len());
                 named_downloads.push(download::NamedDownload {
@@ -1151,7 +1207,7 @@ pub(crate) async fn execute_build_logs(
     for item in &items {
         if let Some(err) = &item.filename_error {
             outcomes.push(download::DownloadOutcome::Failed {
-                filename: download_fallback_name(&item.url),
+                filename: download::redact_url_for_display(&item.url),
                 error: err.clone(),
             });
             continue;
@@ -1187,21 +1243,13 @@ pub(crate) async fn execute_build_logs(
     })
 }
 
-fn download_fallback_name(url: &str) -> String {
-    let without_fragment = url.split('#').next().unwrap_or(url);
-    let without_query = without_fragment
-        .split('?')
-        .next()
-        .unwrap_or(without_fragment);
-    output::redact_secrets(without_query)
-}
-
-fn disambiguate_in_set(candidate: &str, used: &mut HashSet<String>) -> String {
+fn disambiguate_filename(candidate: &str, dir: &Path, used: &mut HashSet<String>) -> String {
     let (stem, ext) = split_archive_extension(candidate);
     let mut counter = 2usize;
     loop {
         let next = format!("{stem}-{counter}{ext}");
-        if used.insert(next.clone()) {
+        if !used.contains(&next) && dir.join(&next).symlink_metadata().is_err() {
+            used.insert(next.clone());
             return next;
         }
         counter += 1;
@@ -1466,14 +1514,30 @@ pub(crate) async fn handle_build_retry(
     outcome.result
 }
 
+const MAX_CONFIRM_LINE_BYTES: usize = 64;
+
+pub(crate) fn read_confirmation_from<R: std::io::BufRead>(
+    reader: &mut R,
+) -> lpcli::error::Result<bool> {
+    use std::io::{BufRead as _, Read as _};
+
+    let mut input = String::new();
+    let bytes = reader
+        .take((MAX_CONFIRM_LINE_BYTES + 1) as u64)
+        .read_line(&mut input)?;
+    if bytes == 0 || (bytes > MAX_CONFIRM_LINE_BYTES && !input.ends_with('\n')) {
+        return Ok(false);
+    }
+    let answer = input.trim();
+    Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
+}
+
 fn confirm_bulk_retry(
     output: &Output,
     candidates: &[RetryCandidate],
     save_logs: Option<&Path>,
 ) -> lpcli::error::Result<bool> {
-    use std::io::{BufRead as _, Read as _};
-
-    let _ = output.write_stderr_line(&format!("Builds to retry ({}):", candidates.len()));
+    output.write_stderr_line(&format!("Builds to retry ({}):", candidates.len()))?;
     for candidate in candidates {
         let b = &candidate.build;
         let id = b.build_id().unwrap_or("?");
@@ -1482,14 +1546,13 @@ fn confirm_bulk_retry(
         let series = candidate.series.as_deref().unwrap_or("unknown");
         let arch = b.arch_tag.as_deref().unwrap_or("unknown");
         let state = b.buildstate.as_deref().unwrap_or("unknown");
-        let _ =
-            output.write_stderr_line(&format!("  - #{id} {pkg} {ver} ({series}/{arch}, {state})"));
+        output.write_stderr_line(&format!("  - #{id} {pkg} {ver} ({series}/{arch}, {state})"))?;
     }
     if let Some(dir) = save_logs {
-        let _ = output.write_stderr_line(&format!(
+        output.write_stderr_line(&format!(
             "Existing logs will be saved to '{}' before retrying.",
             dir.display()
-        ));
+        ))?;
     }
 
     let mut stderr = std::io::stderr().lock();
@@ -1497,13 +1560,7 @@ fn confirm_bulk_retry(
     stderr.flush()?;
     drop(stderr);
 
-    let mut input = String::new();
-    let bytes = std::io::stdin().lock().take(64).read_line(&mut input)?;
-    if bytes == 0 {
-        return Ok(false);
-    }
-    let answer = input.trim();
-    Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
+    read_confirmation_from(&mut std::io::stdin().lock())
 }
 
 pub(crate) async fn execute_build_retry<F>(
@@ -1717,19 +1774,28 @@ where
         &failures,
     );
 
+    let any_local_writes = !saved_logs.is_empty();
     let result = if failures.is_empty() {
         Ok(())
-    } else if any_mutated || !retried_links.is_empty() {
+    } else if any_mutated || !retried_links.is_empty() || any_local_writes {
         let list = failures
             .iter()
             .map(|f| format!("{} ({})", f.build_self_link, f.error))
             .collect::<Vec<_>>()
             .join("; ");
-        Err(LpError::Partial(format!(
-            "Retried {} of {} eligible build(s); failed: {list}",
-            retried_links.len(),
-            eligible.len()
-        )))
+        if retried_links.is_empty() && !any_mutated {
+            Err(LpError::Partial(format!(
+                "Saved {} build log(s) to disk, but failed to retry {} eligible build(s): {list}",
+                saved_logs.len(),
+                eligible.len()
+            )))
+        } else {
+            Err(LpError::Partial(format!(
+                "Retried {} of {} eligible build(s); failed: {list}",
+                retried_links.len(),
+                eligible.len()
+            )))
+        }
     } else if failures.len() == 1 {
         Err(failures.into_iter().next().expect("one failure").error)
     } else {
@@ -1760,6 +1826,10 @@ fn collect_planned_log_saves(
     for candidate in candidates {
         let b = &candidate.build;
         let build_id = b.build_id().map(str::to_string);
+        let build_log_base = b
+            .build_log_url
+            .as_deref()
+            .and_then(|url| download::extract_safe_filename(url).ok());
         for (kind, url_opt) in [
             ("build_log", b.build_log_url.as_deref()),
             ("upload_log", b.upload_log_url.as_deref()),
@@ -1767,9 +1837,18 @@ fn collect_planned_log_saves(
             let Some(url) = url_opt else {
                 continue;
             };
-            let path = download::extract_safe_filename(url)
-                .ok()
-                .map(|base| unique_backup_path(save_dir, build_id.as_deref(), &base, &mut used));
+            let path = download::extract_safe_filename(url).ok().map(|base| {
+                let force_upload_prefix =
+                    kind == "upload_log" && build_log_base.as_deref() == Some(base.as_str());
+                unique_backup_path(
+                    save_dir,
+                    build_id.as_deref(),
+                    kind,
+                    force_upload_prefix,
+                    &base,
+                    &mut used,
+                )
+            });
             planned.push(SavedLogRecord {
                 build_self_link: candidate.self_link.clone(),
                 build_id: build_id.clone(),
@@ -1792,6 +1871,7 @@ async fn save_build_logs_before_retry(
 ) -> lpcli::error::Result<()> {
     let b = &candidate.build;
     let build_id = b.build_id().map(str::to_string);
+    let mut build_log_base: Option<String> = None;
     for (kind, url_opt) in [
         ("build_log", b.build_log_url.as_deref()),
         ("upload_log", b.upload_log_url.as_deref()),
@@ -1800,7 +1880,19 @@ async fn save_build_logs_before_retry(
             continue;
         };
         let base_name = download::extract_safe_filename(url)?;
-        let dest = unique_backup_path(save_dir, build_id.as_deref(), &base_name, used_names);
+        if kind == "build_log" {
+            build_log_base = Some(base_name.clone());
+        }
+        let force_upload_prefix =
+            kind == "upload_log" && build_log_base.as_deref() == Some(base_name.as_str());
+        let dest = unique_backup_path(
+            save_dir,
+            build_id.as_deref(),
+            kind,
+            force_upload_prefix,
+            &base_name,
+            used_names,
+        );
         let downloaded = download::download_public_file(client, url, &dest).await?;
         saved_logs.push(SavedLogRecord {
             build_self_link: candidate.self_link.clone(),
@@ -1815,28 +1907,38 @@ async fn save_build_logs_before_retry(
 }
 
 /// Choose a collision-free backup path under `dir` without overwriting any
-/// existing file on disk or any filename already claimed in the current run.
-fn unique_backup_path(
+/// existing file or symlink on disk or any filename already claimed in the
+/// current run.
+pub(crate) fn unique_backup_path(
     dir: &Path,
     build_id: Option<&str>,
+    kind: &str,
+    force_upload_prefix: bool,
     base_name: &str,
     used_names: &mut HashSet<String>,
 ) -> PathBuf {
-    let prefixed = match build_id {
+    let mut prefixed = match build_id {
         Some(id) if !base_name.starts_with(&format!("build-{id}_")) => {
             format!("build-{id}_{base_name}")
         }
         _ => base_name.to_string(),
     };
-    let (stem, ext) = split_archive_extension(&prefixed);
-    let mut candidate = prefixed.clone();
-    let mut counter = 2usize;
-    while used_names.contains(&candidate) || dir.join(&candidate).exists() {
-        candidate = format!("{stem}-{counter}{ext}");
-        counter += 1;
+    let should_upload_prefix =
+        kind == "upload_log" && (force_upload_prefix || used_names.contains(&prefixed));
+    if should_upload_prefix {
+        prefixed = match build_id {
+            Some(id) if !base_name.starts_with(&format!("build-{id}_")) => {
+                format!("build-{id}_upload_{base_name}")
+            }
+            _ => format!("upload_{base_name}"),
+        };
     }
-    used_names.insert(candidate.clone());
-    dir.join(candidate)
+    if !used_names.contains(&prefixed) && dir.join(&prefixed).symlink_metadata().is_err() {
+        used_names.insert(prefixed.clone());
+        return dir.join(prefixed);
+    }
+    let next = disambiguate_filename(&prefixed, dir, used_names);
+    dir.join(next)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1958,7 +2060,7 @@ fn build_retry_report(
         blocks.push(Block::Break);
         let summary_level = if failures.is_empty() {
             Level::Ok
-        } else if retried_raw.is_empty() {
+        } else if retried_raw.is_empty() && saved_logs.is_empty() {
             Level::Error
         } else {
             Level::Warning

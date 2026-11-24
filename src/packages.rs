@@ -42,7 +42,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Collection, LaunchpadClient, Raw};
-use crate::error::Result;
+use crate::error::{LpError, Result};
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -193,7 +193,69 @@ fn extract_build_id(link: &str) -> Option<&str> {
     let mut parts = without_query.trim_end_matches('/').rsplit('/');
     let id = parts.next()?;
     let marker = parts.next()?;
-    (marker == "+build" && !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())).then_some(id)
+    (marker == "+build"
+        && !id.is_empty()
+        && id.bytes().all(|b| b.is_ascii_digit())
+        && id.parse::<u64>().is_ok_and(|n| n > 0))
+    .then_some(id)
+}
+
+/// Validate that `build_self_link` is an HTTP(S) Launchpad build URL
+/// referencing `/+build/<id>` without embedded credentials, query string, or
+/// fragment.
+pub fn validate_build_self_link(build_self_link: &str) -> Result<()> {
+    let parsed = url::Url::parse(build_self_link).map_err(|e| {
+        LpError::Usage(format!(
+            "Invalid build URL '{}': {e}",
+            crate::download::redact_url_for_display(build_self_link)
+        ))
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(LpError::Usage(format!(
+            "Invalid build URL '{}': scheme must be http or https.",
+            crate::download::redact_url_for_display(build_self_link)
+        )));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(LpError::Usage(format!(
+            "Invalid build URL '{}': URL must not contain credentials.",
+            crate::download::redact_url_for_display(build_self_link)
+        )));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(LpError::Usage(format!(
+            "Invalid build URL '{}': expected a Launchpad '/+build/<id>' URL without a query string or fragment.",
+            crate::download::redact_url_for_display(build_self_link)
+        )));
+    }
+    if extract_build_id(parsed.path()).is_none() {
+        return Err(LpError::Usage(format!(
+            "Invalid build URL '{}': expected a Launchpad '/+build/<id>' URL.",
+            crate::download::redact_url_for_display(build_self_link)
+        )));
+    }
+    Ok(())
+}
+
+fn validate_build_response(raw: &Raw<SourceBuild>, build_self_link: &str) -> Result<()> {
+    if let Some(rt) = raw
+        .raw
+        .get("resource_type_link")
+        .and_then(serde_json::Value::as_str)
+        && !rt.ends_with("/#build")
+    {
+        return Err(LpError::Usage(format!(
+            "URL '{}' is not a Launchpad build record (resource_type_link: {rt}).",
+            crate::download::redact_url_for_display(build_self_link)
+        )));
+    }
+    if raw.value.build_id().is_none() && raw.value.buildstate.is_none() {
+        return Err(LpError::Usage(format!(
+            "URL '{}' did not return a Launchpad build record.",
+            crate::download::redact_url_for_display(build_self_link)
+        )));
+    }
+    Ok(())
 }
 
 /// Parameters for PPA archive `getBuildRecords` queries.
@@ -618,7 +680,10 @@ pub async fn get_build_raw(
     build_self_link: &str,
 ) -> Result<Raw<SourceBuild>> {
     client.ensure_same_api_origin(build_self_link, "build self_link")?;
-    client.get_url_raw(build_self_link).await
+    validate_build_self_link(build_self_link)?;
+    let found: Raw<SourceBuild> = client.get_url_raw(build_self_link).await?;
+    validate_build_response(&found, build_self_link)?;
+    Ok(found)
 }
 
 /// Fetch a single build record in an Ubuntu PPA by numeric build ID.
@@ -679,6 +744,7 @@ pub async fn get_primary_build_raw(
 /// Launchpad.
 pub async fn retry_build(client: &LaunchpadClient, build_self_link: &str) -> Result<()> {
     client.ensure_same_api_origin(build_self_link, "build self_link")?;
+    validate_build_self_link(build_self_link)?;
     client
         .post_pairs_url_ok(build_self_link, &[("ws.op", "retry")])
         .await
@@ -690,7 +756,7 @@ pub async fn retry_build(client: &LaunchpadClient, build_self_link: &str) -> Res
 /// # Errors
 ///
 /// If the retry succeeds on Launchpad but reading back the build fails,
-/// returns [`LpError::Partial`](crate::error::LpError::Partial).
+/// returns [`LpError::Partial`].
 pub async fn retry_build_raw(
     client: &LaunchpadClient,
     build_self_link: &str,
@@ -1918,5 +1984,91 @@ mod tests {
         retry_partial_post.assert_async().await;
         retry_partial_get.assert_async().await;
         foreign_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn build_urls_and_responses_reject_non_build_targets() {
+        let mut server = mockito::Server::new_async().await;
+        let base = server.url();
+        let client = LaunchpadClient::new(None).with_base_url(base.clone());
+
+        let no_requests = server
+            .mock("GET", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let no_posts = server
+            .mock("POST", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let authed_host = base
+            .strip_prefix("http://")
+            .map(|rest| {
+                format!("http://user:pwsecret@{rest}/~jdoe/+archive/ubuntu/myppa/+build/42")
+            })
+            .unwrap();
+        for bad_url in [
+            format!("{base}/ubuntu/noble"),
+            format!("{base}/~jdoe"),
+            format!("{base}/~jdoe/+archive/ubuntu/myppa/+build/0"),
+            format!("{base}/~jdoe/+archive/ubuntu/myppa/+build/abc"),
+            format!("{base}/~jdoe/+archive/ubuntu/myppa/+build/42?ws.op=cancel"),
+            format!("{base}/~jdoe/+archive/ubuntu/myppa/+build/42#frag"),
+            authed_host,
+        ] {
+            let err = validate_build_self_link(&bad_url).unwrap_err();
+            assert!(matches!(err, LpError::Usage(_)), "{bad_url}: {err:?}");
+            assert!(!err.to_string().contains("pwsecret"), "{err}");
+
+            let get_err = get_build_raw(&client, &bad_url).await.unwrap_err();
+            assert!(!get_err.to_string().contains("pwsecret"), "{get_err}");
+
+            let retry_err = retry_build(&client, &bad_url).await.unwrap_err();
+            assert!(!retry_err.to_string().contains("pwsecret"), "{retry_err}");
+        }
+
+        no_requests.assert_async().await;
+        no_posts.assert_async().await;
+
+        let wrong_type_mock = server
+            .mock("GET", "/~jdoe/+archive/ubuntu/myppa/+build/77")
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "self_link": format!("{base}/~jdoe/+archive/ubuntu/myppa/+build/77"),
+                    "resource_type_link": format!("{base}/#distro_series"),
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let wrong_type_err = get_build_raw(
+            &client,
+            &format!("{base}/~jdoe/+archive/ubuntu/myppa/+build/77"),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(wrong_type_err, LpError::Usage(_)),
+            "{wrong_type_err:?}"
+        );
+        wrong_type_mock.assert_async().await;
+
+        let empty_obj_mock = server
+            .mock("GET", "/~jdoe/+archive/ubuntu/myppa/+build/78")
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+        let empty_err = get_build_raw(
+            &client,
+            &format!("{base}/~jdoe/+archive/ubuntu/myppa/+build/78"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(empty_err, LpError::Usage(_)), "{empty_err:?}");
+        empty_obj_mock.assert_async().await;
     }
 }

@@ -135,8 +135,10 @@ cargo test --locked --all-targets --all-features
 cargo test --locked --doc
 ```
 
-CI also checks tracked filenames for ASCII-only names and audits dependencies
-against the RustSec advisory database.
+CI also checks tracked filenames for ASCII-only names, audits dependencies
+against the RustSec advisory database, and verifies that pull request authors
+have signed the
+[Canonical Contributor License Agreement (CLA)](https://canonical.com/legal/contributors).
 
 ## Persona and References
 

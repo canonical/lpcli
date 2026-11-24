@@ -277,7 +277,11 @@ pub async fn download_named_public_files_with_progress(
 
 /// Download a single public file from a trusted Launchpad or Librarian URL
 /// directly to `dest` without sending credentials, creating parent directories
-/// after URL trust validation and removing any partial file on failure.
+/// after URL trust validation.
+///
+/// Creates `dest` exclusively (`create_new(true)`), failing if a file or
+/// symlink already exists, and removes any newly created partial file on
+/// transfer failure.
 pub async fn download_public_file(
     client: &LaunchpadClient,
     url: &str,
@@ -308,19 +312,13 @@ pub async fn download_public_file(
             ))
         })?;
     }
-    match client
+    let size = client
         .download_public_to_file_with_progress(url, dest, |_, _| {})
-        .await
-    {
-        Ok(size) => Ok(DownloadedFile {
-            path: dest.to_path_buf(),
-            size,
-        }),
-        Err(e) => {
-            let _ = tokio::fs::remove_file(dest).await;
-            Err(e)
-        }
-    }
+        .await?;
+    Ok(DownloadedFile {
+        path: dest.to_path_buf(),
+        size,
+    })
 }
 
 fn validate_target_filename(filename: &str, url: &str) -> Result<String> {
@@ -442,8 +440,6 @@ async fn run_download_batch(
                     (idx, outcome)
                 }
                 Err(e) => {
-                    // Clean up partial file if it was created.
-                    let _ = tokio::fs::remove_file(&dest).await;
                     let outcome = DownloadOutcome::Failed {
                         filename: filename.clone(),
                         error: crate::error::redact_secrets(&e.to_string()),
@@ -518,7 +514,7 @@ fn progress_style_bytes() -> ProgressStyle {
 // ---------------------------------------------------------------------------
 
 /// Strip query strings, fragments, and URL userinfo and redact any credentials for display.
-pub(crate) fn redact_url_for_display(url: &str) -> String {
+pub fn redact_url_for_display(url: &str) -> String {
     if let Ok(mut parsed) = url::Url::parse(url) {
         parsed.set_query(None);
         parsed.set_fragment(None);
@@ -853,5 +849,39 @@ mod tests {
 
         ok_mock.assert_async().await;
         err_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn download_public_file_preserves_existing_file_and_redacts_urls() {
+        let mut server = mockito::Server::new_async().await;
+        let base = server.url();
+        let missing_mock = server
+            .mock("GET", "/+files/missing.log")
+            .with_status(404)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("keep.txt");
+        std::fs::write(&existing, b"original").unwrap();
+
+        let client = LaunchpadClient::new(None).with_base_url(base.clone());
+        let err = download_public_file(&client, &format!("{base}/+files/missing.log"), &existing)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LpError::NotFound(_)), "{err:?}");
+        assert_eq!(std::fs::read(&existing).unwrap(), b"original");
+
+        let redacted = redact_url_for_display(
+            "https://user:pwsecret@example.invalid/..%2fbad\u{202E}\x1b[31m?tok=secret#frag",
+        );
+        assert!(!redacted.contains("pwsecret"), "{redacted}");
+        assert!(!redacted.contains("secret"), "{redacted}");
+        assert!(!redacted.contains("frag"), "{redacted}");
+        assert!(!redacted.contains('\u{202E}'), "{redacted}");
+        assert!(!redacted.contains('\x1b'), "{redacted}");
+
+        missing_mock.assert_async().await;
     }
 }

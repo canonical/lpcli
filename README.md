@@ -1179,6 +1179,11 @@ tests/              — Mocked HTTP integration tests
 
 ## Contributing
 
+Contributors must have signed the
+[Canonical Contributor License Agreement (CLA)](https://canonical.com/legal/contributors)
+before their pull requests can be accepted. Pull requests are checked
+automatically in CI.
+
 1. Fork the repository and create your branch from `main`.
 2. Write idiomatic Rust following [the project rules](AGENTS.md) and
    [Rust conventions](rust-instructions.md).
@@ -1197,8 +1202,9 @@ cargo test --locked --all-targets --all-features
 cargo test --locked --doc
 ```
 
-CI also checks tracked filenames for ASCII-only names and audits dependencies
-against the RustSec advisory database. CLI tests parse the `lpcli` examples in this
+CI also checks tracked filenames for ASCII-only names, audits dependencies
+against the RustSec advisory database, and verifies that pull request authors
+have signed the Canonical CLA. CLI tests parse the `lpcli` examples in this
 README, `AGENTS.md`, and `SKILL.md`, including argument validation, without
 executing commands or making Launchpad requests.
 

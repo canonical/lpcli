@@ -3146,13 +3146,30 @@ fn validate_build_url(raw: &str) -> Result<(), String> {
     if trimmed.chars().any(char::is_whitespace) {
         return Err("--build-url must not contain whitespace".into());
     }
-    let parsed =
-        url::Url::parse(trimmed).map_err(|e| format!("invalid --build-url '{raw}': {e}"))?;
+    let parsed = url::Url::parse(trimmed).map_err(|e| {
+        format!(
+            "invalid --build-url '{}': {e}",
+            lpcli::download::redact_url_for_display(trimmed)
+        )
+    })?;
+    let safe = lpcli::download::redact_url_for_display(trimmed);
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(format!(
-            "--build-url must use http or https scheme: '{raw}'"
+            "--build-url must use http or https scheme: '{safe}'"
         ));
     }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!(
+            "--build-url must not contain credentials: '{safe}'"
+        ));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(format!(
+            "--build-url must not contain a query string or fragment: '{safe}'"
+        ));
+    }
+    lpcli::packages::validate_build_self_link(trimmed)
+        .map_err(|e| format!("invalid --build-url: {e}"))?;
     Ok(())
 }
 

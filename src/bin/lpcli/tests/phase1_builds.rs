@@ -666,3 +666,614 @@ async fn package_build_retry_bulk_dry_run_confirm_and_save_logs_prevents_retry_o
         mock.assert_async().await;
     }
 }
+
+#[test]
+fn bulk_retry_confirmation_accepts_short_yes_and_rejects_oversized_lines() {
+    for accept in ["y\n", "YES\n", "  yes  \n", "yes"] {
+        let mut cursor = std::io::Cursor::new(accept.as_bytes());
+        assert!(
+            read_confirmation_from(&mut cursor).unwrap(),
+            "expected accept for {accept:?}"
+        );
+    }
+
+    let padded_yesno = format!("{}yesno\n", " ".repeat(61));
+    let padded_yes = format!("{}yes\n", " ".repeat(64));
+    for reject in [
+        "",
+        "no\n",
+        "yesno\n",
+        padded_yesno.as_str(),
+        padded_yes.as_str(),
+    ] {
+        let mut cursor = std::io::Cursor::new(reject.as_bytes());
+        assert!(
+            !read_confirmation_from(&mut cursor).unwrap(),
+            "expected reject for len={}: {reject:?}",
+            reject.len()
+        );
+    }
+}
+
+#[tokio::test]
+async fn ppa_build_records_pagination_detects_cycles_and_enforces_page_cap() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let ppa_mock = server
+        .mock("GET", "/~jdoe/+archive/ubuntu/test")
+        .match_query(Matcher::Missing)
+        .with_status(200)
+        .with_body(
+            json!({
+                "name": "test",
+                "self_link": format!("{base}/~jdoe/+archive/ubuntu/test"),
+            })
+            .to_string(),
+        )
+        .expect(2)
+        .create_async()
+        .await;
+
+    let arm_entry = rebase(
+        ppa_build_json(401, "noble", "arm64", "Failed to build", true, None),
+        &base,
+    );
+    let page1_url = "/~jdoe/+archive/ubuntu/test?ws.op=getBuildRecords&ws.start=0";
+    let page2_url = "/~jdoe/+archive/ubuntu/test?ws.op=getBuildRecords&ws.start=50";
+
+    // Cycle test: page 1 -> page 2 -> page 1 -> cyclic error on repeat visit.
+    let p1 = server
+        .mock("GET", "/~jdoe/+archive/ubuntu/test")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("ws.op".into(), "getBuildRecords".into()),
+            Matcher::UrlEncoded("ws.start".into(), "0".into()),
+        ]))
+        .with_status(200)
+        .with_body(
+            json!({
+                "start": 0,
+                "entries": [arm_entry],
+                "next_collection_link": format!("{base}{page2_url}"),
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let p2 = server
+        .mock("GET", "/~jdoe/+archive/ubuntu/test")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("ws.op".into(), "getBuildRecords".into()),
+            Matcher::UrlEncoded("ws.start".into(), "50".into()),
+        ]))
+        .with_status(200)
+        .with_body(
+            json!({
+                "start": 50,
+                "entries": [arm_entry],
+                "next_collection_link": format!("{base}{page1_url}"),
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let initial_cyclic = server
+        .mock("GET", "/~jdoe/+archive/ubuntu/test")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("ws.op".into(), "getBuildRecords".into()),
+            Matcher::UrlEncoded("ws.size".into(), "50".into()),
+        ]))
+        .with_status(200)
+        .with_body(
+            json!({
+                "start": 0,
+                "entries": [arm_entry],
+                "next_collection_link": format!("{base}{page2_url}"),
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let client = mock_read_client(&server, true);
+    let ppa = PpaRef {
+        owner: "jdoe".into(),
+        name: "test".into(),
+    };
+    let filter = BuildFilterRequest {
+        owner: None,
+        ppa: Some("jdoe/test".into()),
+        name: None,
+        version: None,
+        series: Some("noble".into()),
+        arch: vec!["amd64".into()],
+        state: vec!["Failed to build".into()],
+        exclude_state: Vec::new(),
+        pocket: None,
+        distro: "ubuntu".into(),
+        limit: 10,
+    };
+
+    let cycle_err = resolve_ppa_build_records_filtered_with_max_pages(
+        &client,
+        &ppa,
+        &filter,
+        Some("noble"),
+        10,
+    )
+    .await
+    .err()
+    .expect("cyclic pagination should error");
+    assert!(cycle_err.to_string().contains("cyclic"), "{cycle_err}");
+
+    p1.assert_async().await;
+    p2.assert_async().await;
+    initial_cyclic.assert_async().await;
+
+    // Max-pages cap test: stops after max_pages=2 without fetching page 3.
+    let page3_url = "/~jdoe/+archive/ubuntu/test?ws.op=getBuildRecords&ws.start=100";
+    let cap_init = server
+        .mock("GET", "/~jdoe/+archive/ubuntu/test")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("ws.op".into(), "getBuildRecords".into()),
+            Matcher::UrlEncoded("ws.size".into(), "50".into()),
+        ]))
+        .with_status(200)
+        .with_body(
+            json!({
+                "start": 0,
+                "entries": [arm_entry],
+                "next_collection_link": format!("{base}{page2_url}"),
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let cap_p2 = server
+        .mock("GET", "/~jdoe/+archive/ubuntu/test")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("ws.op".into(), "getBuildRecords".into()),
+            Matcher::UrlEncoded("ws.start".into(), "50".into()),
+        ]))
+        .with_status(200)
+        .with_body(
+            json!({
+                "start": 50,
+                "entries": [arm_entry],
+                "next_collection_link": format!("{base}{page3_url}"),
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let no_p3 = server
+        .mock("GET", "/~jdoe/+archive/ubuntu/test")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("ws.op".into(), "getBuildRecords".into()),
+            Matcher::UrlEncoded("ws.start".into(), "100".into()),
+        ]))
+        .expect(0)
+        .create_async()
+        .await;
+
+    let capped =
+        resolve_ppa_build_records_filtered_with_max_pages(&client, &ppa, &filter, Some("noble"), 2)
+            .await
+            .unwrap();
+    assert!(!capped.complete);
+    assert!(capped.builds.is_empty());
+
+    ppa_mock.assert_async().await;
+    cap_init.assert_async().await;
+    cap_p2.assert_async().await;
+    no_p3.assert_async().await;
+}
+
+#[tokio::test]
+async fn build_logs_preserves_existing_files_names_upload_logs_and_redacts_bad_urls() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let dir = tempfile::tempdir().unwrap();
+
+    let mut b1 = rebase(
+        ppa_build_json(
+            501,
+            "noble",
+            "amd64",
+            "Failed to build",
+            true,
+            Some("/+files/a/build.log"),
+        ),
+        &base,
+    );
+    b1["upload_log_url"] = json!(format!("{base}/+files/b/build.log"));
+    let mut b2 = rebase(
+        ppa_build_json(502, "noble", "amd64", "Failed to build", true, None),
+        &base,
+    );
+    b2["build_log_url"] =
+        json!("https://user:supersecret@example.invalid/..%2fbad?tok=abc\u{202E}");
+
+    let b1_mock = server
+        .mock("GET", "/~jdoe/+archive/ubuntu/test/+build/501")
+        .with_status(200)
+        .with_body(b1.to_string())
+        .create_async()
+        .await;
+    let log_a = server
+        .mock("GET", "/+files/a/build.log")
+        .with_status(200)
+        .with_body(b"new-build-log")
+        .create_async()
+        .await;
+    let log_b = server
+        .mock("GET", "/+files/b/build.log")
+        .with_status(200)
+        .with_body(b"new-upload-log")
+        .create_async()
+        .await;
+
+    // Pre-existing file with the same target name must stay intact; new log uses -2.
+    std::fs::write(dir.path().join("build-501_build.log"), b"existing-log").unwrap();
+
+    let client = mock_read_client(&server, true);
+    let executed = execute_build_logs(
+        &client,
+        &BuildLogsRequest {
+            target: BuildTarget::Single {
+                build_id: Some(501),
+                build_url: None,
+                owner: None,
+                ppa: Some("jdoe/test".into()),
+                distro: "ubuntu".into(),
+            },
+            output_dir: dir.path().to_path_buf(),
+            include_upload_logs: true,
+        },
+        lpcli::download::ProgressMode::None,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    build_logs_result(&executed).unwrap();
+
+    assert_eq!(
+        std::fs::read(dir.path().join("build-501_build.log")).unwrap(),
+        b"existing-log"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("build-501_build-2.log")).unwrap(),
+        b"new-build-log"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("build-501_upload_build.log")).unwrap(),
+        b"new-upload-log"
+    );
+
+    // Unsafe URL with credentials, query, and bidi control characters must be redacted in report.
+    let b2_mock = server
+        .mock("GET", "/~jdoe/+archive/ubuntu/test/+build/502")
+        .with_status(200)
+        .with_body(b2.to_string())
+        .create_async()
+        .await;
+    let executed_bad = execute_build_logs(
+        &client,
+        &BuildLogsRequest {
+            target: BuildTarget::Single {
+                build_id: Some(502),
+                build_url: None,
+                owner: None,
+                ppa: Some("jdoe/test".into()),
+                distro: "ubuntu".into(),
+            },
+            output_dir: dir.path().to_path_buf(),
+            include_upload_logs: false,
+        },
+        lpcli::download::ProgressMode::None,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    let bad_report = build_logs_report(&executed_bad);
+    let dl_json = &bad_report.json["lpcli"]["downloads"][0];
+    let shown_name = dl_json["filename"].as_str().unwrap();
+    assert!(!shown_name.contains("supersecret"), "{shown_name}");
+    assert!(!shown_name.contains("tok=abc"), "{shown_name}");
+    assert!(!shown_name.contains('\u{202E}'), "{shown_name}");
+
+    // `unique_backup_path` distinguishes upload_log and skips dangling symlinks.
+    let mut used = std::collections::HashSet::new();
+    let p_build = unique_backup_path(
+        dir.path(),
+        Some("700"),
+        "build_log",
+        false,
+        "log.txt.gz",
+        &mut used,
+    );
+    let p_upload = unique_backup_path(
+        dir.path(),
+        Some("700"),
+        "upload_log",
+        false,
+        "log.txt.gz",
+        &mut used,
+    );
+    assert_eq!(p_build.file_name().unwrap(), "build-700_log.txt.gz");
+    assert_eq!(p_upload.file_name().unwrap(), "build-700_upload_log.txt.gz");
+
+    let mut forced_used = std::collections::HashSet::new();
+    let p_forced = unique_backup_path(
+        dir.path(),
+        Some("700"),
+        "upload_log",
+        true,
+        "log.txt.gz",
+        &mut forced_used,
+    );
+    assert_eq!(p_forced.file_name().unwrap(), "build-700_upload_log.txt.gz");
+
+    #[cfg(unix)]
+    {
+        let mut sym_used = std::collections::HashSet::new();
+        std::os::unix::fs::symlink(
+            dir.path().join("missing"),
+            dir.path().join("build-701_log.txt.gz"),
+        )
+        .unwrap();
+        let p_sym = unique_backup_path(
+            dir.path(),
+            Some("701"),
+            "build_log",
+            false,
+            "log.txt.gz",
+            &mut sym_used,
+        );
+        assert_eq!(p_sym.file_name().unwrap(), "build-701_log-2.txt.gz");
+    }
+
+    b1_mock.assert_async().await;
+    b2_mock.assert_async().await;
+    log_a.assert_async().await;
+    log_b.assert_async().await;
+}
+
+#[tokio::test]
+async fn retry_save_logs_partial_exit_7_when_retry_post_fails_after_local_backup() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let dir = tempfile::tempdir().unwrap();
+
+    let b = rebase(
+        ppa_build_json(
+            601,
+            "noble",
+            "amd64",
+            "Failed to build",
+            true,
+            Some("/+files/b601.txt.gz"),
+        ),
+        &base,
+    );
+    let get_b = server
+        .mock("GET", "/~jdoe/+archive/ubuntu/test/+build/601")
+        .with_status(200)
+        .with_body(b.to_string())
+        .create_async()
+        .await;
+    let log_b = server
+        .mock("GET", "/+files/b601.txt.gz")
+        .with_status(200)
+        .with_body(b"backed-up-before-403")
+        .create_async()
+        .await;
+    let post_forbidden = server
+        .mock("POST", "/~jdoe/+archive/ubuntu/test/+build/601")
+        .with_status(403)
+        .with_body("not allowed")
+        .create_async()
+        .await;
+
+    let client = mock_read_client(&server, true);
+    let outcome = execute_build_retry(
+        &client,
+        false,
+        &BuildRetryRequest {
+            target: BuildTarget::Single {
+                build_id: Some(601),
+                build_url: None,
+                owner: None,
+                ppa: Some("jdoe/test".into()),
+                distro: "ubuntu".into(),
+            },
+            dry_run: false,
+            yes: true,
+            save_logs: Some(dir.path().to_path_buf()),
+        },
+        |_| unreachable!(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        matches!(outcome.result, Err(LpError::Partial(_))),
+        "local log backup + failed retry POST must yield Partial (exit 7): {:?}",
+        outcome.result
+    );
+    assert_eq!(
+        outcome.report.json["lpcli"]["saved_logs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        outcome.report.json["lpcli"]["failures"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("build-601_b601.txt.gz")).unwrap(),
+        b"backed-up-before-403"
+    );
+
+    get_b.assert_async().await;
+    log_b.assert_async().await;
+    post_forbidden.assert_async().await;
+}
+
+#[tokio::test]
+async fn fallback_build_resolution_deduplicates_and_package_builds_filters_pocket() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+
+    let pub1 = json!({
+        "self_link": format!("{base}/ubuntu/+archive/primary/+sourcepub/10"),
+        "source_package_name": "mutter",
+        "source_package_version": "50.1-1",
+        "status": "Superseded",
+        "pocket": "Updates",
+        "distro_series_link": format!("{base}/ubuntu/noble"),
+    });
+    let pub2 = json!({
+        "self_link": format!("{base}/ubuntu/+archive/primary/+sourcepub/11"),
+        "source_package_name": "mutter",
+        "source_package_version": "50.1-1",
+        "status": "Published",
+        "pocket": "Updates",
+        "distro_series_link": format!("{base}/ubuntu/noble"),
+    });
+
+    let mut dup_build = rebase(
+        ppa_build_json(701, "noble", "amd64", "Failed to build", true, None),
+        &base,
+    );
+    dup_build["self_link"] = json!(format!("{base}/ubuntu/+archive/primary/+build/701"));
+    dup_build["pocket"] = json!("Updates");
+
+    let mut wrong_pocket_build = rebase(
+        ppa_build_json(702, "noble", "amd64", "Failed to build", false, None),
+        &base,
+    );
+    wrong_pocket_build["self_link"] = json!(format!("{base}/ubuntu/+archive/primary/+build/702"));
+    wrong_pocket_build["pocket"] = json!("Release");
+
+    let sources_mock = server
+        .mock("GET", "/ubuntu/+archive/primary")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("ws.op".into(), "getPublishedSources".into()),
+            Matcher::UrlEncoded("pocket".into(), "Updates".into()),
+        ]))
+        .with_status(200)
+        .with_body(json!({"start": 0, "entries": [pub1, pub2]}).to_string())
+        .expect(2)
+        .create_async()
+        .await;
+
+    let builds_pub1 = server
+        .mock("GET", "/ubuntu/+archive/primary/+sourcepub/10")
+        .match_query(Matcher::UrlEncoded("ws.op".into(), "getBuilds".into()))
+        .with_status(200)
+        .with_body(json!({"start": 0, "entries": [dup_build, wrong_pocket_build]}).to_string())
+        .expect(2)
+        .create_async()
+        .await;
+    let builds_pub2 = server
+        .mock("GET", "/ubuntu/+archive/primary/+sourcepub/11")
+        .match_query(Matcher::UrlEncoded("ws.op".into(), "getBuilds".into()))
+        .with_status(200)
+        .with_body(json!({"start": 0, "entries": [dup_build]}).to_string())
+        .expect(2)
+        .create_async()
+        .await;
+
+    let post_701 = server
+        .mock("POST", "/ubuntu/+archive/primary/+build/701")
+        .match_body(Matcher::UrlEncoded("ws.op".into(), "retry".into()))
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let mut retried_701 = dup_build.clone();
+    retried_701["buildstate"] = json!("Needs building");
+    retried_701["can_be_retried"] = json!(false);
+    let readback_701 = server
+        .mock("GET", "/ubuntu/+archive/primary/+build/701")
+        .with_status(200)
+        .with_body(retried_701.to_string())
+        .expect(1)
+        .create_async()
+        .await;
+
+    let client = mock_read_client(&server, true);
+    let outcome = execute_build_retry(
+        &client,
+        false,
+        &BuildRetryRequest {
+            target: BuildTarget::Filter(BuildFilterRequest {
+                owner: None,
+                ppa: None,
+                name: Some("mutter".into()),
+                version: None,
+                series: Some("noble".into()),
+                arch: Vec::new(),
+                state: vec!["Failed to build".into()],
+                exclude_state: Vec::new(),
+                pocket: Some(ubuntu_info_rust::Pocket::Updates),
+                distro: "ubuntu".into(),
+                limit: 30,
+            }),
+            dry_run: false,
+            yes: true,
+            save_logs: None,
+        },
+        |_| unreachable!(),
+    )
+    .await
+    .unwrap();
+    outcome.result.unwrap();
+    assert_eq!(outcome.retried_links.len(), 1);
+
+    // `package_builds` must also filter out `Release` builds when `--pocket updates` is requested.
+    let list_report = package_builds(
+        &client,
+        &PackageBuildsRequest {
+            owner: None,
+            ppa: None,
+            name: Some("mutter".into()),
+            version: None,
+            series: Some("noble".into()),
+            arch: Vec::new(),
+            state: Vec::new(),
+            exclude_state: Vec::new(),
+            pocket: Some(ubuntu_info_rust::Pocket::Updates),
+            distro: "ubuntu".into(),
+            limit: 30,
+        },
+    )
+    .await
+    .unwrap();
+    let visible_ids: Vec<&str> = list_report.json["builds"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["self_link"].as_str())
+        .collect();
+    assert!(
+        visible_ids.iter().all(|s| s.ends_with("/+build/701")),
+        "unexpected Release build included: {visible_ids:?}"
+    );
+
+    sources_mock.assert_async().await;
+    builds_pub1.assert_async().await;
+    builds_pub2.assert_async().await;
+    post_701.assert_async().await;
+    readback_701.assert_async().await;
+}
