@@ -8,8 +8,6 @@
 
 use crate::*;
 
-use futures_util::StreamExt;
-
 use lpcli::error::LpError;
 use serde_json::Value;
 
@@ -17,15 +15,15 @@ use serde_json::Value;
 // Report helpers
 // ---------------------------------------------------------------------------
 
-fn column(label: &'static str, key: &'static str) -> Column {
+pub(crate) fn column(label: &'static str, key: &'static str) -> Column {
     Column::new(label, key)
 }
 
-fn noun(singular: &'static str, plural: &'static str) -> Noun {
+pub(crate) fn noun(singular: &'static str, plural: &'static str) -> Noun {
     Noun { singular, plural }
 }
 
-fn no_records() -> Records {
+pub(crate) fn no_records() -> Records {
     Records {
         columns: Vec::new(),
         rows: Vec::new(),
@@ -73,20 +71,20 @@ fn list_report(
 }
 
 /// The raw entries of a Launchpad collection.
-fn raw_entries(collection: &Value) -> &[Value] {
+pub(crate) fn raw_entries(collection: &Value) -> &[Value] {
     collection
         .get("entries")
         .and_then(Value::as_array)
         .map_or(&[], Vec::as_slice)
 }
 
-fn flag(value: Option<bool>) -> Option<String> {
+pub(crate) fn flag(value: Option<bool>) -> Option<String> {
     value.map(|value| value.to_string())
 }
 
 /// The final path segment of a Launchpad link, without a leading `~`, e.g.
 /// `https://api.launchpad.net/devel/~jdoe` -> `jdoe`.
-fn link_name(link: Option<&str>) -> Option<String> {
+pub(crate) fn link_name(link: Option<&str>) -> Option<String> {
     output::link_name(link)
 }
 
@@ -343,6 +341,8 @@ pub(crate) async fn person_report(
 pub(crate) async fn handle_package(
     cmd: PackageCommand,
     output: &Output,
+    quiet: bool,
+    no_input: bool,
     policy: ReadAuthPolicy,
     cache_timeout: std::time::Duration,
 ) -> lpcli::error::Result<()> {
@@ -363,6 +363,9 @@ pub(crate) async fn handle_package(
             output_dir: output_dir.into(),
         };
         return handle_package_download(&client, output, &request).await;
+    }
+    if let PackageCommand::Build { command } = cmd {
+        return handle_build(&client, output, quiet, no_input, command).await;
     }
     output.print(&package_report(&client, cmd).await?)
 }
@@ -473,6 +476,8 @@ pub(crate) async fn package_report(
             series,
             arch,
             state,
+            exclude_state,
+            pocket,
             distro,
             limit,
         } => {
@@ -486,11 +491,19 @@ pub(crate) async fn package_report(
                     series,
                     arch,
                     state,
+                    exclude_state,
+                    pocket,
                     distro,
                     limit,
                 },
             )
             .await?
+        }
+
+        PackageCommand::Build { .. } => {
+            return Err(LpError::Usage(
+                "`package build` subcommands use their own build handler.".into(),
+            ));
         }
 
         PackageCommand::Distro { distro } => {
@@ -540,332 +553,6 @@ pub(crate) async fn package_report(
             .await?
         }
     })
-}
-
-// ---------------------------------------------------------------------------
-// Package build results
-// ---------------------------------------------------------------------------
-
-/// Parameters for `lpcli package builds`.
-struct PackageBuildsRequest {
-    owner: Option<String>,
-    ppa: Option<String>,
-    name: Option<String>,
-    version: Option<String>,
-    series: Option<String>,
-    arch: Option<String>,
-    state: Option<String>,
-    distro: String,
-    limit: u32,
-}
-
-/// Build the report for `lpcli package builds`.
-///
-/// The source publications come from `getPublishedSources`; each source's
-/// builds come from its `getBuilds` operation, scoped to one publication so
-/// that the primary archive does not time out. Active binary publications are
-/// checked per source, only for sources with visible rows and at least one
-/// successful build.
-async fn package_builds(
-    client: &LaunchpadClient,
-    request: &PackageBuildsRequest,
-) -> lpcli::error::Result<Report> {
-    use futures_util::TryStreamExt as _;
-
-    if request.limit == 0 {
-        return Err(LpError::Usage("--limit must be at least 1.".into()));
-    }
-    if (request.owner.is_some() || request.ppa.is_some())
-        && !request.distro.eq_ignore_ascii_case("ubuntu")
-    {
-        return Err(LpError::Usage(format!(
-            "PPA archives are only available for Ubuntu, not '{}'.",
-            request.distro
-        )));
-    }
-    if request.owner.is_some() != request.ppa.is_some() {
-        return Err(LpError::Usage(
-            "--owner and --ppa must be provided together.".into(),
-        ));
-    }
-    let owner = request.owner.as_deref().map(str::trim);
-    let ppa = request.ppa.as_deref().map(str::trim);
-    if owner.is_some_and(str::is_empty) {
-        return Err(LpError::Usage("--owner must not be empty.".into()));
-    }
-    if ppa.is_some_and(str::is_empty) {
-        return Err(LpError::Usage("--ppa must not be empty.".into()));
-    }
-
-    let canonical_series_name = request
-        .series
-        .as_deref()
-        .map(|s| canonical_series(&request.distro, s));
-    let params = SourceSearchParams {
-        source_name: request.name.as_deref(),
-        version: request.version.as_deref(),
-        exact_match: true,
-        statuses: &["Published", "Superseded", "Pending"],
-        limit: Some(request.limit),
-        ..Default::default()
-    };
-
-    let (page, archive_label) = if let (Some(owner), Some(ppa)) = (owner, ppa) {
-        if let Err(error) = packages::get_ppa_raw(client, owner, ppa).await {
-            return Err(match error {
-                LpError::NotFound(_) => LpError::NotFound(format!("PPA ~{owner}/{ppa} not found.")),
-                other => other,
-            });
-        }
-        let page =
-            packages::search_ppa_sources_raw(client, owner, ppa, canonical_series_name, &params)
-                .await?;
-        (page, format!("~{owner}/{ppa}"))
-    } else {
-        let series = canonical_series_name.ok_or_else(|| {
-            LpError::Usage(
-                "specify --series for the primary archive or --owner and --ppa for a PPA".into(),
-            )
-        })?;
-        let page = packages::search_published_sources_raw(client, &request.distro, series, &params)
-            .await?;
-        (page, request.distro.clone())
-    };
-
-    let sources = &page.value.entries;
-
-    // Fetch each source's builds concurrently, preserving source order and
-    // short-circuiting on the first failure (e.g. 429 or auth error).
-    let fetched: Vec<Raw<Vec<packages::SourceBuild>>> = futures_util::stream::iter(sources)
-        .map(|source| async move {
-            let link = source
-                .self_link
-                .as_deref()
-                .ok_or_else(|| LpError::Other("source publication has no self_link".into()))?;
-            packages::get_source_builds_raw(client, link).await
-        })
-        .buffered(8)
-        .try_collect()
-        .await?;
-
-    let mut source_builds: Vec<(Vec<packages::SourceBuild>, Vec<Value>)> =
-        Vec::with_capacity(fetched.len());
-    for raw in fetched {
-        let entries = raw
-            .raw
-            .get("entries")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        source_builds.push((raw.value, entries));
-    }
-
-    let arch_filter = request.arch.as_deref();
-    let state_filter = request.state.as_deref();
-    let visible_per_source: Vec<Vec<usize>> = source_builds
-        .iter()
-        .map(|(builds, _)| {
-            builds
-                .iter()
-                .enumerate()
-                .filter(|(_, build)| {
-                    arch_filter.is_none_or(|arch| build.arch_tag.as_deref() == Some(arch))
-                })
-                .filter(|(_, build)| {
-                    state_filter.is_none_or(|state| build.buildstate.as_deref() == Some(state))
-                })
-                .map(|(idx, _)| idx)
-                .collect()
-        })
-        .collect();
-
-    // Only sources with at least one visible build row AND a successful build
-    // can have active binaries worth querying.
-    let checks: Vec<usize> = source_builds
-        .iter()
-        .enumerate()
-        .filter(|(idx, (builds, _))| {
-            !visible_per_source[*idx].is_empty()
-                && builds
-                    .iter()
-                    .any(|build| build.buildstate.as_deref() == Some("Successfully built"))
-        })
-        .map(|(idx, _)| idx)
-        .collect();
-    let mut binaries = vec![false; sources.len()];
-    let checked: Vec<(usize, bool)> = futures_util::stream::iter(checks)
-        .map(|idx| async move {
-            let link = sources[idx]
-                .self_link
-                .as_deref()
-                .ok_or_else(|| LpError::Other("source publication has no self_link".into()))?;
-            Ok::<_, LpError>((
-                idx,
-                packages::source_has_active_binaries(client, link).await?,
-            ))
-        })
-        .buffered(8)
-        .try_collect()
-        .await?;
-    for (idx, has_binaries) in checked {
-        binaries[idx] = has_binaries;
-    }
-
-    let mut rows = Vec::new();
-    let mut raw_builds = Vec::new();
-    let mut log_rows = Vec::new();
-    let mut source_map = serde_json::Map::new();
-
-    for (idx, source) in sources.iter().enumerate() {
-        let (builds, builds_json) = &source_builds[idx];
-        let series = output::link_name(source.distro_series_link.as_deref());
-        let visible = &visible_per_source[idx];
-
-        let mut visible_links = Vec::with_capacity(visible.len());
-        for &build_idx in visible {
-            let build = &builds[build_idx];
-            if let Some(raw) = builds_json.get(build_idx) {
-                raw_builds.push(raw.clone());
-            }
-            let build_series =
-                output::link_name(build.distro_series_link.as_deref()).or_else(|| series.clone());
-            let package = build
-                .source_package_name
-                .as_deref()
-                .or(source.source_package_name.as_deref());
-            let version = build
-                .source_package_version
-                .as_deref()
-                .or(source.source_package_version.as_deref());
-            visible_links.push(
-                build
-                    .self_link
-                    .clone()
-                    .map(Value::String)
-                    .unwrap_or(Value::Null),
-            );
-            if let Some(log_url) = &build.build_log_url {
-                let arch = build.arch_tag.as_deref().unwrap_or("");
-                let build_series = build_series.as_deref().unwrap_or("");
-                log_rows.push(vec![
-                    Some(format!(
-                        "{} {} ({build_series}/{arch})",
-                        package.unwrap_or(""),
-                        version.unwrap_or(""),
-                    )),
-                    Some(log_url.clone()),
-                ]);
-            }
-            let row_binaries =
-                build.buildstate.as_deref() == Some("Successfully built") && binaries[idx];
-            rows.push(vec![
-                package.map(str::to_string),
-                version.map(str::to_string),
-                build_series,
-                build.arch_tag.clone(),
-                source.status.clone(),
-                build.buildstate.clone(),
-                Some(binaries_word(row_binaries)),
-                build.date_built.map(|ts| ts.to_string()),
-                build.duration.clone(),
-                build.build_log_url.clone(),
-            ]);
-        }
-
-        let placeholder = builds.is_empty() && arch_filter.is_none() && state_filter.is_none();
-        if placeholder {
-            rows.push(vec![
-                source.source_package_name.clone(),
-                source.source_package_version.clone(),
-                series.clone(),
-                None,
-                source.status.clone(),
-                Some("No builds yet".into()),
-                Some(binaries_word(false)),
-                None,
-                None,
-                None,
-            ]);
-        }
-
-        if (!visible.is_empty() || placeholder)
-            && let Some(link) = &source.self_link
-        {
-            source_map.insert(
-                link.clone(),
-                serde_json::json!({
-                    "builds": visible_links,
-                    "binaries_published": binaries[idx],
-                }),
-            );
-        }
-    }
-
-    let complete = page.value.next_collection_link.is_none();
-    let json = serde_json::json!({
-        "source_publications": page.raw.clone(),
-        "builds": {"entries": raw_builds},
-        "lpcli": {
-            "archive": archive_label,
-            "series": canonical_series_name,
-            "complete": complete,
-            "sources": source_map,
-        },
-    });
-
-    let mut blocks = vec![Block::Heading(format!("Builds for {archive_label}"))];
-    if let Some(series) = canonical_series_name {
-        blocks.push(Block::Field("Series", series.to_string()));
-    }
-    let hint = (!complete)
-        .then(|| "More source publications match; raise --limit to see them.".to_string());
-    let empty = if sources.is_empty() {
-        format!("No source publications found in {archive_label}.")
-    } else if rows.is_empty() {
-        "No builds matched the requested --arch/--state filters.".into()
-    } else {
-        "No builds found.".into()
-    };
-    blocks.push(Block::List {
-        noun: noun("build result", "build results"),
-        empty,
-        hint,
-    });
-    if !log_rows.is_empty() {
-        blocks.push(Block::RichTable {
-            records: Records {
-                columns: vec![column("Build", "build"), column("Log", "build_log_url")],
-                rows: log_rows,
-            },
-            noun: noun("build log", "build logs"),
-            empty: "No build logs found.".into(),
-            hint: None,
-        });
-    }
-
-    Ok(Report {
-        blocks,
-        json,
-        records: Records {
-            columns: vec![
-                column("Package", "source_package_name"),
-                column("Version", "source_package_version"),
-                column("Series", "series"),
-                column("Arch", "arch_tag"),
-                column("Publication", "status"),
-                column("Build State", "buildstate"),
-                column("Binaries", "binaries_published"),
-                Column::datetime("Finished", "datebuilt"),
-                column("Duration", "duration"),
-                Column::rich_hidden("Log", "build_log_url"),
-            ],
-            rows,
-        },
-    })
-}
-
-fn binaries_word(published: bool) -> String {
-    if published { "yes" } else { "no" }.to_string()
 }
 
 // ---------------------------------------------------------------------------

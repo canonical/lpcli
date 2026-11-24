@@ -5,6 +5,7 @@
 //! * Ubuntu distributions and their series (e.g. `jammy`, `noble`).
 //! * Source packages, publishing history, PPAs, and Debian changelogs.
 //! * Binary packages built from a source package.
+//! * Source build records, individual builds, and build retries (`retry`).
 //! * Copying or syncing packages between series (PPAs).
 //!
 //! # API roots
@@ -15,6 +16,9 @@
 //! | Series | `/ubuntu/jammy` |
 //! | Source publications | `/ubuntu/+archive/primary?ws.op=getPublishedSources` |
 //! | Source builds | `/+sourcepub/{id}?ws.op=getBuilds` |
+//! | PPA build records | `/~{person}/+archive/ubuntu/{ppa}?ws.op=getBuildRecords` |
+//! | Individual build | `/~{person}/+archive/ubuntu/{ppa}/+build/{id}` or `/{distro}/+archive/primary/+build/{id}` |
+//! | Retry build | `{build_self_link}?ws.op=retry` (`POST`) |
 //! | Published binaries | `/+sourcepub/{id}?ws.op=getPublishedBinaries` |
 //! | PPAs | `/~{person}/+archive/ubuntu/{ppa}` |
 //!
@@ -22,23 +26,23 @@
 //! that also returns the exact JSON Launchpad sent: an entry, or a collection
 //! with `start`, `entries`, and `total_size` or `total_size_link`.
 //! [`get_source_file_urls`], [`get_source_changelog_url`],
-//! [`fetch_source_changelog`], and [`source_has_active_binaries`] have no
-//! `_raw` counterparts because Launchpad returns a URL list, an optional URL
-//! string, plain changelog text, or a value derived from a collection rather
-//! than an entry or collection.
+//! [`fetch_source_changelog`], [`source_has_active_binaries`], and
+//! [`retry_build`] have no `_raw` counterparts (or [`retry_build_raw`] reads back
+//! the updated entry) because Launchpad returns a URL list, an optional URL
+//! string, plain changelog text, a value derived from a collection, or an empty
+//! POST response.
 //!
-//! Build results are read per source publication with `getBuilds`. The
-//! archive-level `getBuildRecords` operation is not used because it times out
-//! on the primary archive; `getBuilds` is scoped to one source publication and
-//! works on both PPAs and the primary archive. `getBuilds` and
-//! `getPublishedBinaries` are ordinary `devel` GET operations; no beta header
-//! or beta service root is needed.
+//! Archive-level `getBuildRecords` is scoped to PPAs
+//! ([`get_ppa_build_records`]); on the primary archive, `getBuildRecords`
+//! times out, so primary-archive build listings query `getBuilds` per source
+//! publication instead. `getBuilds` and `getPublishedBinaries` are ordinary
+//! `devel` GET operations; no beta header or beta service root is needed.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{Collection, LaunchpadClient, Raw};
-use crate::error::Result;
+use crate::error::{LpError, Result};
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -113,16 +117,35 @@ pub struct BinaryPackagePublishingHistory {
 }
 
 /// A source package build record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceBuild {
     /// API self-link.
     pub self_link: Option<String>,
     /// Launchpad web link.
     pub web_link: Option<String>,
+    /// Human-readable title (e.g. `"amd64 build of mutter 50.1 in ubuntu noble RELEASE"`).
+    pub title: Option<String>,
     /// Architecture tag (e.g. `"amd64"`, `"arm64"`).
     pub arch_tag: Option<String>,
+    /// API link to the archive containing this build.
+    pub archive_link: Option<String>,
+    /// API link to the builder assigned to this job.
+    pub builder_link: Option<String>,
     /// Build state (e.g. `"Successfully built"`, `"Failed to build"`).
     pub buildstate: Option<String>,
+    /// Whether this build can be retried.
+    pub can_be_retried: Option<bool>,
+    /// Whether this build can be cancelled.
+    pub can_be_cancelled: Option<bool>,
+    /// Whether this build can be manually rescored.
+    pub can_be_rescored: Option<bool>,
+    /// When the build record was created.
+    #[serde(rename = "datecreated")]
+    pub date_created: Option<Timestamp>,
+    /// When the build was first dispatched.
+    pub date_first_dispatched: Option<Timestamp>,
+    /// When the build started.
+    pub date_started: Option<Timestamp>,
     /// When the build finished, when it has finished.
     #[serde(rename = "datebuilt")]
     pub date_built: Option<Timestamp>,
@@ -130,14 +153,122 @@ pub struct SourceBuild {
     pub duration: Option<String>,
     /// URL of the build log.
     pub build_log_url: Option<String>,
+    /// URL of a failed upload log, if any.
+    pub upload_log_url: Option<String>,
+    /// URL of the `.buildinfo` file, if any.
+    pub buildinfo_url: Option<String>,
+    /// URL of the `.changes` file, if any.
+    pub changesfile_url: Option<String>,
     /// Source package name.
     pub source_package_name: Option<String>,
     /// Source package version.
     pub source_package_version: Option<String>,
     /// API link to the build's distro series.
     pub distro_series_link: Option<String>,
+    /// API link to the current source package publication for this build.
+    pub current_source_publication_link: Option<String>,
     /// Pocket (e.g. `"Release"`, `"Updates"`).
     pub pocket: Option<String>,
+    /// Debian-style dependency expression for `Dependency wait` builds, if any.
+    pub dependencies: Option<String>,
+    /// External apt sources configured for bootstrapping dependency loops, if any.
+    pub external_dependencies: Option<String>,
+    /// Build queue score, if any.
+    pub score: Option<i64>,
+}
+
+impl SourceBuild {
+    /// Numeric build ID extracted from the `/+build/{id}` segment of
+    /// [`Self::self_link`] or [`Self::web_link`].
+    pub fn build_id(&self) -> Option<&str> {
+        self.self_link
+            .as_deref()
+            .and_then(extract_build_id)
+            .or_else(|| self.web_link.as_deref().and_then(extract_build_id))
+    }
+}
+
+fn extract_build_id(link: &str) -> Option<&str> {
+    let without_query = link.split(['?', '#']).next()?;
+    let mut parts = without_query.trim_end_matches('/').rsplit('/');
+    let id = parts.next()?;
+    let marker = parts.next()?;
+    (marker == "+build"
+        && !id.is_empty()
+        && id.bytes().all(|b| b.is_ascii_digit())
+        && id.parse::<u64>().is_ok_and(|n| n > 0))
+    .then_some(id)
+}
+
+/// Validate that `build_self_link` is an HTTP(S) Launchpad build URL
+/// referencing `/+build/<id>` without embedded credentials, query string, or
+/// fragment.
+pub fn validate_build_self_link(build_self_link: &str) -> Result<()> {
+    let parsed = url::Url::parse(build_self_link).map_err(|e| {
+        LpError::Usage(format!(
+            "Invalid build URL '{}': {e}",
+            crate::download::redact_url_for_display(build_self_link)
+        ))
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(LpError::Usage(format!(
+            "Invalid build URL '{}': scheme must be http or https.",
+            crate::download::redact_url_for_display(build_self_link)
+        )));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(LpError::Usage(format!(
+            "Invalid build URL '{}': URL must not contain credentials.",
+            crate::download::redact_url_for_display(build_self_link)
+        )));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(LpError::Usage(format!(
+            "Invalid build URL '{}': expected a Launchpad '/+build/<id>' URL without a query string or fragment.",
+            crate::download::redact_url_for_display(build_self_link)
+        )));
+    }
+    if extract_build_id(parsed.path()).is_none() {
+        return Err(LpError::Usage(format!(
+            "Invalid build URL '{}': expected a Launchpad '/+build/<id>' URL.",
+            crate::download::redact_url_for_display(build_self_link)
+        )));
+    }
+    Ok(())
+}
+
+fn validate_build_response(raw: &Raw<SourceBuild>, build_self_link: &str) -> Result<()> {
+    if let Some(rt) = raw
+        .raw
+        .get("resource_type_link")
+        .and_then(serde_json::Value::as_str)
+        && !rt.ends_with("/#build")
+    {
+        return Err(LpError::Usage(format!(
+            "URL '{}' is not a Launchpad build record (resource_type_link: {rt}).",
+            crate::download::redact_url_for_display(build_self_link)
+        )));
+    }
+    if raw.value.build_id().is_none() && raw.value.buildstate.is_none() {
+        return Err(LpError::Usage(format!(
+            "URL '{}' did not return a Launchpad build record.",
+            crate::download::redact_url_for_display(build_self_link)
+        )));
+    }
+    Ok(())
+}
+
+/// Parameters for PPA archive `getBuildRecords` queries.
+#[derive(Debug, Clone, Default)]
+pub struct BuildRecordSearchParams<'a> {
+    /// Canonical build state filter (e.g. `"Failed to build"`).
+    pub build_state: Option<&'a str>,
+    /// Pocket filter (e.g. `"Release"`, `"Updates"`).
+    pub pocket: Option<&'a str>,
+    /// Source package name filter.
+    pub source_name: Option<&'a str>,
+    /// Maximum number of results to return (`ws.size` single-page cap when set).
+    pub limit: Option<u32>,
 }
 
 /// A Launchpad Personal Package Archive (PPA).
@@ -423,15 +554,23 @@ fn append_source_search_params(
     }
 }
 
-/// Fetch a `getPublishedSources` collection, honouring an optional limit.
+/// Fetch a collection, honouring an optional single-page limit.
 ///
 /// `ws.size` is only Launchpad's page size, so a limited search fetches a
 /// single page; an unlimited one fetches every page.
 async fn fetch_sources_raw(
     client: &LaunchpadClient,
-    mut url: String,
+    url: String,
     limit: Option<u32>,
 ) -> Result<Raw<Collection<SourcePackagePublishingHistory>>> {
+    fetch_paginated_collection_raw(client, url, limit).await
+}
+
+async fn fetch_paginated_collection_raw<T: serde::de::DeserializeOwned + std::fmt::Debug>(
+    client: &LaunchpadClient,
+    mut url: String,
+    limit: Option<u32>,
+) -> Result<Raw<Collection<T>>> {
     if let Some(limit) = limit {
         url.push_str(&format!("&ws.size={limit}"));
         return Collection::fetch_page_raw(client, &url).await;
@@ -473,6 +612,159 @@ pub async fn get_source_builds_raw(
     client.ensure_same_api_origin(pub_self_link, "publication self_link")?;
     let url = format!("{pub_self_link}?ws.op=getBuilds");
     Collection::fetch_all_raw(client, &url).await
+}
+
+/// Query build records in a Ubuntu PPA using `getBuildRecords`.
+///
+/// This is PPA-scoped because archive-level `getBuildRecords` times out on
+/// the primary archive. Use [`get_source_builds()`] for primary-archive builds.
+pub async fn get_ppa_build_records(
+    client: &LaunchpadClient,
+    owner: &str,
+    ppa_name: &str,
+    params: &BuildRecordSearchParams<'_>,
+) -> Result<Vec<SourceBuild>> {
+    Ok(get_ppa_build_records_raw(client, owner, ppa_name, params)
+        .await?
+        .value
+        .entries)
+}
+
+/// Like [`get_ppa_build_records()`], but also keep Launchpad's collection JSON.
+///
+/// With [`BuildRecordSearchParams::limit`], one page of at most `limit`
+/// entries is fetched (`next_collection_link` is preserved); without a limit,
+/// all pages are fetched.
+pub async fn get_ppa_build_records_raw(
+    client: &LaunchpadClient,
+    owner: &str,
+    ppa_name: &str,
+    params: &BuildRecordSearchParams<'_>,
+) -> Result<Raw<Collection<SourceBuild>>> {
+    let archive_url = client.url(&format!(
+        "/~{}/+archive/ubuntu/{}",
+        enc(owner),
+        enc(ppa_name)
+    ));
+    let mut query = format!("{archive_url}?ws.op=getBuildRecords");
+    if let Some(build_state) = params.build_state {
+        query.push_str(&format!("&build_state={}", enc(build_state)));
+    }
+    if let Some(pocket) = params.pocket {
+        query.push_str(&format!("&pocket={}", enc(pocket)));
+    }
+    if let Some(source_name) = params.source_name {
+        query.push_str(&format!("&source_name={}", enc(source_name)));
+    }
+    fetch_paginated_collection_raw(client, query, params.limit).await
+}
+
+/// Fetch a subsequent `next_collection_link` page of build records after
+/// verifying the URL shares the configured Launchpad API origin.
+pub async fn get_build_records_page_raw(
+    client: &LaunchpadClient,
+    page_url: &str,
+) -> Result<Raw<Collection<SourceBuild>>> {
+    client.ensure_same_api_origin(page_url, "next_collection_link")?;
+    Collection::fetch_page_raw(client, page_url).await
+}
+
+/// Fetch a single build record by its canonical API self-link.
+pub async fn get_build(client: &LaunchpadClient, build_self_link: &str) -> Result<SourceBuild> {
+    Ok(get_build_raw(client, build_self_link).await?.value)
+}
+
+/// Like [`get_build()`], but also keep the exact JSON Launchpad returned.
+pub async fn get_build_raw(
+    client: &LaunchpadClient,
+    build_self_link: &str,
+) -> Result<Raw<SourceBuild>> {
+    client.ensure_same_api_origin(build_self_link, "build self_link")?;
+    validate_build_self_link(build_self_link)?;
+    let found: Raw<SourceBuild> = client.get_url_raw(build_self_link).await?;
+    validate_build_response(&found, build_self_link)?;
+    Ok(found)
+}
+
+/// Fetch a single build record in an Ubuntu PPA by numeric build ID.
+pub async fn get_ppa_build(
+    client: &LaunchpadClient,
+    owner: &str,
+    ppa_name: &str,
+    build_id: u64,
+) -> Result<SourceBuild> {
+    Ok(get_ppa_build_raw(client, owner, ppa_name, build_id)
+        .await?
+        .value)
+}
+
+/// Like [`get_ppa_build()`], but also keep the exact JSON Launchpad returned.
+pub async fn get_ppa_build_raw(
+    client: &LaunchpadClient,
+    owner: &str,
+    ppa_name: &str,
+    build_id: u64,
+) -> Result<Raw<SourceBuild>> {
+    client
+        .get_raw(&format!(
+            "/~{}/+archive/ubuntu/{}/+build/{build_id}",
+            enc(owner),
+            enc(ppa_name)
+        ))
+        .await
+}
+
+/// Fetch a single build record in a distribution's primary archive by numeric
+/// build ID.
+pub async fn get_primary_build(
+    client: &LaunchpadClient,
+    distro: &str,
+    build_id: u64,
+) -> Result<SourceBuild> {
+    Ok(get_primary_build_raw(client, distro, build_id).await?.value)
+}
+
+/// Like [`get_primary_build()`], but also keep the exact JSON Launchpad returned.
+pub async fn get_primary_build_raw(
+    client: &LaunchpadClient,
+    distro: &str,
+    build_id: u64,
+) -> Result<Raw<SourceBuild>> {
+    client
+        .get_raw(&format!(
+            "/{}/+archive/primary/+build/{build_id}",
+            enc(distro)
+        ))
+        .await
+}
+
+/// Retry an eligible build record (`POST ws.op=retry`).
+///
+/// Restores the build to `Needs building` and clears its history/logs on
+/// Launchpad.
+pub async fn retry_build(client: &LaunchpadClient, build_self_link: &str) -> Result<()> {
+    client.ensure_same_api_origin(build_self_link, "build self_link")?;
+    validate_build_self_link(build_self_link)?;
+    client
+        .post_pairs_url_ok(build_self_link, &[("ws.op", "retry")])
+        .await
+}
+
+/// Like [`retry_build()`], but read back the updated build record afterwards
+/// and return its exact Launchpad JSON.
+///
+/// # Errors
+///
+/// If the retry succeeds on Launchpad but reading back the build fails,
+/// returns [`LpError::Partial`].
+pub async fn retry_build_raw(
+    client: &LaunchpadClient,
+    build_self_link: &str,
+) -> Result<Raw<SourceBuild>> {
+    retry_build(client, build_self_link).await?;
+    client
+        .get_created_raw(build_self_link, "Retrying the build")
+        .await
 }
 
 /// Whether a source package publication has active binary publications.
@@ -1450,5 +1742,333 @@ mod tests {
             !sliced_one.contains("mode: debian-changelog"),
             "{sliced_one}"
         );
+    }
+
+    #[test]
+    fn source_build_deserialises_extended_fields_and_extracts_build_id() {
+        let json = r#"{
+            "self_link": "https://api.launchpad.net/devel/~deadsnakes/+archive/ubuntu/ppa/+build/33961943",
+            "web_link": "https://launchpad.net/~deadsnakes/+archive/ubuntu/ppa/+build/33961943",
+            "title": "amd64 build of mutter 50.1 in ubuntu noble RELEASE",
+            "arch_tag": "amd64",
+            "archive_link": "https://api.launchpad.net/devel/~deadsnakes/+archive/ubuntu/ppa",
+            "builder_link": "https://api.launchpad.net/devel/builders/bos03-amd64-01",
+            "buildstate": "Failed to build",
+            "can_be_retried": true,
+            "can_be_cancelled": false,
+            "can_be_rescored": false,
+            "datecreated": "2026-10-08T08:59:00+00:00",
+            "date_first_dispatched": "2026-10-08T09:00:00+00:00",
+            "date_started": "2026-10-08T09:00:00+00:00",
+            "datebuilt": "2026-10-08T09:04:54.281155+00:00",
+            "duration": "0:04:54.281155",
+            "build_log_url": "https://launchpad.net/~deadsnakes/+archive/ubuntu/ppa/+build/33961943/+files/buildlog.txt.gz",
+            "upload_log_url": "https://launchpad.net/~deadsnakes/+archive/ubuntu/ppa/+build/33961943/+files/upload.log",
+            "buildinfo_url": "https://launchpad.net/~deadsnakes/+archive/ubuntu/ppa/+build/33961943/+files/mutter_50.1_amd64.buildinfo",
+            "changesfile_url": "https://launchpad.net/~deadsnakes/+archive/ubuntu/ppa/+build/33961943/+files/mutter_50.1_amd64.changes",
+            "source_package_name": "mutter",
+            "source_package_version": "50.1",
+            "distro_series_link": "https://api.launchpad.net/devel/ubuntu/noble",
+            "current_source_publication_link": "https://api.launchpad.net/devel/~deadsnakes/+archive/ubuntu/ppa/+sourcepub/1",
+            "pocket": "Release",
+            "dependencies": "libfoo-dev (>= 1.0)",
+            "external_dependencies": null,
+            "score": 2505
+        }"#;
+        let build: SourceBuild = serde_json::from_str(json).unwrap();
+        assert_eq!(build.build_id(), Some("33961943"));
+        assert_eq!(build.can_be_retried, Some(true));
+        assert_eq!(build.can_be_cancelled, Some(false));
+        assert_eq!(build.score, Some(2505));
+        assert_eq!(build.dependencies.as_deref(), Some("libfoo-dev (>= 1.0)"));
+        assert!(build.date_created.is_some());
+        assert!(build.date_started.is_some());
+        assert!(build.upload_log_url.is_some());
+
+        let fallback = SourceBuild {
+            self_link: None,
+            web_link: Some("https://launchpad.net/ubuntu/+source/hello/2.10/+build/998877".into()),
+            ..Default::default()
+        };
+        assert_eq!(fallback.build_id(), Some("998877"));
+
+        let non_build = SourceBuild {
+            self_link: Some("https://api.launchpad.net/devel/ubuntu/+source/hello".into()),
+            ..Default::default()
+        };
+        assert_eq!(non_build.build_id(), None);
+    }
+
+    #[tokio::test]
+    async fn ppa_build_records_single_build_and_retry_apis() {
+        let mut server = mockito::Server::new_async().await;
+        let mut foreign = mockito::Server::new_async().await;
+        let base = server.url();
+        let build_path = "/~jdoe/+archive/ubuntu/myppa/+build/42";
+        let build_link = format!("{base}{build_path}");
+        let primary_path = "/ubuntu/+archive/primary/+build/99";
+        let page2_path = "/~jdoe/+archive/ubuntu/myppa?ws.op=getBuildRecords&ws.start=1";
+
+        let failed_entry = serde_json::json!({
+            "self_link": build_link,
+            "arch_tag": "amd64",
+            "buildstate": "Failed to build",
+            "can_be_retried": true,
+            "source_package_name": "mutter",
+            "source_package_version": "50.1",
+            "distro_series_link": format!("{base}/ubuntu/noble"),
+            "pocket": "Release",
+        });
+        let retried_entry = serde_json::json!({
+            "self_link": build_link,
+            "arch_tag": "amd64",
+            "buildstate": "Needs building",
+            "can_be_retried": false,
+            "source_package_name": "mutter",
+            "source_package_version": "50.1",
+            "distro_series_link": format!("{base}/ubuntu/noble"),
+            "pocket": "Release",
+        });
+        let records_mock = server
+            .mock("GET", "/~jdoe/+archive/ubuntu/myppa")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getBuildRecords".into()),
+                mockito::Matcher::UrlEncoded("build_state".into(), "Failed to build".into()),
+                mockito::Matcher::UrlEncoded("pocket".into(), "Release".into()),
+                mockito::Matcher::UrlEncoded("source_name".into(), "mutter".into()),
+                mockito::Matcher::UrlEncoded("ws.size".into(), "1".into()),
+            ]))
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "start": 0,
+                    "entries": [failed_entry],
+                    "next_collection_link": format!("{base}{page2_path}"),
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let page2_mock = server
+            .mock("GET", "/~jdoe/+archive/ubuntu/myppa")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ws.op".into(), "getBuildRecords".into()),
+                mockito::Matcher::UrlEncoded("ws.start".into(), "1".into()),
+            ]))
+            .with_status(200)
+            .with_body(serde_json::json!({"start": 1, "entries": []}).to_string())
+            .create_async()
+            .await;
+        let ppa_build_mock = server
+            .mock("GET", build_path)
+            .with_status(200)
+            .with_body(failed_entry.to_string())
+            .create_async()
+            .await;
+        let primary_build_mock = server
+            .mock("GET", primary_path)
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "self_link": format!("{base}{primary_path}"),
+                    "buildstate": "Successfully built",
+                    "can_be_retried": false,
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let retry_post_mock = server
+            .mock("POST", build_path)
+            .match_body(mockito::Matcher::UrlEncoded("ws.op".into(), "retry".into()))
+            .with_status(200)
+            .with_body("")
+            .create_async()
+            .await;
+        let retry_readback_mock = server
+            .mock("GET", build_path)
+            .with_status(200)
+            .with_body(retried_entry.to_string())
+            .create_async()
+            .await;
+        let foreign_mock = foreign
+            .mock("GET", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let client = LaunchpadClient::new(Some(crate::auth::Credentials::new(
+            "lpcli",
+            "tok",
+            "topsecret",
+        )))
+        .with_base_url(base.clone());
+
+        let page1 = get_ppa_build_records_raw(
+            &client,
+            "jdoe",
+            "myppa",
+            &BuildRecordSearchParams {
+                build_state: Some("Failed to build"),
+                pocket: Some("Release"),
+                source_name: Some("mutter"),
+                limit: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(page1.value.entries.len(), 1);
+        assert_eq!(page1.value.entries[0].build_id(), Some("42"));
+        let page2 = get_build_records_page_raw(
+            &client,
+            page1.value.next_collection_link.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(page2.value.entries.is_empty());
+
+        let ppa_b = get_ppa_build_raw(&client, "jdoe", "myppa", 42)
+            .await
+            .unwrap();
+        assert_eq!(ppa_b.value.can_be_retried, Some(true));
+        let primary_b = get_primary_build_raw(&client, "ubuntu", 99).await.unwrap();
+        assert_eq!(primary_b.value.build_id(), Some("99"));
+
+        let retried = retry_build_raw(&client, &build_link).await.unwrap();
+        assert_eq!(retried.value.buildstate.as_deref(), Some("Needs building"));
+
+        // Read-back failure after successful retry yields LpError::Partial.
+        let retry_partial_post = server
+            .mock("POST", build_path)
+            .match_body(mockito::Matcher::UrlEncoded("ws.op".into(), "retry".into()))
+            .with_status(200)
+            .create_async()
+            .await;
+        let retry_partial_get = server
+            .mock("GET", build_path)
+            .with_status(500)
+            .with_body("readback failed")
+            .create_async()
+            .await;
+        let partial_err = retry_build_raw(&client, &build_link).await.unwrap_err();
+        assert!(
+            matches!(partial_err, crate::error::LpError::Partial(_)),
+            "{partial_err:?}"
+        );
+
+        // Cross-origin build self_links and next_collection_link are rejected before network I/O.
+        let foreign_link = format!(
+            "{}/~jdoe/+archive/ubuntu/myppa/+build/42?tok=leak",
+            foreign.url()
+        );
+        for err in [
+            get_build_raw(&client, &foreign_link).await.unwrap_err(),
+            get_build_records_page_raw(&client, &foreign_link)
+                .await
+                .unwrap_err(),
+            retry_build(&client, &foreign_link).await.unwrap_err(),
+            retry_build_raw(&client, &foreign_link).await.unwrap_err(),
+        ] {
+            let msg = err.to_string();
+            assert!(msg.contains("cross-origin"), "{msg}");
+            assert!(!msg.contains("topsecret"), "{msg}");
+            assert!(!msg.contains("tok=leak"), "{msg}");
+        }
+
+        records_mock.assert_async().await;
+        page2_mock.assert_async().await;
+        ppa_build_mock.assert_async().await;
+        primary_build_mock.assert_async().await;
+        retry_post_mock.assert_async().await;
+        retry_readback_mock.assert_async().await;
+        retry_partial_post.assert_async().await;
+        retry_partial_get.assert_async().await;
+        foreign_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn build_urls_and_responses_reject_non_build_targets() {
+        let mut server = mockito::Server::new_async().await;
+        let base = server.url();
+        let client = LaunchpadClient::new(None).with_base_url(base.clone());
+
+        let no_requests = server
+            .mock("GET", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let no_posts = server
+            .mock("POST", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let authed_host = base
+            .strip_prefix("http://")
+            .map(|rest| {
+                format!("http://user:pwsecret@{rest}/~jdoe/+archive/ubuntu/myppa/+build/42")
+            })
+            .unwrap();
+        for bad_url in [
+            format!("{base}/ubuntu/noble"),
+            format!("{base}/~jdoe"),
+            format!("{base}/~jdoe/+archive/ubuntu/myppa/+build/0"),
+            format!("{base}/~jdoe/+archive/ubuntu/myppa/+build/abc"),
+            format!("{base}/~jdoe/+archive/ubuntu/myppa/+build/42?ws.op=cancel"),
+            format!("{base}/~jdoe/+archive/ubuntu/myppa/+build/42#frag"),
+            authed_host,
+        ] {
+            let err = validate_build_self_link(&bad_url).unwrap_err();
+            assert!(matches!(err, LpError::Usage(_)), "{bad_url}: {err:?}");
+            assert!(!err.to_string().contains("pwsecret"), "{err}");
+
+            let get_err = get_build_raw(&client, &bad_url).await.unwrap_err();
+            assert!(!get_err.to_string().contains("pwsecret"), "{get_err}");
+
+            let retry_err = retry_build(&client, &bad_url).await.unwrap_err();
+            assert!(!retry_err.to_string().contains("pwsecret"), "{retry_err}");
+        }
+
+        no_requests.assert_async().await;
+        no_posts.assert_async().await;
+
+        let wrong_type_mock = server
+            .mock("GET", "/~jdoe/+archive/ubuntu/myppa/+build/77")
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "self_link": format!("{base}/~jdoe/+archive/ubuntu/myppa/+build/77"),
+                    "resource_type_link": format!("{base}/#distro_series"),
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let wrong_type_err = get_build_raw(
+            &client,
+            &format!("{base}/~jdoe/+archive/ubuntu/myppa/+build/77"),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(wrong_type_err, LpError::Usage(_)),
+            "{wrong_type_err:?}"
+        );
+        wrong_type_mock.assert_async().await;
+
+        let empty_obj_mock = server
+            .mock("GET", "/~jdoe/+archive/ubuntu/myppa/+build/78")
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+        let empty_err = get_build_raw(
+            &client,
+            &format!("{base}/~jdoe/+archive/ubuntu/myppa/+build/78"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(empty_err, LpError::Usage(_)), "{empty_err:?}");
+        empty_obj_mock.assert_async().await;
     }
 }

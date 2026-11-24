@@ -1,0 +1,9 @@
+---
+source: src/bin/lpcli/tests/phase1_builds.rs
+expression: "stable_text(&render(&outcome.report, OutputMode::Plain), &base)"
+---
+Build retry for ~jdoe/test
+Series: noble
+OK: Retried https://api.launchpad.net/devel/~jdoe/+archive/ubuntu/test/+build/201 (Needs building)
+
+OK: Retried 1 build(s), skipped 0, failed 0.

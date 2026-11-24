@@ -16,6 +16,7 @@ mod output;
 #[path = "lpcli/commands"]
 mod commands {
     pub(crate) mod bug;
+    pub(crate) mod builds;
     pub(crate) mod git;
     pub(crate) mod identity;
     pub(crate) mod queue;
@@ -24,6 +25,7 @@ mod commands {
 }
 
 use commands::bug::*;
+use commands::builds::*;
 use commands::git::*;
 use commands::identity::*;
 use commands::queue::*;
@@ -110,7 +112,7 @@ fn parse_queue_status(s: &str) -> Result<String, String> {
 }
 
 /// Return the Launchpad API spelling of a pocket (e.g. `Release`).
-fn pocket_launchpad_name(pocket: Pocket) -> &'static str {
+pub(crate) fn pocket_launchpad_name(pocket: Pocket) -> &'static str {
     match pocket {
         Pocket::Release => "Release",
         Pocket::Security => "Security",
@@ -242,7 +244,7 @@ fn parse_build_state(s: &str) -> Result<String, String> {
 
 /// A Personal Package Archive reference accepted by `--ppa`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct PpaRef {
+pub(crate) struct PpaRef {
     owner: String,
     name: String,
 }
@@ -254,8 +256,47 @@ impl PpaRef {
     }
 
     /// Human-readable form used in output, e.g. `~my-username/my-ppa`.
-    fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         format!("~{}/{}", self.owner, self.name)
+    }
+}
+
+/// Resolve `--owner` and `--ppa` arguments, supporting both
+/// `--owner <OWNER> --ppa <NAME>` and `--ppa <OWNER>/<NAME>` (when `--owner` is omitted).
+pub(crate) fn resolve_ppa_args(
+    owner: Option<&str>,
+    ppa: Option<&str>,
+) -> Result<Option<PpaRef>, String> {
+    match (owner, ppa) {
+        (None, None) => Ok(None),
+        (Some(_), None) => Err("--owner requires --ppa".into()),
+        (None, Some(ppa_val)) => {
+            if ppa_val.contains('/') {
+                parse_ppa_ref(ppa_val).map(Some)
+            } else {
+                Err(
+                    "--ppa requires --owner, or pass --ppa OWNER/NAME (e.g. my-username/my-ppa)"
+                        .into(),
+                )
+            }
+        }
+        (Some(owner_val), Some(ppa_val)) => {
+            let owner_trimmed = owner_val.trim();
+            let ppa_trimmed = ppa_val.trim();
+            if owner_trimmed.is_empty() {
+                return Err("--owner must not be empty".into());
+            }
+            if ppa_trimmed.is_empty() {
+                return Err("--ppa must not be empty".into());
+            }
+            if ppa_trimmed.contains('/') {
+                return Err(
+                    "cannot combine --owner with --ppa OWNER/NAME; use either --owner OWNER --ppa NAME or --ppa OWNER/NAME"
+                        .into(),
+                );
+            }
+            parse_ppa_ref(&format!("{owner_trimmed}/{ppa_trimmed}")).map(Some)
+        }
     }
 }
 
@@ -1698,14 +1739,14 @@ enum PackageCommand {
     /// List build results for source packages in a PPA or the primary archive.
     #[command(after_help = "Examples:
   lpcli package builds --owner my-username --ppa my-ppa --name mutter
-  lpcli package builds --owner my-username --ppa my-ppa --name mutter --version 50.1-0ubuntu2.8 --arch amd64
+  lpcli package builds --ppa my-username/my-ppa --name mutter --state failed --exclude-state dependency-wait
   lpcli package builds --series resolute --name mutter --version 50.1-0ubuntu2.5")]
     Builds {
         /// PPA owner (Launchpad name, without ~). Requires --ppa.
         #[arg(short, long, requires = "ppa")]
         owner: Option<String>,
-        /// PPA name. Requires --owner.
-        #[arg(short, long, requires = "owner")]
+        /// PPA name (or OWNER/NAME when --owner is omitted).
+        #[arg(short, long)]
         ppa: Option<String>,
         /// Source package name filter.
         #[arg(short, long)]
@@ -1716,19 +1757,30 @@ enum PackageCommand {
         /// Ubuntu series codename. Required for the primary archive; optional PPA filter.
         #[arg(short, long)]
         series: Option<String>,
-        /// Only show builds for this architecture (e.g. "amd64").
+        /// Only show builds for this architecture (repeatable; e.g. "amd64").
         #[arg(short, long, value_parser = parse_build_arch)]
-        arch: Option<String>,
-        /// Only show builds in this state (case-insensitive; e.g. "failed",
-        /// "success", "building", "needs-build", "dependency-wait").
+        arch: Vec<String>,
+        /// Only show builds in this state (repeatable, case-insensitive; e.g.
+        /// "failed", "success", "building", "needs-build", "dependency-wait").
         #[arg(long, value_parser = parse_build_state)]
-        state: Option<String>,
+        state: Vec<String>,
+        /// Exclude builds in this state (repeatable, case-insensitive).
+        #[arg(long, value_parser = parse_build_state)]
+        exclude_state: Vec<String>,
+        /// Filter by pocket (e.g. "Release", "Updates", "Security", "Proposed").
+        #[arg(long, value_parser = parse_pocket)]
+        pocket: Option<Pocket>,
         /// Distribution name (default: "ubuntu").
         #[arg(short, long, default_value = "ubuntu")]
         distro: String,
         /// Maximum number of source publications to check (default: 30).
         #[arg(short, long, default_value = "30", value_parser = parse_positive_u32_limit)]
         limit: u32,
+    },
+    /// Inspect individual builds, download build logs, or retry failed builds.
+    Build {
+        #[command(subcommand)]
+        command: BuildCommand,
     },
     /// Show info about a distribution.
     Distro {
@@ -1780,6 +1832,164 @@ enum PackageCommand {
         /// Show the full changelog instead of only the latest 5 entries.
         #[arg(long, conflicts_with = "limit")]
         full: bool,
+    },
+}
+
+/// Sub-commands for managing individual builds and build logs.
+#[derive(Clone, Debug, Subcommand)]
+enum BuildCommand {
+    /// Show details for a single build record.
+    #[command(after_help = "Examples:
+  lpcli package build show --build-id 33824576
+  lpcli package build show --build-id 33961943 --ppa deadsnakes/ppa
+  lpcli package build show --build-id 33961943 --owner deadsnakes --ppa ppa
+  lpcli package build show --build-url https://api.launchpad.net/devel/~my-username/+archive/ubuntu/my-ppa/+build/12345")]
+    Show {
+        /// Numeric Launchpad build ID. Conflicts with --build-url.
+        #[arg(
+            long,
+            value_parser = parse_positive_u64,
+            conflicts_with = "build_url",
+            required_unless_present = "build_url"
+        )]
+        build_id: Option<u64>,
+        /// Canonical Launchpad API self_link of the build record.
+        #[arg(
+            long,
+            conflicts_with_all = ["build_id", "owner", "ppa"],
+            required_unless_present = "build_id"
+        )]
+        build_url: Option<String>,
+        /// PPA owner (Launchpad name, without ~). Requires --ppa.
+        #[arg(short, long, requires = "ppa")]
+        owner: Option<String>,
+        /// PPA name (or OWNER/NAME when --owner is omitted).
+        #[arg(short, long)]
+        ppa: Option<String>,
+        /// Distribution name for primary-archive builds (default: "ubuntu").
+        #[arg(short, long, default_value = "ubuntu")]
+        distro: String,
+    },
+    /// Download build logs for a single build or filtered builds.
+    #[command(after_help = "Examples:
+  lpcli package build logs --build-id 33824576 -O ./logs
+  lpcli package build logs --ppa my-username/my-ppa --series noble --state failed -O ./logs
+  lpcli package build logs --owner my-username --ppa my-ppa --arch amd64 --exclude-state dependency-wait")]
+    Logs {
+        /// Numeric Launchpad build ID.
+        #[arg(
+            long,
+            value_parser = parse_positive_u64,
+            conflicts_with_all = ["build_url", "name", "version", "series", "arch", "state", "exclude_state", "pocket"]
+        )]
+        build_id: Option<u64>,
+        /// Canonical Launchpad API self_link of a single build record.
+        #[arg(
+            long,
+            conflicts_with_all = ["build_id", "owner", "ppa", "name", "version", "series", "arch", "state", "exclude_state", "pocket"]
+        )]
+        build_url: Option<String>,
+        /// PPA owner (Launchpad name, without ~). Requires --ppa.
+        #[arg(short, long, requires = "ppa")]
+        owner: Option<String>,
+        /// PPA name (or OWNER/NAME when --owner is omitted).
+        #[arg(short, long)]
+        ppa: Option<String>,
+        /// Source package name filter.
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Exact source package version filter.
+        #[arg(short, long)]
+        version: Option<String>,
+        /// Ubuntu series codename. Required for primary-archive queries; optional PPA filter.
+        #[arg(short, long)]
+        series: Option<String>,
+        /// Filter by architecture (repeatable; e.g. "amd64").
+        #[arg(short, long, value_parser = parse_build_arch)]
+        arch: Vec<String>,
+        /// Filter by build state (repeatable, case-insensitive).
+        #[arg(long, value_parser = parse_build_state)]
+        state: Vec<String>,
+        /// Exclude builds in this state (repeatable, case-insensitive).
+        #[arg(long, value_parser = parse_build_state)]
+        exclude_state: Vec<String>,
+        /// Filter by pocket (e.g. "Release", "Updates", "Security", "Proposed").
+        #[arg(long, value_parser = parse_pocket)]
+        pocket: Option<Pocket>,
+        /// Distribution name (default: "ubuntu").
+        #[arg(short, long, default_value = "ubuntu")]
+        distro: String,
+        /// Maximum number of builds/source publications to check (default: 30).
+        #[arg(short, long, default_value = "30", value_parser = parse_positive_u32_limit)]
+        limit: u32,
+        /// Output directory for downloaded log files (default: current directory).
+        #[arg(short = 'O', long, default_value = ".")]
+        output: String,
+        /// Also download failed upload logs (`upload_log_url`) when present.
+        #[arg(long)]
+        include_upload_logs: bool,
+    },
+    /// Retry an eligible build or a filtered set of builds.
+    #[command(after_help = "Examples:
+  lpcli package build retry --build-id 33824576 --ppa my-username/my-ppa
+  lpcli package build retry --ppa my-username/my-ppa --series noble --arch amd64 --state failed --dry-run
+  lpcli package build retry --ppa my-username/my-ppa --series noble --arch amd64 --state failed --save-logs ./logs --yes")]
+    Retry {
+        /// Numeric Launchpad build ID.
+        #[arg(
+            long,
+            value_parser = parse_positive_u64,
+            conflicts_with_all = ["build_url", "name", "version", "series", "arch", "state", "exclude_state", "pocket"]
+        )]
+        build_id: Option<u64>,
+        /// Canonical Launchpad API self_link of a single build record.
+        #[arg(
+            long,
+            conflicts_with_all = ["build_id", "owner", "ppa", "name", "version", "series", "arch", "state", "exclude_state", "pocket"]
+        )]
+        build_url: Option<String>,
+        /// PPA owner (Launchpad name, without ~). Requires --ppa.
+        #[arg(short, long, requires = "ppa")]
+        owner: Option<String>,
+        /// PPA name (or OWNER/NAME when --owner is omitted).
+        #[arg(short, long)]
+        ppa: Option<String>,
+        /// Source package name filter.
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Exact source package version filter.
+        #[arg(short, long)]
+        version: Option<String>,
+        /// Ubuntu series codename. Required for primary-archive queries; optional PPA filter.
+        #[arg(short, long)]
+        series: Option<String>,
+        /// Filter by architecture (repeatable; e.g. "amd64").
+        #[arg(short, long, value_parser = parse_build_arch)]
+        arch: Vec<String>,
+        /// Filter by build state (repeatable, case-insensitive; required for bulk retries).
+        #[arg(long, value_parser = parse_build_state)]
+        state: Vec<String>,
+        /// Exclude builds in this state (repeatable, case-insensitive).
+        #[arg(long, value_parser = parse_build_state)]
+        exclude_state: Vec<String>,
+        /// Filter by pocket (e.g. "Release", "Updates", "Security", "Proposed").
+        #[arg(long, value_parser = parse_pocket)]
+        pocket: Option<Pocket>,
+        /// Distribution name (default: "ubuntu").
+        #[arg(short, long, default_value = "ubuntu")]
+        distro: String,
+        /// Maximum number of builds/source publications to check (default: 30).
+        #[arg(short, long, default_value = "30", value_parser = parse_positive_u32_limit)]
+        limit: u32,
+        /// Preview matching eligible and skipped builds without retrying or saving logs.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the interactive confirmation prompt for bulk retries.
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Back up each eligible build's logs into DIR before requesting a retry.
+        #[arg(long, value_name = "DIR")]
+        save_logs: Option<String>,
     },
 }
 
@@ -2613,9 +2823,19 @@ fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
         ));
     }
     if cli.no_input && requires_prompt(&cli.command) {
+        let message = if matches!(
+            &cli.command,
+            Command::Package(PackageCommand::Build {
+                command: BuildCommand::Retry { .. }
+            })
+        ) {
+            "bulk build retry needs interactive confirmation; rerun from a terminal, pass --yes, or use --dry-run to preview\n"
+        } else {
+            "this command needs interactive input; rerun from a terminal without --no-input\n"
+        };
         return Err(clap::Error::raw(
             clap::error::ErrorKind::ArgumentConflict,
-            "this command needs interactive input; rerun from a terminal without --no-input\n",
+            message,
         ));
     }
     let result = match &cli.command {
@@ -2681,26 +2901,84 @@ fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
                 series,
                 distro,
                 ..
-            } => {
-                if (owner.is_some() || ppa.is_some()) && !distro.eq_ignore_ascii_case("ubuntu") {
-                    Err(format!(
-                        "PPA archives are only available for Ubuntu, not '{distro}'"
-                    ))
-                } else if owner.as_deref().is_some_and(|s| s.trim().is_empty()) {
-                    Err("--owner must not be empty".into())
-                } else if ppa.as_deref().is_some_and(|s| s.trim().is_empty()) {
-                    Err("--ppa must not be empty".into())
-                } else if owner.is_none() && ppa.is_none() && series.is_none() {
-                    Err(
-                        "specify --series for the primary archive or --owner and --ppa for a PPA"
-                            .into(),
-                    )
-                } else if let Some(series) = series {
-                    validate_series_for_distro(distro, series)
-                } else {
-                    Ok(())
+            } => validate_build_filter_args(
+                owner.as_deref(),
+                ppa.as_deref(),
+                series.as_deref(),
+                distro,
+            ),
+            PackageCommand::Build { command } => match command {
+                BuildCommand::Show {
+                    build_url,
+                    owner,
+                    ppa,
+                    distro,
+                    ..
+                } => {
+                    if let Some(url) = build_url {
+                        validate_build_url(url)
+                    } else {
+                        validate_build_ppa_optional(owner.as_deref(), ppa.as_deref(), distro)
+                    }
                 }
-            }
+                BuildCommand::Logs {
+                    build_id,
+                    build_url,
+                    owner,
+                    ppa,
+                    series,
+                    distro,
+                    ..
+                } => {
+                    if let Some(url) = build_url {
+                        validate_build_url(url)
+                    } else if build_id.is_some() {
+                        validate_build_ppa_optional(owner.as_deref(), ppa.as_deref(), distro)
+                    } else {
+                        validate_build_filter_args(
+                            owner.as_deref(),
+                            ppa.as_deref(),
+                            series.as_deref(),
+                            distro,
+                        )
+                    }
+                }
+                BuildCommand::Retry {
+                    build_id,
+                    build_url,
+                    owner,
+                    ppa,
+                    series,
+                    state,
+                    distro,
+                    save_logs,
+                    ..
+                } => {
+                    if let Some(dir) = save_logs
+                        && dir.trim().is_empty()
+                    {
+                        Err("--save-logs directory must not be empty".into())
+                    } else if let Some(url) = build_url {
+                        validate_build_url(url)
+                    } else if build_id.is_some() {
+                        validate_build_ppa_optional(owner.as_deref(), ppa.as_deref(), distro)
+                    } else {
+                        validate_build_filter_args(
+                            owner.as_deref(),
+                            ppa.as_deref(),
+                            series.as_deref(),
+                            distro,
+                        )
+                        .and_then(|()| {
+                            if state.is_empty() {
+                                Err("bulk build retry requires at least one --state filter (e.g. --state failed); use --build-id or --build-url to retry a single build".into())
+                            } else {
+                                Ok(())
+                            }
+                        })
+                    }
+                }
+            },
             _ => Ok(()),
         },
         Command::Translation(cmd) => match cmd {
@@ -2813,7 +3091,9 @@ async fn run_command(
 
         Command::Bug(cmd) => handle_bug(cmd, output, quiet, policy, cache_timeout).await?,
         Command::Person(cmd) => handle_person(cmd, output, policy, cache_timeout).await?,
-        Command::Package(cmd) => handle_package(cmd, output, policy, cache_timeout).await?,
+        Command::Package(cmd) => {
+            handle_package(cmd, output, quiet, no_input, policy, cache_timeout).await?
+        }
         Command::Project(cmd) => handle_project(cmd, output, policy, cache_timeout).await?,
         Command::Cve(cmd) => handle_cve(cmd, output, policy, cache_timeout).await?,
         Command::Git(cmd) => handle_git(cmd, output, policy, cache_timeout).await?,
@@ -2845,6 +3125,90 @@ fn parse_positive_limit(value: &str) -> Result<usize, String> {
 fn parse_positive_u32_limit(value: &str) -> Result<u32, String> {
     let limit = parse_positive_limit(value)?;
     u32::try_from(limit).map_err(|_| format!("limit must be at most {}", u32::MAX))
+}
+
+fn parse_positive_u64(value: &str) -> Result<u64, String> {
+    let id = value
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| "build ID must be a positive integer".to_string())?;
+    if id == 0 {
+        return Err("build ID must be a positive integer".to_string());
+    }
+    Ok(id)
+}
+
+fn validate_build_url(raw: &str) -> Result<(), String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("--build-url must not be empty".into());
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return Err("--build-url must not contain whitespace".into());
+    }
+    let parsed = url::Url::parse(trimmed).map_err(|e| {
+        format!(
+            "invalid --build-url '{}': {e}",
+            lpcli::download::redact_url_for_display(trimmed)
+        )
+    })?;
+    let safe = lpcli::download::redact_url_for_display(trimmed);
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!(
+            "--build-url must use http or https scheme: '{safe}'"
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!(
+            "--build-url must not contain credentials: '{safe}'"
+        ));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(format!(
+            "--build-url must not contain a query string or fragment: '{safe}'"
+        ));
+    }
+    lpcli::packages::validate_build_self_link(trimmed)
+        .map_err(|e| format!("invalid --build-url: {e}"))?;
+    Ok(())
+}
+
+fn validate_build_ppa_optional(
+    owner: Option<&str>,
+    ppa: Option<&str>,
+    distro: &str,
+) -> Result<(), String> {
+    let ppa_ref = resolve_ppa_args(owner, ppa)?;
+    if ppa_ref.is_some() && !distro.eq_ignore_ascii_case("ubuntu") {
+        return Err(format!(
+            "PPA archives are only available for Ubuntu, not '{distro}'"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_build_filter_args(
+    owner: Option<&str>,
+    ppa: Option<&str>,
+    series: Option<&str>,
+    distro: &str,
+) -> Result<(), String> {
+    let ppa_ref = resolve_ppa_args(owner, ppa)?;
+    if ppa_ref.is_some() && !distro.eq_ignore_ascii_case("ubuntu") {
+        return Err(format!(
+            "PPA archives are only available for Ubuntu, not '{distro}'"
+        ));
+    }
+    if ppa_ref.is_none() && series.is_none() {
+        return Err(
+            "specify --series for the primary archive, --ppa OWNER/NAME, or --owner and --ppa for a PPA"
+                .into(),
+        );
+    }
+    if let Some(series) = series {
+        validate_series_for_distro(distro, series)?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -3027,7 +3391,20 @@ fn supports_public_reads(command: &Command) -> bool {
                 | BugCommand::Watches { .. }
                 | BugCommand::RemoteBugTrackers { .. }
         ) | Command::Person(_)
-            | Command::Package(_)
+            | Command::Package(
+                PackageCommand::Series { .. }
+                    | PackageCommand::ListSeries { .. }
+                    | PackageCommand::Search { .. }
+                    | PackageCommand::Ppa { .. }
+                    | PackageCommand::PpaSources { .. }
+                    | PackageCommand::Builds { .. }
+                    | PackageCommand::Build {
+                        command: BuildCommand::Show { .. } | BuildCommand::Logs { .. },
+                    }
+                    | PackageCommand::Distro { .. }
+                    | PackageCommand::Download { .. }
+                    | PackageCommand::Changelog { .. }
+            )
             | Command::Project(_)
             | Command::Cve(_)
             | Command::Git(_)
@@ -3083,6 +3460,21 @@ fn read_auth_policy(command: &Command, authenticated: bool, public: bool) -> Rea
                 owner: None,
                 ppa: None,
                 ..
+            }
+            | PackageCommand::Build {
+                command:
+                    BuildCommand::Show {
+                        owner: None,
+                        ppa: None,
+                        build_url: None,
+                        ..
+                    }
+                    | BuildCommand::Logs {
+                        owner: None,
+                        ppa: None,
+                        build_url: None,
+                        ..
+                    },
             },
         )
         | Command::Translation(_)
@@ -3302,6 +3694,15 @@ fn requires_prompt(command: &Command) -> bool {
             hardware_token: false,
             ..
         }) | Command::HardwareToken(HardwareTokenCommand::Register { .. })
+            | Command::Package(PackageCommand::Build {
+                command: BuildCommand::Retry {
+                    build_id: None,
+                    build_url: None,
+                    dry_run: false,
+                    yes: false,
+                    ..
+                },
+            })
     )
 }
 

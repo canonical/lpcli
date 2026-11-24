@@ -1,0 +1,140 @@
+---
+source: src/bin/lpcli/tests/phase1_builds.rs
+expression: "stable(&report.json, &base)"
+---
+{
+  "builds": {
+    "entries": [
+      {
+        "arch_tag": "amd64",
+        "archive_link": "https://api.launchpad.net/devel/~jdoe/+archive/ubuntu/test",
+        "build_log_url": "https://api.launchpad.net/devel/+files/shared_log.txt.gz",
+        "builder_link": "https://api.launchpad.net/devel/builders/bos03-amd64-01",
+        "buildinfo_url": null,
+        "buildstate": "Failed to build",
+        "can_be_cancelled": false,
+        "can_be_rescored": false,
+        "can_be_retried": true,
+        "changesfile_url": null,
+        "current_source_publication_link": "https://api.launchpad.net/devel/~jdoe/+archive/ubuntu/test/+sourcepub/1",
+        "date_first_dispatched": "[timestamp]",
+        "date_started": "[timestamp]",
+        "datebuilt": "[timestamp]",
+        "datecreated": "[timestamp]",
+        "dependencies": null,
+        "distro_series_link": "https://api.launchpad.net/devel/ubuntu/noble",
+        "duration": "0:04:54.281155",
+        "external_dependencies": null,
+        "http_etag": "\"etag-build\"",
+        "pocket": "Release",
+        "resource_type_link": "https://api.launchpad.net/devel/#build",
+        "score": null,
+        "self_link": "https://api.launchpad.net/devel/~jdoe/+archive/ubuntu/test/+build/101",
+        "source_package_name": "mutter",
+        "source_package_version": "50.1-1~ppa1",
+        "title": "amd64 build of mutter 50.1-1~ppa1 in ubuntu noble RELEASE",
+        "upload_log_url": null,
+        "web_link": "https://launchpad.net/~jdoe/+archive/ubuntu/test/+build/101"
+      },
+      {
+        "arch_tag": "amd64",
+        "archive_link": "https://api.launchpad.net/devel/~jdoe/+archive/ubuntu/test",
+        "build_log_url": "https://api.launchpad.net/devel/+files/shared_log.txt.gz",
+        "builder_link": "https://api.launchpad.net/devel/builders/bos03-amd64-01",
+        "buildinfo_url": null,
+        "buildstate": "Failed to build",
+        "can_be_cancelled": false,
+        "can_be_rescored": false,
+        "can_be_retried": true,
+        "changesfile_url": null,
+        "current_source_publication_link": "https://api.launchpad.net/devel/~jdoe/+archive/ubuntu/test/+sourcepub/1",
+        "date_first_dispatched": "[timestamp]",
+        "date_started": "[timestamp]",
+        "datebuilt": "[timestamp]",
+        "datecreated": "[timestamp]",
+        "dependencies": null,
+        "distro_series_link": "https://api.launchpad.net/devel/ubuntu/noble",
+        "duration": "0:04:54.281155",
+        "external_dependencies": null,
+        "http_etag": "\"etag-build\"",
+        "pocket": "Release",
+        "resource_type_link": "https://api.launchpad.net/devel/#build",
+        "score": null,
+        "self_link": "https://api.launchpad.net/devel/~jdoe/+archive/ubuntu/test/+build/102",
+        "source_package_name": "mutter",
+        "source_package_version": "50.1-1~ppa1",
+        "title": "amd64 build of mutter 50.1-1~ppa1 in ubuntu noble RELEASE",
+        "upload_log_url": "https://api.launchpad.net/devel/+files/missing_upload.log",
+        "web_link": "https://launchpad.net/~jdoe/+archive/ubuntu/test/+build/102"
+      },
+      {
+        "arch_tag": "amd64",
+        "archive_link": "https://api.launchpad.net/devel/~jdoe/+archive/ubuntu/test",
+        "build_log_url": null,
+        "builder_link": "https://api.launchpad.net/devel/builders/bos03-amd64-01",
+        "buildinfo_url": null,
+        "buildstate": "Failed to build",
+        "can_be_cancelled": false,
+        "can_be_rescored": false,
+        "can_be_retried": true,
+        "changesfile_url": null,
+        "current_source_publication_link": "https://api.launchpad.net/devel/~jdoe/+archive/ubuntu/test/+sourcepub/1",
+        "date_first_dispatched": "[timestamp]",
+        "date_started": "[timestamp]",
+        "datebuilt": "[timestamp]",
+        "datecreated": "[timestamp]",
+        "dependencies": null,
+        "distro_series_link": "https://api.launchpad.net/devel/ubuntu/noble",
+        "duration": "0:04:54.281155",
+        "external_dependencies": null,
+        "http_etag": "\"etag-build\"",
+        "pocket": "Release",
+        "resource_type_link": "https://api.launchpad.net/devel/#build",
+        "score": null,
+        "self_link": "https://api.launchpad.net/devel/~jdoe/+archive/ubuntu/test/+build/103",
+        "source_package_name": "mutter",
+        "source_package_version": "50.1-1~ppa1",
+        "title": "amd64 build of mutter 50.1-1~ppa1 in ubuntu noble RELEASE",
+        "upload_log_url": null,
+        "web_link": "https://launchpad.net/~jdoe/+archive/ubuntu/test/+build/103"
+      }
+    ]
+  },
+  "lpcli": {
+    "archive": "~jdoe/test",
+    "complete": true,
+    "downloaded": 2,
+    "downloads": [
+      {
+        "build_id": "101",
+        "build_self_link": "https://api.launchpad.net/devel/~jdoe/+archive/ubuntu/test/+build/101",
+        "filename": "build-101_shared_log.txt.gz",
+        "kind": "build_log",
+        "path": "[output path]",
+        "size": 17,
+        "status": "downloaded"
+      },
+      {
+        "build_id": "102",
+        "build_self_link": "https://api.launchpad.net/devel/~jdoe/+archive/ubuntu/test/+build/102",
+        "filename": "build-102_shared_log.txt.gz",
+        "kind": "build_log",
+        "path": "[output path]",
+        "size": 17,
+        "status": "downloaded"
+      },
+      {
+        "build_id": "102",
+        "build_self_link": "https://api.launchpad.net/devel/~jdoe/+archive/ubuntu/test/+build/102",
+        "error": "Not found: The requested resource does not exist on Launchpad. (Private PPA build logs cannot be fetched without librarian authentication.)",
+        "filename": "missing_upload.log",
+        "kind": "upload_log",
+        "status": "failed"
+      }
+    ],
+    "failed": 1,
+    "output_directory": "[output directory]",
+    "series": "noble",
+    "skipped_no_log": 1
+  }
+}

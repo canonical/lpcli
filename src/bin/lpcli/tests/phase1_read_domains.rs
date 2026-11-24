@@ -794,15 +794,18 @@ async fn package_builds_lists_build_results_and_active_binaries() {
     assert_eq!(map[&pub2]["builds"], json!([]));
 
     // amd64 success, arm64 failure, then the pending source's placeholder.
-    assert_eq!(report.records.rows[0][3].as_deref(), Some("amd64"));
-    assert_eq!(report.records.rows[0][6].as_deref(), Some("yes"));
+    assert_eq!(report.records.rows[0][0].as_deref(), Some("10"));
+    assert_eq!(report.records.rows[0][4].as_deref(), Some("amd64"));
+    assert_eq!(report.records.rows[0][7].as_deref(), Some("yes"));
+    assert_eq!(report.records.rows[1][0].as_deref(), Some("11"));
     assert_eq!(
-        report.records.rows[1][5].as_deref(),
+        report.records.rows[1][6].as_deref(),
         Some("Failed to build")
     );
-    assert_eq!(report.records.rows[1][6].as_deref(), Some("no"));
-    assert_eq!(report.records.rows[2][5].as_deref(), Some("No builds yet"));
-    assert_eq!(report.records.rows[2][6].as_deref(), Some("no"));
+    assert_eq!(report.records.rows[1][7].as_deref(), Some("no"));
+    assert_eq!(report.records.rows[2][0], None);
+    assert_eq!(report.records.rows[2][6].as_deref(), Some("No builds yet"));
+    assert_eq!(report.records.rows[2][7].as_deref(), Some("no"));
     assert!(
         !render(&report, OutputMode::Plain).ends_with("\n\n"),
         "plain output must not end with an extra blank line before hidden RichTable"
@@ -824,12 +827,31 @@ async fn package_builds_lists_build_results_and_active_binaries() {
     )
     .await;
     assert_eq!(filtered.records.rows.len(), 1);
-    assert_eq!(filtered.records.rows[0][6].as_deref(), Some("no"));
+    assert_eq!(filtered.records.rows[0][0].as_deref(), Some("11"));
+    assert_eq!(filtered.records.rows[0][7].as_deref(), Some("no"));
     assert_eq!(
         filtered.json["builds"]["entries"].as_array().unwrap().len(),
         1
     );
     assert!(filtered.json["lpcli"]["sources"].get(&pub2).is_none());
+
+    // `--exclude-state` filters out matching build states cleanly.
+    let excluded = run(
+        &server,
+        &[
+            "package",
+            "builds",
+            "-s",
+            "noble",
+            "-n",
+            "mutter",
+            "--exclude-state",
+            "failed",
+        ],
+    )
+    .await;
+    assert_eq!(excluded.records.rows.len(), 1);
+    assert_eq!(excluded.records.rows[0][0].as_deref(), Some("10"));
 
     for mock in [sources_mock, builds1_mock, builds2_mock, binaries_mock] {
         mock.expect_at_least(1).assert_async().await;
@@ -1092,8 +1114,9 @@ async fn package_builds_reports_sources_without_builds() {
     )
     .await;
     assert_eq!(report.records.rows.len(), 1);
-    assert_eq!(report.records.rows[0][5].as_deref(), Some("No builds yet"));
-    assert_eq!(report.records.rows[0][6].as_deref(), Some("no"));
+    assert_eq!(report.records.rows[0][0], None);
+    assert_eq!(report.records.rows[0][6].as_deref(), Some("No builds yet"));
+    assert_eq!(report.records.rows[0][7].as_deref(), Some("no"));
     assert_eq!(
         report.json["lpcli"]["sources"][&format!("{base}/ubuntu/+archive/primary/+sourcepub/3")]["builds"],
         json!([])

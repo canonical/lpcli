@@ -6,6 +6,7 @@ Builds for ubuntu
 Series: noble
 3 build results found.
 
+ID: 10
 Package: mutter
 Version: 50.1-0ubuntu2.5
 Series: noble
@@ -17,6 +18,7 @@ Finished: 2026-10-08 09:04
 Duration: 0:24:28.874821
 Log: https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.5/+build/10/+files/buildlog_ubuntu-noble-amd64.mutter_50.1-0ubuntu2.5_BUILDING.txt.gz
 
+ID: 11
 Package: mutter
 Version: 50.1-0ubuntu2.5
 Series: noble
@@ -28,6 +30,7 @@ Finished: 2026-10-14 05:51
 Duration: 0:24:28.874821
 Log: https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.5/+build/11/+files/buildlog_ubuntu-noble-arm64.mutter_50.1-0ubuntu2.5_BUILDING.txt.gz
 
+ID: none
 Package: mutter
 Version: 50.1-0ubuntu2.6
 Series: noble

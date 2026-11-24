@@ -7,15 +7,17 @@ Builds for ubuntu
   Series: noble
 3 build results found.
 
- Package ┆ Version    ┆ Series ┆ Arch  ┆ Publicatio ┆ Build      ┆ Binaries ┆ Finished  ┆ Duration  
-         ┆            ┆        ┆       ┆ n          ┆ State      ┆          ┆           ┆           
-─────────┼────────────┼────────┼───────┼────────────┼────────────┼──────────┼───────────┼───────────
- mutter  ┆ 50.1-0ubun ┆ noble  ┆ amd64 ┆ Published  ┆ Successful ┆ yes      ┆ 2026-10-0 ┆ 0:24:28.8 
-         ┆ tu2.5      ┆        ┆       ┆            ┆ ly built   ┆          ┆ 8 09:04   ┆ 74821     
- mutter  ┆ 50.1-0ubun ┆ noble  ┆ arm64 ┆ Published  ┆ Failed to  ┆ no       ┆ 2026-10-1 ┆ 0:24:28.8 
-         ┆ tu2.5      ┆        ┆       ┆            ┆ build      ┆          ┆ 4 05:51   ┆ 74821     
- mutter  ┆ 50.1-0ubun ┆ noble  ┆ none  ┆ Pending    ┆ No builds  ┆ no       ┆ none      ┆ none      
-         ┆ tu2.6      ┆        ┆       ┆            ┆ yet        ┆          ┆           ┆           
+ ID   ┆ Package ┆ Version   ┆ Series ┆ Arch  ┆ Publicat ┆ Build    ┆ Binaries ┆ Finished ┆ Duration 
+      ┆         ┆           ┆        ┆       ┆ ion      ┆ State    ┆          ┆          ┆          
+──────┼─────────┼───────────┼────────┼───────┼──────────┼──────────┼──────────┼──────────┼──────────
+ 10   ┆ mutter  ┆ 50.1-0ubu ┆ noble  ┆ amd64 ┆ Publishe ┆ Successf ┆ yes      ┆ 2026-10- ┆ 0:24:28. 
+      ┆         ┆ ntu2.5    ┆        ┆       ┆ d        ┆ ully     ┆          ┆ 08 09:04 ┆ 874821   
+      ┆         ┆           ┆        ┆       ┆          ┆ built    ┆          ┆          ┆          
+ 11   ┆ mutter  ┆ 50.1-0ubu ┆ noble  ┆ arm64 ┆ Publishe ┆ Failed   ┆ no       ┆ 2026-10- ┆ 0:24:28. 
+      ┆         ┆ ntu2.5    ┆        ┆       ┆ d        ┆ to build ┆          ┆ 14 05:51 ┆ 874821   
+ none ┆ mutter  ┆ 50.1-0ubu ┆ noble  ┆ none  ┆ Pending  ┆ No       ┆ no       ┆ none     ┆ none     
+      ┆         ┆ ntu2.6    ┆        ┆       ┆          ┆ builds   ┆          ┆          ┆          
+      ┆         ┆           ┆        ┆       ┆          ┆ yet      ┆          ┆          ┆          
 
 2 build logs found.
 
