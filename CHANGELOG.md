@@ -10,6 +10,8 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-25
+
 ### Added
 
 - `lpcli package builds` (and library helpers `get_source_builds`,
