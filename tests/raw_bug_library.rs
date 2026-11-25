@@ -634,6 +634,30 @@ async fn edit_bug_comment_raw_prefers_launchpad_index() {
 }
 
 #[tokio::test]
+async fn edit_bug_comment_raw_rejects_cross_origin_self_link() {
+    let mut server = Server::new_async().await;
+    let comments = json!({"entries": [{
+        "self_link": "https://example.invalid/bugs/42/comments/0"
+    }]});
+    let list = mock_json(&mut server, "GET", "/bugs/42/messages", &comments).await;
+    let never = mock_never(&mut server, "POST", "/bugs/42/comments/0").await;
+
+    let result = bugs::edit_bug_comment_raw(&client(&server), 42, 0, "fixed").await;
+
+    match result {
+        Err(LpError::Other(message)) => {
+            assert!(
+                message.contains("not on the configured Launchpad API origin"),
+                "{message}"
+            );
+        }
+        other => panic!("expected LpError::Other, got {other:?}"),
+    }
+    list.assert_async().await;
+    never.assert_async().await;
+}
+
+#[tokio::test]
 async fn edit_bug_comment_raw_maps_403_to_unauthorized() {
     let mut server = Server::new_async().await;
     let base = server.url();

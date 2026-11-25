@@ -705,10 +705,10 @@ pub async fn add_bug_comment_raw(
 ///
 /// # Errors
 ///
-/// Returns [`crate::error::LpError::NotFound`] if the comment index does not
-/// exist, [`crate::error::LpError::Unauthorized`] if the user is not the
-/// author, and [`LpError::Partial`] if the edit was applied but the updated
-/// entry could not be read back.
+/// Returns [`crate::error::LpError::LocalNotFound`] if the comment index does
+/// not exist or the comment is deleted, [`crate::error::LpError::Unauthorized`]
+/// if the user is not the author, and [`LpError::Partial`] if the edit was
+/// applied but the updated entry could not be read back.
 pub async fn edit_bug_comment(
     client: &LaunchpadClient,
     bug_id: u64,
@@ -747,6 +747,7 @@ pub async fn edit_bug_comment_raw(
             "Comment #{comment_index} on bug #{bug_id} has no API self_link."
         ))
     })?;
+    ensure_same_api_origin(client, comment_url, "Comment URL")?;
 
     let mut params = HashMap::new();
     params.insert("ws.op", "editContent");
