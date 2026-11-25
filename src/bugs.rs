@@ -17,6 +17,7 @@
 //! | [`set_bug_importance`] | Update the importance of a bug task |
 //! | [`set_bug_assignee`] | Assign a bug task to a Launchpad user |
 //! | [`add_bug_comment`] | Add a comment to a bug |
+//! | [`edit_bug_comment`] | Edit a comment's text in place |
 //! | [`get_bug_comments`] | List comments on a bug |
 //! | [`delete_bug_comment`] | Delete a comment from a bug |
 //! | [`set_bug_description`] | Replace the description of a bug |
@@ -694,6 +695,114 @@ pub async fn add_bug_comment_raw(
     read_created_raw(client, &location, "Posting the comment", &guidance).await
 }
 
+/// Edit the text of a comment on a bug, keeping the old text as a revision.
+///
+/// The comment is identified by its `comment_index`, as shown by
+/// [`get_bug_comments`]. Launchpad's `editContent` operation moves the current
+/// content into the message's revisions and stores `content` as the new text.
+/// The authenticated user must be the original author of the comment;
+/// otherwise Launchpad returns a permissions error.
+///
+/// # Errors
+///
+/// Returns [`crate::error::LpError::NotFound`] if the comment index does not
+/// exist, [`crate::error::LpError::Unauthorized`] if the user is not the
+/// author, and [`LpError::Partial`] if the edit was applied but the updated
+/// entry could not be read back.
+pub async fn edit_bug_comment(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    comment_index: u64,
+    content: &str,
+) -> Result<()> {
+    edit_bug_comment_raw(client, bug_id, comment_index, content)
+        .await
+        .map(|_| ())
+}
+
+/// Like [`edit_bug_comment()`], but return the updated message entry.
+///
+/// # Errors
+///
+/// As for [`edit_bug_comment()`], except that a successful edit whose read-back
+/// fails returns [`LpError::Partial`]: the text was already changed, so check
+/// the comment before retrying.
+pub async fn edit_bug_comment_raw(
+    client: &LaunchpadClient,
+    bug_id: u64,
+    comment_index: u64,
+    content: &str,
+) -> Result<Raw<BugComment>> {
+    use std::collections::HashMap;
+
+    let comments = get_bug_comments(client, bug_id).await?;
+    let comment = find_bug_comment(&comments, bug_id, comment_index)?;
+    if comment.date_deleted.is_some() {
+        return Err(LpError::LocalNotFound(format!(
+            "Comment #{comment_index} on bug #{bug_id} is deleted and cannot be edited."
+        )));
+    }
+    let comment_url = comment.self_link.as_deref().ok_or_else(|| {
+        LpError::Other(format!(
+            "Comment #{comment_index} on bug #{bug_id} has no API self_link."
+        ))
+    })?;
+
+    let mut params = HashMap::new();
+    params.insert("ws.op", "editContent");
+    params.insert("new_content", content);
+    client
+        .post_url_ok(comment_url, &params)
+        .await
+        .map_err(|error| comment_permission_error(error, bug_id, comment_index))?;
+
+    client.get_url_raw(comment_url).await.map_err(|error| {
+        LpError::Partial(format!(
+            "Editing comment #{comment_index} on bug #{bug_id} succeeded, but the \
+             updated comment could not be read back: {error}. The new text was \
+             applied; check `lpcli bug comments -b {bug_id}` before retrying."
+        ))
+    })
+}
+
+/// Find a comment by its index in a bug's message collection.
+///
+/// Launchpad does not send an `index` member for production message entries;
+/// the collection position is the value that matches the `/comments/<index>`
+/// suffix in the comment's `self_link` and the rich `#N` label. Deleted
+/// comments stay in the collection, so positions remain stable. An `index`
+/// member is preferred when Launchpad does send one.
+fn find_bug_comment(
+    comments: &[BugComment],
+    bug_id: u64,
+    comment_index: u64,
+) -> Result<&BugComment> {
+    comments
+        .iter()
+        .enumerate()
+        .find(|(position, comment)| comment.index.unwrap_or(*position as u64) == comment_index)
+        .map(|(_, comment)| comment)
+        .ok_or_else(|| {
+            LpError::LocalNotFound(format!(
+                "Comment #{comment_index} does not exist on bug #{bug_id}."
+            ))
+        })
+}
+
+/// Explain an author-only comment edit when Launchpad denies permission.
+fn comment_permission_error(error: LpError, bug_id: u64, comment_index: u64) -> LpError {
+    match error {
+        LpError::Api {
+            status: 403,
+            message,
+        } => LpError::Unauthorized(format!(
+            "Comment #{comment_index} on bug #{bug_id} can only be edited by its \
+             original author. {message}"
+        )),
+        other => other,
+    }
+}
+
 /// Fetch comments for a bug.
 pub async fn get_bug_comments(client: &LaunchpadClient, bug_id: u64) -> Result<Vec<BugComment>> {
     Collection::fetch_all(client, &bug_collection_url(client, bug_id, "messages")).await
@@ -735,16 +844,7 @@ pub async fn delete_bug_comment(
         get_bug_attachments(client, bug_id),
     )?;
 
-    let comment = comments
-        .iter()
-        .enumerate()
-        .find(|(i, comment)| comment.index.unwrap_or(*i as u64) == comment_index)
-        .map(|(_, comment)| comment)
-        .ok_or_else(|| {
-            crate::error::LpError::LocalNotFound(format!(
-                "Comment #{comment_index} does not exist on bug #{bug_id}."
-            ))
-        })?;
+    let comment = find_bug_comment(&comments, bug_id, comment_index)?;
     let comment_url = comment.self_link.as_deref().ok_or_else(|| {
         crate::error::LpError::Other(format!(
             "Comment #{comment_index} on bug #{bug_id} has no API self_link."

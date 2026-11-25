@@ -32,6 +32,21 @@ lpcli is below 1.0, Cargo treats a change in the minor version (for example,
   bulk retries with `--dry-run`, confirm bulk retries interactively (or skip with
   `--yes`), require an explicit `--state` on bulk retries, and preserve
   existing logs (`--save-logs`) before calling Launchpad's `retry` operation.
+- `lpcli bug edit-comment` (and library helpers `edit_bug_comment`,
+  `edit_bug_comment_raw`) to replace one of your own comment's text in place,
+  keeping the previous text as a message revision.
+- `--message-file PATH` for `lpcli bug add-comment` and
+  `lpcli bug edit-comment`, mutually exclusive with `--message`; `-` reads
+  standard input.
+- A `comment_index` column in `lpcli bug comments --format tsv` and
+  `lpcli.comment_indexes` in its JSON output, giving each message's index (in
+  collection order, deleted messages included) for `delete-comment` and
+  `edit-comment`.
+
+### Changed
+
+- `lpcli bug comments --format tsv` now starts each record with the
+  `comment_index` column, shifting the existing columns one position right.
 
 ## [0.5.1] - 2026-11-20
 

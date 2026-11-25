@@ -139,8 +139,10 @@ retry only the parts that failed.
 | Search bugs by keyword | `lpcli bug search --target ubuntu --keyword "kernel panic" --limit 20` |
 | Search bugs by tag | `lpcli bug search --target ubuntu --tag "regression-update" --limit 10` |
 | Search bugs by importance | `lpcli bug search --target ubuntu --importance "Critical" --limit 10` |
-| Add a comment | `lpcli bug add-comment --bug-id 123456 --message "Reproduced on noble."` |
+| Add a comment | `lpcli bug add-comment --bug-id 123456 --message "Reproduced on noble."` or `--message-file ./reply.txt` (`-` reads stdin) |
 | List comments | `lpcli bug comments --bug-id 123456` |
+| Find a comment index | `lpcli --format json bug comments --bug-id 123456`; the JSON's `lpcli.comment_indexes` array lists them |
+| Edit a comment in place | `lpcli bug edit-comment --bug-id 123456 --comment-index 3 --message-file ./reply.txt` (`-` reads stdin); the author-only edit keeps the old text as a revision |
 | File a new bug | `lpcli bug create --target ubuntu --package curl --title "title" --description "desc"` |
 | Edit a bug description | `lpcli bug set-description --bug-id 123456 --description "new text"` or `--description-file ./desc.txt` (`-` reads stdin) |
 | Mark a bug as a duplicate | `lpcli bug mark-duplicate --bug-id 123456 --duplicate-of 654321` |
@@ -339,6 +341,24 @@ lpcli bug set-importance --bug-id 123456 --target curl \
     --series noble --importance high
 lpcli bug add-comment --bug-id 123456 --message "Triaged as High for Noble."
 ```
+
+### Correct a comment in place
+
+Editing needs the comment's index and the comment must be your own. Use JSON
+output to get the index rather than counting comments by hand; the index stays
+stable when other comments are deleted. Keep multi-line text in a file so shell
+quoting cannot lose characters.
+
+```bash
+# Per-entry indices, in the same order as messages.entries
+lpcli --format json bug comments --bug-id 123456
+
+# Replace comment text in place; the previous text remains in its revisions
+lpcli bug edit-comment --bug-id 123456 --comment-index 3 --message-file ./reply.txt
+```
+
+The JSON command's `lpcli.comment_indexes` member is the index array; pass the
+wanted entry to `--comment-index`.
 
 ### Mark a bug as a duplicate
 

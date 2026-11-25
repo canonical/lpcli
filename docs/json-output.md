@@ -70,7 +70,7 @@ are placed under `lpcli` and are never added to Launchpad entries.
 | Command | Top-level members |
 |---|---|
 | `bug show` | `bug`, `bug_tasks`, `attachments`, `lpcli.attachment_download_urls` |
-| `bug comments` | `messages`, `attachments`, `lpcli.attachment_download_urls` |
+| `bug comments` | `messages`, `attachments`, `lpcli.attachment_download_urls`, `lpcli.comment_indexes` |
 | `bug attachments` | `attachments`, `lpcli.attachment_download_urls` |
 | `bug watches` | `bug_watches`, `bug_tasks`, `lpcli.linked_bug_tasks` |
 | `bug link-remote` | `bug_task`, `bug_watch` |
@@ -82,6 +82,14 @@ are placed under `lpcli` and are never added to Launchpad entries.
 | `package builds` | `source_publications`, `builds`, `lpcli` (`archive`, `series`, `complete`, `sources`) |
 | `package build logs` | `builds`, `lpcli` (`archive`, `series`, `complete`, `output_directory`, `downloads`, `downloaded`, `skipped_no_log`, `failed`) |
 | `package build retry` | `builds`, `lpcli` (`archive`, `series`, `dry_run`, `cancelled`, `eligible`, `retried`, `skipped`, `saved_logs`, `failures`) |
+
+`lpcli.comment_indexes` is an array of comment indices in the same order as
+`bug comments` `messages.entries`, including deleted comments, which Launchpad
+keeps in the collection. An index is the message's collection position, equal to
+the `/comments/<index>` suffix in its `self_link` and the rich `#N` label; an
+`index` member in the message entry takes precedence when Launchpad sends one.
+`bug comments --format tsv` prints the same value in its first column,
+`comment_index`, and `delete-comment` / `edit-comment` accept it directly.
 
 `package builds` prints `builds.entries` from the `getBuilds` entries of the
 listed source publications, in source and architecture order. `--arch`,

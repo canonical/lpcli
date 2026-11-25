@@ -790,13 +790,21 @@ enum BugCommand {
         limit: u32,
     },
     /// Add a comment to a bug, optionally with a file attachment.
+    #[command(
+        group(ArgGroup::new("message_source")
+            .required(true)
+            .args(["message", "message_file"])),
+    )]
     AddComment {
         /// The Launchpad bug number.
         #[arg(short, long)]
         bug_id: u64,
-        /// Comment text.
+        /// Comment text. Mutually exclusive with --message-file.
         #[arg(short, long)]
-        message: String,
+        message: Option<String>,
+        /// Path to a file containing the comment text ('-' = stdin).
+        #[arg(long, value_name = "PATH")]
+        message_file: Option<String>,
         /// Path to a local file to attach to the comment.
         #[arg(short = 'f', long)]
         attachment_file: Option<String>,
@@ -810,7 +818,36 @@ enum BugCommand {
         #[arg(short = 'a', long)]
         attachment_type: Option<String>,
     },
+    /// Edit a comment you previously added, keeping the old text as a revision.
+    ///
+    /// The comment is identified by its index number as shown in
+    /// `lpcli bug comments`; with JSON output the index is in
+    /// `lpcli.comment_indexes`. You must be the original author of the comment.
+    #[command(
+        group(ArgGroup::new("message_source")
+            .required(true)
+            .args(["message", "message_file"])),
+    )]
+    EditComment {
+        /// The Launchpad bug number.
+        #[arg(short, long)]
+        bug_id: u64,
+        /// The comment index to edit, as shown by 'lpcli bug comments'.
+        #[arg(short, long)]
+        comment_index: u64,
+        /// New comment text. Mutually exclusive with --message-file.
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Path to a file containing the new comment text ('-' = stdin).
+        #[arg(long, value_name = "PATH")]
+        message_file: Option<String>,
+    },
     /// List comments on a bug.
+    ///
+    /// JSON output includes `lpcli.comment_indexes`, one index per message in
+    /// `messages.entries` order (deleted comments included), for use with
+    /// `delete-comment` and `edit-comment`. TSV output has the same value in
+    /// its leading `comment_index` column.
     Comments {
         /// The Launchpad bug number.
         #[arg(short, long)]

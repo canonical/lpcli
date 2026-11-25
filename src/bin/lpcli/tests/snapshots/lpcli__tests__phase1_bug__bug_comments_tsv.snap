@@ -2,7 +2,7 @@
 source: src/bin/lpcli/tests/phase1_bug.rs
 expression: redacted
 ---
-owner_link	date_created	date_deleted	subject	content	self_link
-[server]/~commenter	[timestamp]		Re: curl crashes	Original\ndescription	[server]/bugs/42/comments/0
-[server]/~commenter	[timestamp]		Re: curl crashes	See attached\ttrace.	[server]/bugs/42/comments/1
-[server]/~commenter	[timestamp]	[timestamp]	Re: curl crashes		[server]/bugs/42/comments/2
+comment_index	owner_link	date_created	date_deleted	subject	content	self_link
+0	[server]/~commenter	[timestamp]		Re: curl crashes	Original\ndescription	[server]/bugs/42/comments/0
+1	[server]/~commenter	[timestamp]		Re: curl crashes	See attached\ttrace.	[server]/bugs/42/comments/1
+2	[server]/~commenter	[timestamp]	[timestamp]	Re: curl crashes		[server]/bugs/42/comments/2

@@ -26,6 +26,11 @@ expression: value
         "attachment_link": "[server]/bugs/42/+attachment/1",
         "download_url": null
       }
+    ],
+    "comment_indexes": [
+      0,
+      1,
+      2
     ]
   },
   "messages": {

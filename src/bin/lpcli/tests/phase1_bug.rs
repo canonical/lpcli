@@ -510,6 +510,11 @@ async fn comments_json_combines_messages_and_attachments() {
         serde_json::from_str(&render(&outcome, OutputMode::Json, false)).unwrap();
     assert_eq!(rendered["messages"], messages);
     assert_eq!(rendered["attachments"], attachments);
+    assert_eq!(
+        rendered["lpcli"]["comment_indexes"],
+        serde_json::json!([0, 1, 2]),
+        "every message, deleted entries included, in collection order"
+    );
     assert_json("bug_comments_json", &json_output(&server, &outcome));
     assert_tsv(&server, "bug_comments_tsv", &outcome, 3);
     let rich = render(&outcome, OutputMode::Rich, false);
@@ -947,6 +952,144 @@ async fn add_comment_without_location_is_partial() {
     .await
     .expect_err("an unconfirmed comment must not look like success");
     assert_eq!(error.exit_code(), 7, "{error}");
+}
+
+#[tokio::test]
+async fn add_comment_message_file_posts_the_file_text_verbatim() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let text = "It's fixed: \"quoted\" and multi-line.\n\nSecond paragraph.\n";
+    let message = message_json(&base, 3, text, false);
+    let post = server
+        .mock("POST", "/bugs/42")
+        .match_body(mockito::Matcher::AllOf(vec![
+            mockito::Matcher::UrlEncoded("ws.op".into(), "newMessage".into()),
+            mockito::Matcher::UrlEncoded("content".into(), text.into()),
+        ]))
+        .with_status(201)
+        .with_header("location", &format!("{base}/bugs/42/comments/3"))
+        .create_async()
+        .await;
+    let read_back = get(&mut server, "/bugs/42/comments/3", &message).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("comment.txt");
+    std::fs::write(&path, text).unwrap();
+
+    let outcome = run(
+        &server,
+        &[
+            "lpcli",
+            "bug",
+            "add-comment",
+            "-b",
+            "42",
+            "--message-file",
+            path.to_str().unwrap(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let rendered: serde_json::Value =
+        serde_json::from_str(&render(&outcome, OutputMode::Json, false)).unwrap();
+    assert_eq!(rendered, message, "the read-back entry, unmodified");
+    assert_json(
+        "bug_add_comment_message_file_json",
+        &json_output(&server, &outcome),
+    );
+    post.assert_async().await;
+    read_back.assert_async().await;
+}
+
+#[tokio::test]
+async fn edit_comment_updates_in_place_and_prints_the_message() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let messages = collection(vec![
+        message_json(&base, 0, "Original\ndescription", false),
+        message_json(&base, 1, "It's fixed.", false),
+        message_json(&base, 2, "", true),
+    ]);
+    let list = get(&mut server, "/bugs/42/messages", &messages).await;
+    let updated = message_json(&base, 1, "It is fixed.", false);
+    let text = "It is fixed.\n";
+    let edit = server
+        .mock("POST", "/bugs/42/comments/1")
+        .match_body(mockito::Matcher::AllOf(vec![
+            mockito::Matcher::UrlEncoded("ws.op".into(), "editContent".into()),
+            mockito::Matcher::UrlEncoded("new_content".into(), text.into()),
+        ]))
+        .with_status(200)
+        .create_async()
+        .await;
+    let read_back = get(&mut server, "/bugs/42/comments/1", &updated).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("comment.txt");
+    std::fs::write(&path, text).unwrap();
+
+    let outcome = run(
+        &server,
+        &[
+            "lpcli",
+            "bug",
+            "edit-comment",
+            "-b",
+            "42",
+            "--comment-index",
+            "1",
+            "--message-file",
+            path.to_str().unwrap(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let rendered: serde_json::Value =
+        serde_json::from_str(&render(&outcome, OutputMode::Json, false)).unwrap();
+    assert_eq!(rendered, updated, "the updated entry, unmodified");
+    assert_json("bug_edit_comment_json", &json_output(&server, &outcome));
+    assert_eq!(
+        render(&outcome, OutputMode::Rich, true),
+        format!("{base}/bugs/42/comments/1\n")
+    );
+    let rich = render(&outcome, OutputMode::Rich, false);
+    assert!(rich.contains("Comment #1 updated on bug #42."), "{rich}");
+    list.assert_async().await;
+    edit.assert_async().await;
+    read_back.assert_async().await;
+}
+
+#[tokio::test]
+async fn edit_comment_deleted_comment_is_refused() {
+    let mut server = isolated_mock_server().await;
+    let base = server.url();
+    let messages = collection(vec![
+        message_json(&base, 0, "Original\ndescription", false),
+        message_json(&base, 1, "", true),
+    ]);
+    get(&mut server, "/bugs/42/messages", &messages).await;
+
+    let error = run(
+        &server,
+        &[
+            "lpcli",
+            "bug",
+            "edit-comment",
+            "-b",
+            "42",
+            "-c",
+            "1",
+            "-m",
+            "fixed",
+        ],
+    )
+    .await
+    .expect_err("a deleted comment cannot be edited");
+    assert_eq!(error.exit_code(), 4, "{error}");
+    assert!(
+        error.to_string().contains("deleted and cannot be edited"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
