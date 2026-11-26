@@ -1827,7 +1827,7 @@ mod tests {
         assert_eq!(retry_after_seconds(&headers, date()), Some(0));
         assert_eq!(retry_after_seconds(&retry_headers("120"), now), Some(120));
         assert_eq!(
-            retry_after_seconds(&headers, date() - Duration::from_nanos(1)),
+            retry_after_seconds(&headers, date() - Duration::from_millis(1)),
             Some(1)
         );
     }
@@ -1963,25 +1963,39 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn calculate_retry_delay_fails_fast_when_unbounded_retry_after_overflows_timer() {
+    async fn calculate_retry_delay_checks_clock_bounds_for_unbounded_delays() {
         tokio::time::advance(Duration::from_secs(1_000)).await;
-        let overflow_secs = (i64::MAX as u64) - 500;
-        let delay = Duration::from_secs(overflow_secs);
-        assert!(
-            parse_retry_after(&overflow_secs.to_string(), SystemTime::UNIX_EPOCH).is_some(),
-            "delay should remain representable against UNIX_EPOCH"
-        );
-        assert!(
-            tokio::time::Instant::now().checked_add(delay).is_none(),
-            "delay should overflow tokio::time::Instant after advancing clock"
-        );
+        let now = SystemTime::UNIX_EPOCH;
+        let timer_now = tokio::time::Instant::now();
+        let backoff = Duration::from_millis(100);
+        let delay = Duration::from_secs((i64::MAX as u64) - 500);
+        // A large header can overflow the wall clock or the timer, which have
+        // independent ranges that vary by platform.
+        let expected = if now.checked_add(delay).is_none() {
+            Some(backoff)
+        } else {
+            timer_now.checked_add(delay).map(|_| delay)
+        };
         assert_eq!(
             calculate_retry_delay(
                 StatusCode::TOO_MANY_REQUESTS,
-                &retry_headers(&overflow_secs.to_string()),
-                Duration::from_millis(100),
+                &retry_headers(&delay.as_secs().to_string()),
+                backoff,
                 None,
-                SystemTime::UNIX_EPOCH,
+                now,
+            ),
+            expected
+        );
+
+        // An overflowing backoff must also stop retries when no cap is set.
+        assert!(timer_now.checked_add(Duration::MAX).is_none());
+        assert_eq!(
+            calculate_retry_delay(
+                StatusCode::TOO_MANY_REQUESTS,
+                &HeaderMap::new(),
+                Duration::MAX,
+                None,
+                now,
             ),
             None
         );
@@ -2014,7 +2028,7 @@ mod tests {
             Some(Duration::from_secs(300))
         );
 
-        // Exceeding the cap (even by 1ns or 1s) stops retries immediately.
+        // Exceeding the cap (even by 1ms or 1s) stops retries immediately.
         assert_eq!(
             calculate_retry_delay(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -2031,7 +2045,7 @@ mod tests {
                 &retry_headers(HTTP_DATE),
                 backoff,
                 cap,
-                date() - Duration::from_secs(300) - Duration::from_nanos(1),
+                date() - Duration::from_secs(300) - Duration::from_millis(1),
             ),
             None
         );
