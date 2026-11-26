@@ -4,7 +4,7 @@
 //!
 //! * Attaching OAuth 1.0a `Authorization` headers to every authenticated request,
 //!   using either stored credentials or short-lived access tokens minted from a
-//!   hardware-bound grant (see [`crate::hardware_tokens`]).
+//!   hardware-bound grant, with the default `auth` feature.
 //! * Sending GET and POST requests to the Launchpad REST API.
 //! * Deserialising JSON responses into domain types.
 //! * Translating HTTP errors into [`LpError`] values.
@@ -15,19 +15,20 @@
 //!
 //! ```no_run
 //! # use lpcli::client::LaunchpadClient;
-//! # use lpcli::auth;
 //! # tokio_test::block_on(async {
-//! let creds = auth::load_credentials().unwrap();
-//! let client = LaunchpadClient::new(Some(creds));
+//! let client = LaunchpadClient::anonymous();
 //! # });
 //! ```
 
 use std::collections::HashMap;
+#[cfg(feature = "auth")]
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+#[cfg(feature = "auth")]
 use crate::auth::{self, Credentials};
 use crate::error::{LpError, Result};
+#[cfg(feature = "auth")]
 use crate::hardware_tokens::HardwareTokenSession;
 use reqwest::{
     StatusCode,
@@ -88,9 +89,17 @@ const PUBLIC_TEXT_TIMEOUT: Duration = Duration::from_secs(120);
 
 // Private response metadata; never infer a rejected generation from the
 // session's current credentials, which may already have changed.
+#[cfg(feature = "auth")]
 #[derive(Clone)]
 struct RejectedRequestCredentials(Credentials);
 
+// This type has no values in anonymous-only builds. Shared response handlers
+// can use the same metadata type while signing and invalidation compile out.
+#[cfg(not(feature = "auth"))]
+#[derive(Clone)]
+enum RejectedRequestCredentials {}
+
+#[cfg(feature = "auth")]
 #[derive(Debug, Clone)]
 enum HardwareSession {
     Real(Arc<HardwareTokenSession>),
@@ -98,6 +107,7 @@ enum HardwareSession {
     Test(Arc<tests::TestHardwareSession>),
 }
 
+#[cfg(feature = "auth")]
 impl HardwareSession {
     async fn access_credentials(&self) -> Result<Credentials> {
         match self {
@@ -124,9 +134,11 @@ impl HardwareSession {
 #[derive(Debug, Clone)]
 pub struct LaunchpadClient {
     http: reqwest::Client,
+    #[cfg(feature = "auth")]
     credentials: Option<Credentials>,
     /// A hardware-bound session; when set it signs requests instead of
     /// `credentials`.
+    #[cfg(feature = "auth")]
     hardware: Option<HardwareSession>,
     /// Override the API base URL (useful in tests).
     base_url: String,
@@ -145,10 +157,27 @@ impl LaunchpadClient {
     /// Create a new client.
     ///
     /// Pass `Some(creds)` for authenticated calls; `None` for anonymous access.
+    #[cfg(feature = "auth")]
     pub fn new(credentials: Option<Credentials>) -> Self {
         Self {
-            http: api_http_client(API_BASE),
             credentials,
+            ..Self::anonymous()
+        }
+    }
+
+    /// Create an anonymous client using `new(None)` in an anonymous-only build.
+    #[cfg(not(feature = "auth"))]
+    pub fn new(_: Option<std::convert::Infallible>) -> Self {
+        Self::anonymous()
+    }
+
+    /// Create a client for anonymous access, available with any feature configuration.
+    pub fn anonymous() -> Self {
+        Self {
+            http: api_http_client(API_BASE),
+            #[cfg(feature = "auth")]
+            credentials: None,
+            #[cfg(feature = "auth")]
             hardware: None,
             base_url: API_BASE.to_string(),
             max_retries: 0,
@@ -166,15 +195,16 @@ impl LaunchpadClient {
     /// an `Authorization` header. A redirect that leaves the signing origin
     /// and later returns to it is not followed: its request would no longer
     /// carry the original authorization, so a 401 could not identify the token.
+    #[cfg(feature = "auth")]
     pub fn with_hardware_token(session: Arc<HardwareTokenSession>) -> Self {
         Self {
-            http: api_http_client(API_BASE),
             hardware: Some(HardwareSession::Real(session)),
-            ..Self::new(None)
+            ..Self::anonymous()
         }
     }
 
     /// Whether this client signs requests with a hardware-bound session.
+    #[cfg(feature = "auth")]
     pub fn is_hardware_bound(&self) -> bool {
         self.hardware.is_some()
     }
@@ -624,6 +654,7 @@ impl LaunchpadClient {
     ///
     /// Used for multi-step operations whose server-side state lives in a
     /// session cookie, such as WebAuthn registration.
+    #[cfg(feature = "auth")]
     pub(crate) async fn post_pairs_url_raw(
         &self,
         url: &str,
@@ -649,11 +680,12 @@ impl LaunchpadClient {
     // -----------------------------------------------------------------------
 
     /// Sign the request and retain the exact hardware credentials used for it.
+    #[cfg(feature = "auth")]
     async fn authorize_request(
         &self,
         mut req: reqwest::RequestBuilder,
         url: &str,
-    ) -> Result<(reqwest::RequestBuilder, Option<Credentials>)> {
+    ) -> Result<(reqwest::RequestBuilder, Option<RejectedRequestCredentials>)> {
         let same_api_origin = same_origin(url, &self.base_url);
         let hardware_credentials = if let Some(session) = &self.hardware {
             if same_api_origin {
@@ -674,26 +706,45 @@ impl LaunchpadClient {
         if let Some(creds) = signing_credentials {
             req = req.header("Authorization", auth::build_auth_header(creds)?);
         }
-        Ok((req, hardware_credentials))
+        Ok((req, hardware_credentials.map(RejectedRequestCredentials)))
+    }
+
+    #[cfg(not(feature = "auth"))]
+    async fn authorize_request(
+        &self,
+        req: reqwest::RequestBuilder,
+        _url: &str,
+    ) -> Result<(reqwest::RequestBuilder, Option<RejectedRequestCredentials>)> {
+        Ok((req, None))
     }
 
     /// Keep the signing identity with the response, including raw responses
     /// passed to the crate-visible response handlers by other modules.
+    #[cfg(feature = "auth")]
     fn attach_request_credentials(
         &self,
         mut resp: reqwest::Response,
-        credentials: Option<Credentials>,
+        credentials: Option<RejectedRequestCredentials>,
     ) -> reqwest::Response {
         if resp.status() == StatusCode::UNAUTHORIZED
             && same_origin(resp.url().as_str(), &self.base_url)
             && let Some(credentials) = credentials
         {
-            resp.extensions_mut()
-                .insert(RejectedRequestCredentials(credentials));
+            resp.extensions_mut().insert(credentials);
         }
         resp
     }
 
+    #[cfg(not(feature = "auth"))]
+    fn attach_request_credentials(
+        &self,
+        resp: reqwest::Response,
+        _credentials: Option<RejectedRequestCredentials>,
+    ) -> reqwest::Response {
+        resp
+    }
+
+    #[cfg(feature = "auth")]
     async fn note_unauthorized(&self, credentials: Option<RejectedRequestCredentials>, body: &str) {
         if let (Some(session), Some(credentials)) = (&self.hardware, credentials)
             && is_rejected_token_message(body)
@@ -705,6 +756,14 @@ impl LaunchpadClient {
                 .invalidate_rejected_access_token(&credentials.0)
                 .await;
         }
+    }
+
+    #[cfg(not(feature = "auth"))]
+    async fn note_unauthorized(
+        &self,
+        _credentials: Option<RejectedRequestCredentials>,
+        _body: &str,
+    ) {
     }
 
     /// Whether `error` reports a rejected hardware-bound access token.
@@ -1706,10 +1765,25 @@ impl<T: DeserializeOwned + std::fmt::Debug> Collection<T> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+pub(crate) fn test_client_with_optional_auth(
+    base_url: impl Into<String>,
+    _token: &str,
+    _secret: &str,
+) -> LaunchpadClient {
+    #[cfg(feature = "auth")]
+    let client = LaunchpadClient::new(Some(Credentials::new("lpcli", _token, _secret)));
+    #[cfg(not(feature = "auth"))]
+    let client = LaunchpadClient::anonymous();
+    client.with_base_url(base_url)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "auth")]
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    #[cfg(feature = "auth")]
     #[derive(Debug, Default)]
     struct TestSessionState {
         current: Option<Credentials>,
@@ -1717,12 +1791,14 @@ mod tests {
         rejected: Vec<Credentials>,
     }
 
+    #[cfg(feature = "auth")]
     #[derive(Debug, Default)]
     pub(super) struct TestHardwareSession {
         state: tokio::sync::Mutex<TestSessionState>,
         fail_invalidation: AtomicBool,
     }
 
+    #[cfg(feature = "auth")]
     impl TestHardwareSession {
         pub(super) async fn access_credentials(&self) -> Result<Credentials> {
             let mut state = self.state.lock().await;
@@ -1753,6 +1829,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "auth")]
     fn test_hardware_client(base: &str) -> (LaunchpadClient, Arc<TestHardwareSession>) {
         let session = Arc::new(TestHardwareSession::default());
         let mut client = LaunchpadClient::new(None).with_base_url(base);
@@ -1761,6 +1838,7 @@ mod tests {
         (client, session)
     }
 
+    #[cfg(feature = "auth")]
     fn token_header(token: &str) -> mockito::Matcher {
         mockito::Matcher::Regex(format!(r#"oauth_token="{token}""#))
     }
@@ -2141,10 +2219,27 @@ mod tests {
     }
 
     /// Verify that unauthenticated clients have no credentials set.
-    #[test]
-    fn anonymous_client_has_no_credentials() {
-        let client = LaunchpadClient::new(None);
-        assert!(client.credentials.is_none());
+    #[tokio::test]
+    async fn anonymous_client_sends_public_requests_without_credentials() {
+        let mut server = mockito::Server::new_async().await;
+        let public = server
+            .mock("GET", "/public")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_status(200)
+            .with_body(r#"{"name":"ubuntu"}"#)
+            .expect(2)
+            .create_async()
+            .await;
+
+        for client in [LaunchpadClient::new(None), LaunchpadClient::anonymous()] {
+            let entry: serde_json::Value = client
+                .with_base_url(server.url())
+                .get("/public")
+                .await
+                .unwrap();
+            assert_eq!(entry["name"], "ubuntu");
+        }
+        public.assert_async().await;
     }
 
     #[test]
@@ -2277,7 +2372,6 @@ mod tests {
 
     #[tokio::test]
     async fn foreign_created_location_is_never_signed_or_fetched() {
-        use crate::auth::Credentials;
         let mut api = mockito::Server::new_async().await;
         let mut foreign = mockito::Server::new_async().await;
         let create = api
@@ -2292,8 +2386,7 @@ mod tests {
             .expect(0)
             .create_async()
             .await;
-        let client = LaunchpadClient::new(Some(Credentials::new("lpcli", "token", "secret")))
-            .with_base_url(api.url());
+        let client = test_client_with_optional_auth(api.url(), "token", "secret");
         let params = HashMap::from([("ws.op", "addWatch")]);
         let error = client
             .post_created_location("/bugs/42", &params)
@@ -2317,6 +2410,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "auth")]
     #[tokio::test]
     async fn signed_get_retries_once_and_invalidates_each_rejected_generation() {
         let mut server = mockito::Server::new_async().await;
@@ -2352,6 +2446,7 @@ mod tests {
         assert!(state.current.is_none());
     }
 
+    #[cfg(feature = "auth")]
     #[tokio::test]
     async fn get_recovers_after_persistent_invalidation_failure() {
         let mut server = mockito::Server::new_async().await;
@@ -2380,6 +2475,7 @@ mod tests {
         assert_eq!(state.current.as_ref().unwrap().access_token.token, "token2");
     }
 
+    #[cfg(feature = "auth")]
     #[tokio::test]
     async fn get_and_mutation_rejections_survive_invalidation_failure() {
         let mut server = mockito::Server::new_async().await;
@@ -2423,6 +2519,7 @@ mod tests {
         assert!(state.current.is_none());
     }
 
+    #[cfg(feature = "auth")]
     #[tokio::test]
     async fn delayed_raw_response_does_not_invalidate_renewed_credentials() {
         let mut server = mockito::Server::new_async().await;
@@ -2492,6 +2589,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "auth")]
     #[tokio::test]
     async fn unsigned_and_unrelated_errors_do_not_invalidate_or_retry() {
         let mut api = mockito::Server::new_async().await;
@@ -2531,6 +2629,7 @@ mod tests {
         assert!(state.rejected.is_empty());
     }
 
+    #[cfg(feature = "auth")]
     #[tokio::test]
     async fn cross_origin_redirects_never_attribute_unsigned_rejections_to_the_token() {
         let mut api = mockito::Server::new_async().await;
@@ -2583,6 +2682,7 @@ mod tests {
         assert!(state.rejected.is_empty());
     }
 
+    #[cfg(feature = "auth")]
     #[tokio::test]
     async fn cleanup_failure_preserves_rejections_across_request_methods() {
         let mut server = mockito::Server::new_async().await;
@@ -2672,6 +2772,7 @@ mod tests {
     }
 
     /// Verify that an authenticated client stores its credentials.
+    #[cfg(feature = "auth")]
     #[test]
     fn authenticated_client_stores_credentials() {
         use crate::auth::Credentials;
@@ -2717,8 +2818,6 @@ mod tests {
 
     #[tokio::test]
     async fn get_public_text_url_never_sends_credentials_and_validates_redirects() {
-        use crate::auth::Credentials;
-
         let mut server = mockito::Server::new_async().await;
         let mut untrusted = mockito::Server::new_async().await;
 
@@ -2765,8 +2864,7 @@ mod tests {
             .create_async()
             .await;
 
-        let creds = Credentials::new("lpcli", "tok", "sec");
-        let client = LaunchpadClient::new(Some(creds)).with_base_url(server.url());
+        let client = test_client_with_optional_auth(server.url(), "tok", "sec");
 
         let text = client
             .get_public_text_url(&format!("{}/pub/changelog", server.url()))
@@ -2818,6 +2916,7 @@ mod tests {
         missing_mock.assert_async().await;
     }
 
+    #[cfg(feature = "auth")]
     #[tokio::test]
     async fn classic_oauth_credentials_are_not_sent_to_cross_origin_urls() {
         let api = mockito::Server::new_async().await;
@@ -2870,8 +2969,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = LaunchpadClient::new(Some(Credentials::new("lpcli", "tok", "supersecret")))
-            .with_base_url(api.url());
+        let client = test_client_with_optional_auth(api.url(), "tok", "supersecret");
 
         let first_url = client.url("/items");
         let err = Collection::<serde_json::Value>::fetch_all(&client, &first_url)
@@ -2986,8 +3084,7 @@ mod tests {
             .create_async()
             .await;
 
-        let creds = Credentials::new("lpcli", "toksecret", "secsecret");
-        let client = LaunchpadClient::new(Some(creds)).with_base_url(server.url());
+        let client = test_client_with_optional_auth(server.url(), "toksecret", "secsecret");
 
         let ok_dest = dir.path().join("ok.txt.gz");
         let mut progress_seen = Vec::new();

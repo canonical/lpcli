@@ -919,6 +919,7 @@ async fn link_bug_task_remote_watch_read_back_failure_does_not_patch_task() {
     }
 }
 
+#[cfg(feature = "auth")]
 #[tokio::test]
 async fn add_bug_watch_foreign_location_is_not_fetched_with_credentials() {
     let mut api = Server::new_async().await;
@@ -1264,6 +1265,7 @@ async fn ensure_bug_tracker_creates_tracker_via_location() {
 }
 
 #[rustfmt::skip]
+#[cfg(feature = "auth")]
 #[tokio::test]
 async fn ensure_bug_tracker_foreign_location_is_not_fetched_with_credentials() {
     // Regression test: ensureBugTracker's Location used to be fetched without

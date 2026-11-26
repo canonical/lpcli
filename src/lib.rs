@@ -7,9 +7,6 @@
 //!
 //! | Module | Description |
 //! |--------|-------------|
-//! | [`auth`] | OAuth 1.0a authentication and credential management |
-//! | [`hardware_tokens`] | Hardware-bound OAuth tokens backed by a FIDO2 security key |
-//! | [`hardware_key`] | USB FIDO2 security-key (CTAP2) support |
 //! | [`client`] | Low-level HTTP client for the Launchpad API |
 //! | [`bugs`] | Bug tracking operations |
 //! | [`people`] | Person and team queries |
@@ -17,15 +14,19 @@
 //! | [`projects`] | Project and milestone queries |
 //! | [`error`] | Error types (`LpError`, `Result`) |
 //!
+//! The default `auth` feature provides the `auth`, `hardware_tokens`, and
+//! `hardware_key` modules and enables the CLI. Library users who only access
+//! public Launchpad data can disable default features to skip the OAuth,
+//! keyring, and hardware-token dependencies.
+//!
 //! ## Quick start
 //!
 //! ```no_run
-//! use lpcli::{auth, client::LaunchpadClient, bugs};
+//! use lpcli::{bugs, client::LaunchpadClient};
 //!
 //! #[tokio::main]
 //! async fn main() -> lpcli::error::Result<()> {
-//!     let creds = auth::load_credentials()?;
-//!     let lp = LaunchpadClient::new(Some(creds));
+//!     let lp = LaunchpadClient::anonymous();
 //!     let bug = bugs::get_bug(&lp, 1).await?;
 //!     println!("Bug #{}: {}", bug.id, bug.title);
 //!     Ok(())
@@ -33,6 +34,7 @@
 //! ```
 
 pub mod access_tokens;
+#[cfg(feature = "auth")]
 pub mod auth;
 pub mod bugs;
 pub mod client;
@@ -40,7 +42,9 @@ pub mod cves;
 pub mod download;
 pub mod error;
 pub mod git;
+#[cfg(feature = "auth")]
 pub mod hardware_key;
+#[cfg(feature = "auth")]
 pub mod hardware_tokens;
 pub mod packages;
 pub mod people;

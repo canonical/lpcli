@@ -1030,12 +1030,23 @@ tokio = { version = "1", features = ["full"] }
 
 ### Unauthenticated usage
 
+Library users who only read public Launchpad data can opt out of the default
+`auth` feature to omit the OAuth, keyring, and hardware-token dependencies.
+`LaunchpadClient::anonymous()` and `LaunchpadClient::new(None)` work in either
+configuration. The default `auth` feature enables the CLI and the authenticated
+library APIs.
+
+```toml
+[dependencies]
+lpcli = { git = "https://github.com/canonical/lpcli", default-features = false }
+```
+
 ```rust
 use lpcli::{client::LaunchpadClient, bugs};
 
 #[tokio::main]
 async fn main() -> lpcli::error::Result<()> {
-    let lp = LaunchpadClient::new(None);
+    let lp = LaunchpadClient::anonymous();
     let bug = bugs::get_bug(&lp, 123456).await?;
     println!("Bug #{}: {}", bug.id, bug.title);
     Ok(())

@@ -12,10 +12,35 @@ rust-version = "1.97"
 [[bin]]
 name = "lpcli"
 path = "src/bin/lpcli.rs"
+required-features = ["auth"]
 
 [lib]
 name = "lpcli"
 path = "src/lib.rs"
+
+[features]
+default = ["auth"]
+auth = [
+    "dep:aes",
+    "dep:apple-native-keyring-store",
+    "dep:base64",
+    "dep:cbc",
+    "dep:ciborium",
+    "dep:dbus-secret-service-keyring-store",
+    "dep:dirs",
+    "dep:hex",
+    "dep:hkdf",
+    "dep:hmac",
+    "dep:keyring-core",
+    "dep:libc",
+    "dep:nix",
+    "dep:p256",
+    "dep:rand",
+    "dep:rpassword",
+    "dep:sha2",
+    "dep:windows-native-keyring-store",
+    "dep:zeroize",
+]
 
 [dependencies]
 # Async runtime
@@ -36,34 +61,34 @@ thiserror = "2"
 anyhow = "1"
 
 # OAuth nonce generation
-rand = "0.10"
-hex = "0.4"
+rand = { version = "0.10", optional = true }
+hex = { version = "0.4", optional = true }
 
 # OS keyring (Secret Service / Keychain / Credential Manager)
-keyring-core = "1"
+keyring-core = { version = "1", optional = true }
 
 # Hardware-bound API tokens: WebAuthn base64url encoding, CTAP2 CBOR messages,
 # and the CTAP2 PIN/UV auth protocols (ECDH P-256, AES-256-CBC, HMAC/HKDF-SHA-256).
-base64 = "0.23"
-ciborium = "0.2"
+base64 = { version = "0.23", optional = true }
+ciborium = { version = "0.2", optional = true }
 # p256 0.14 (elliptic-curve 0.14) is required for crypto-bigint >= 0.7.6,
 # which fixes RUSTSEC-2026-0387.  Only ECDH is needed, so ECDSA/PEM are off.
-p256 = { version = "0.14", default-features = false, features = ["ecdh"] }
-aes = "0.9"
-cbc = "0.2"
-hmac = "0.13"
-hkdf = "0.13"
-sha2 = "0.11"
-zeroize = "1"
+p256 = { version = "0.14", default-features = false, features = ["ecdh"], optional = true }
+aes = { version = "0.9", optional = true }
+cbc = { version = "0.2", optional = true }
+hmac = { version = "0.13", optional = true }
+hkdf = { version = "0.13", optional = true }
+sha2 = { version = "0.11", optional = true }
+zeroize = { version = "1", optional = true }
 
 # No-echo terminal prompts for security-key PINs and grant secrets
-rpassword = "7"
+rpassword = { version = "7", optional = true }
 
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
 
 # Configuration / credential storage
-dirs = "7"
+dirs = { version = "7", optional = true }
 toml = "1.0"
 
 # URL handling
@@ -92,17 +117,17 @@ unit-prefix = "0.5.2"
 # D-Bus Secret Service backend.  This deliberately avoids the zbus-based
 # backend, whose zbus 5 dependency pulls in the unmaintained `zvariant`,
 # `zbus_names`, and `zvariant_derive` crates (RUSTSEC-2026-0370/0371/0372).
-dbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust", "vendored"] }
+dbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust", "vendored"], optional = true }
 # Non-blocking hidraw access for USB FIDO2 security keys
-libc = "0.2"
+libc = { version = "0.2", optional = true }
 # Safe getpwuid_r wrapper for environment-independent cache coordination paths
-nix = { version = "0.32", default-features = false, features = ["user"] }
+nix = { version = "0.32", default-features = false, features = ["user"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-apple-native-keyring-store = { version = "1", features = ["keychain"] }
+apple-native-keyring-store = { version = "1", features = ["keychain"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-native-keyring-store = "1"
+windows-native-keyring-store = { version = "1", optional = true }
 
 [dev-dependencies]
 # Deterministic timer tests without real retry delays
