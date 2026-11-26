@@ -12,6 +12,8 @@
 //! exit status: partial failures are `LpError::Partial` (exit 7), and a
 //! download where every file failed is a general error (exit 1).
 
+use std::path::Path;
+
 #[allow(unused_imports)]
 use super::*;
 use crate::output::tests::{assert_plain_invariants, assert_tsv_invariants};
@@ -1229,9 +1231,22 @@ impl DownloadFixture {
 
     /// The report JSON with the temporary directory and server redacted.
     fn stable_json(&self, report: &Report) -> Value {
-        let dir = self.dir.path().to_string_lossy().into_owned();
-        let json = stable(&report.json, &self.server.url());
-        serde_json::from_str(&json.to_string().replace(&dir, "[output dir]")).unwrap()
+        let output_dir = self.request().output_dir;
+        let mut json = stable(&report.json, &self.server.url());
+        let fields = &mut json["lpcli"];
+        assert_eq!(
+            fields["output_directory"],
+            json!(output_dir.to_string_lossy())
+        );
+        fields["output_directory"] = json!(SNAPSHOT_DOWNLOAD_DIR);
+        for download in fields["downloads"].as_array_mut().unwrap() {
+            if let Some(path) = download["path"].as_str() {
+                let filename = download["filename"].as_str().unwrap();
+                assert_eq!(Path::new(path), output_dir.join(filename));
+                download["path"] = json!(format!("{SNAPSHOT_DOWNLOAD_DIR}/{filename}"));
+            }
+        }
+        json
     }
 }
 
@@ -1260,8 +1275,10 @@ async fn package_download_reports_every_file_and_succeeds() {
     assert_modes(&report);
     insta::assert_snapshot!(
         "package_download_success_plain",
-        render(&report, OutputMode::Plain)
-            .replace(&*fixture.dir.path().to_string_lossy(), "[output dir]")
+        redact_download_dir(
+            &render(&report, OutputMode::Plain),
+            &fixture.request().output_dir
+        )
     );
     assert_json_report!(
         "package_download_success_json",

@@ -93,10 +93,9 @@ fn snap_tsv(name: &str, report: &Report) {
     insta::assert_snapshot!(name, rendered);
 }
 
-fn redact_text(mut text: String, base: &str, dir: Option<&Path>) -> String {
-    if let Some(dir) = dir {
-        let dir_str = dir.to_string_lossy();
-        text = text.replace(dir_str.as_ref(), "[output dir]");
+fn redact_text(mut text: String, base: &str, output_dir: Option<&Path>) -> String {
+    if let Some(output_dir) = output_dir {
+        text = redact_download_dir(&text, output_dir);
     }
     text.replace(base, "[server]")
 }
@@ -506,14 +505,14 @@ async fn queue_tsv_plain_rich_and_partial_snapshots() {
     let ok_plain = redact_text(
         render(&ok_report, OutputMode::Plain),
         &base,
-        Some(ok_dir.path()),
+        Some(&ok_download.output_dir),
     );
     assert_plain_invariants(&ok_plain);
     insta::assert_snapshot!("queue_download_plain", ok_plain);
     let ok_rich = redact_text(
         render(&ok_report, OutputMode::Rich),
         &base,
-        Some(ok_dir.path()),
+        Some(&ok_download.output_dir),
     );
     insta::assert_snapshot!("queue_download_rich", ok_rich);
 
@@ -538,14 +537,14 @@ async fn queue_tsv_plain_rich_and_partial_snapshots() {
     let partial_plain = redact_text(
         render(&partial_report, OutputMode::Plain),
         &base,
-        Some(partial_dir.path()),
+        Some(&partial_download.output_dir),
     );
     assert_plain_invariants(&partial_plain);
     insta::assert_snapshot!("queue_download_partial_plain", partial_plain);
     let partial_rich = redact_text(
         render(&partial_report, OutputMode::Rich),
         &base,
-        Some(partial_dir.path()),
+        Some(&partial_download.output_dir),
     );
     insta::assert_snapshot!("queue_download_partial_rich", partial_rich);
 
@@ -1257,7 +1256,7 @@ async fn package_download_rich_and_partial_snapshots() {
     let ok_rich = redact_text(
         render(&package_download_report(&ok_dl), OutputMode::Rich),
         &base,
-        Some(ok_dir.path()),
+        Some(&req_ok.output_dir),
     );
     insta::assert_snapshot!("package_download_success_rich", ok_rich);
 
@@ -1283,14 +1282,14 @@ async fn package_download_rich_and_partial_snapshots() {
     let partial_plain = redact_text(
         render(&partial_report, OutputMode::Plain),
         &base,
-        Some(partial_dir.path()),
+        Some(&req_partial.output_dir),
     );
     assert_plain_invariants(&partial_plain);
     insta::assert_snapshot!("package_download_partial_plain", partial_plain);
     let partial_rich = redact_text(
         render(&partial_report, OutputMode::Rich),
         &base,
-        Some(partial_dir.path()),
+        Some(&req_partial.output_dir),
     );
     insta::assert_snapshot!("package_download_partial_rich", partial_rich);
 }
