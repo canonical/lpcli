@@ -9,6 +9,8 @@
 //! screen readers and non-terminal streams ([`ProgressMode::Plain`]), or be
 //! disabled ([`ProgressMode::None`]).
 
+use std::cell::RefCell;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -58,6 +60,86 @@ pub enum ProgressMode {
     Plain,
     /// Do not report progress.
     None,
+}
+
+/// Report one download's progress at fixed byte milestones.
+///
+/// The reporter receives the actual bytes written and the optional total size.
+/// A chunk that crosses several milestones generates a single report. Call
+/// [`Self::finish`] with the returned byte count after a successful download
+/// to report any remaining progress, including for an empty file.
+///
+/// ```no_run
+/// use std::{num::NonZeroU64, path::Path};
+///
+/// use lpcli::{client::LaunchpadClient, download::MilestoneProgress};
+///
+/// async fn download(
+///     client: &LaunchpadClient,
+///     url: &str,
+///     dest: &Path,
+///     interval: NonZeroU64,
+/// ) -> lpcli::error::Result<()> {
+///     let mut progress = MilestoneProgress::new(interval, |downloaded, total| match total {
+///         Some(total) => eprintln!("Downloaded {downloaded} of {total} bytes"),
+///         None => eprintln!("Downloaded {downloaded} bytes"),
+///     });
+///     let bytes = client
+///         .download_public_to_file_with_progress(url, dest, progress.callback())
+///         .await?;
+///     progress.finish(bytes);
+///     Ok(())
+/// }
+/// ```
+#[derive(Debug)]
+pub struct MilestoneProgress<F> {
+    interval: NonZeroU64,
+    report: F,
+    last_reported: Option<u64>,
+    total_size: Option<u64>,
+}
+
+impl<F: FnMut(u64, Option<u64>)> MilestoneProgress<F> {
+    /// Create a reporter for one download with milestones at multiples of `interval` bytes.
+    pub fn new(interval: NonZeroU64, report: F) -> Self {
+        Self {
+            interval,
+            report,
+            last_reported: None,
+            total_size: None,
+        }
+    }
+
+    /// Borrow this reporter as a callback for either client download method.
+    ///
+    /// The callback accepts the cumulative byte count and optional total from
+    /// [`LaunchpadClient::download_to_file_with_progress`] or
+    /// [`LaunchpadClient::download_public_to_file_with_progress`].
+    pub fn callback(&mut self) -> impl Fn(u64, Option<u64>) + '_ {
+        // The authenticated client method accepts `Fn`; this adapter owns the
+        // exclusive borrow of the state and can still call an `FnMut` reporter.
+        let progress = RefCell::new(self);
+        move |downloaded, total_size| {
+            let mut progress = progress.borrow_mut();
+            progress.total_size = total_size;
+            let interval = progress.interval.get();
+            if downloaded / interval > progress.last_reported.unwrap_or(0) / interval {
+                progress.last_reported = Some(downloaded);
+                (progress.report)(downloaded, total_size);
+            }
+        }
+    }
+
+    /// Ensure the final byte count from a successful download has been reported.
+    ///
+    /// This emits a report if the byte count differs from the last report or
+    /// if this is the first report. The total is available if supplied by the
+    /// download callback.
+    pub fn finish(mut self, downloaded: u64) {
+        if self.last_reported != Some(downloaded) {
+            (self.report)(downloaded, self.total_size);
+        }
+    }
 }
 
 /// Format the initial stderr line emitted before downloads begin in
@@ -602,6 +684,47 @@ fn extract_filename(url: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn milestone_progress_reports_once_per_crossing_and_reports_final_bytes() {
+        let mut reports = Vec::new();
+        let mut progress = MilestoneProgress::new(NonZeroU64::new(10).unwrap(), |bytes, total| {
+            reports.push((bytes, total));
+        });
+        {
+            let update = progress.callback();
+            for bytes in [1, 8, 11, 14, 39, 41, 41, 44] {
+                update(bytes, Some(44));
+            }
+        }
+        progress.finish(44);
+
+        assert_eq!(
+            reports,
+            [
+                (11, Some(44)),
+                (39, Some(44)),
+                (41, Some(44)),
+                (44, Some(44))
+            ]
+        );
+    }
+
+    #[test]
+    fn milestone_progress_handles_maximum_count_without_repeating_the_last_report() {
+        let mut reports = Vec::new();
+        let mut progress = MilestoneProgress::new(NonZeroU64::MAX, |bytes, total| {
+            reports.push((bytes, total));
+        });
+        {
+            let update = progress.callback();
+            update(u64::MAX - 1, None);
+            update(u64::MAX, None);
+        }
+        progress.finish(u64::MAX);
+
+        assert_eq!(reports, [(u64::MAX, None)]);
+    }
 
     #[test]
     fn extract_filename_simple() {

@@ -1067,6 +1067,14 @@ async fn main() -> lpcli::error::Result<()> {
 }
 ```
 
+### Download progress
+
+Use `download::MilestoneProgress` to report at fixed byte intervals, such as
+every 4 MiB. Pass `progress.callback()` to `download_to_file_with_progress` or
+`download_public_to_file_with_progress`, then call `progress.finish(bytes)`
+with the returned byte count to report any remaining progress after success.
+The reporter receives the bytes written and the content length when available.
+
 ### Exact Launchpad JSON
 
 The typed structs keep only the fields lpcli models. To get the JSON exactly as
