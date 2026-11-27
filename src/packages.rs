@@ -1152,6 +1152,7 @@ pub async fn get_distro_raw(client: &LaunchpadClient, distro: &str) -> Result<Ra
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::test_client_with_optional_auth;
 
     #[test]
     fn distro_series_deserialise() {
@@ -1451,12 +1452,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = LaunchpadClient::new(Some(crate::auth::Credentials::new(
-            "lpcli",
-            "tok",
-            "topsecret",
-        )))
-        .with_base_url(api.url());
+        let client = test_client_with_optional_auth(api.url(), "tok", "topsecret");
         let foreign_link = format!("{}/ubuntu/+sourcepub/1", foreign.url());
 
         let files_err = get_source_file_urls(&client, &foreign_link)
@@ -1670,12 +1666,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = LaunchpadClient::new(Some(crate::auth::Credentials::new(
-            "lpcli",
-            "tok",
-            "topsecret",
-        )))
-        .with_base_url(api.url());
+        let client = test_client_with_optional_auth(api.url(), "tok", "topsecret");
         let foreign_link = format!("{}/ubuntu/+sourcepub/1?token=leak", foreign.url());
 
         for err in [
@@ -1897,12 +1888,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = LaunchpadClient::new(Some(crate::auth::Credentials::new(
-            "lpcli",
-            "tok",
-            "topsecret",
-        )))
-        .with_base_url(base.clone());
+        let client = test_client_with_optional_auth(base.clone(), "tok", "topsecret");
 
         let page1 = get_ppa_build_records_raw(
             &client,

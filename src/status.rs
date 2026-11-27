@@ -2,7 +2,8 @@
 //!
 //! Provides lightweight checks to verify:
 //!
-//! * Whether the user has stored OAuth credentials or a hardware-bound grant.
+//! * Whether the user has stored OAuth credentials or a hardware-bound grant,
+//!   with the default `auth` feature.
 //! * Whether the Launchpad REST API is reachable and returning valid responses.
 //!
 //! These checks are intentionally separate from the other domain modules so
@@ -17,17 +18,17 @@
 //! #[tokio::main]
 //! async fn main() {
 //!     let server = status::check_server().await;
-//!     let auth = status::check_auth().await;
 //!     println!("Server reachable: {}", server.reachable);
-//!     println!("Logged in: {}", auth.logged_in);
 //! }
 //! ```
 
 use serde::Deserialize;
 
+#[cfg(feature = "auth")]
 use crate::auth;
 use crate::client::LaunchpadClient;
 use crate::error::LpError;
+#[cfg(feature = "auth")]
 use crate::hardware_tokens::GrantStore;
 
 // ---------------------------------------------------------------------------
@@ -49,6 +50,7 @@ pub struct ServerStatus {
 }
 
 /// Outcome of checking the user's local authentication credentials.
+#[cfg(feature = "auth")]
 #[derive(Debug, Clone)]
 pub struct AuthStatus {
     /// `true` when a credential file was found and successfully parsed.
@@ -76,11 +78,13 @@ struct ApiRoot {
     resource_type_link: Option<String>,
     /// Points to the authenticated user's person resource.
     /// Present and non-null only for authenticated requests.
+    #[cfg(feature = "auth")]
     me_link: Option<String>,
 }
 
 /// Minimal deserialisation of a Launchpad person resource used to extract the
 /// authenticated user's Launchpad username.
+#[cfg(feature = "auth")]
 #[derive(Debug, Deserialize)]
 struct MePerson {
     /// Launchpad username (e.g. `"someuser"`), without the leading `~`.
@@ -101,7 +105,7 @@ struct MePerson {
 /// returned [`ServerStatus`] so callers can display them without propagating
 /// errors.
 pub async fn check_server() -> ServerStatus {
-    let client = LaunchpadClient::new(None);
+    let client = LaunchpadClient::anonymous();
     match client.get::<ApiRoot>("").await {
         Ok(root) => ServerStatus {
             reachable: true,
@@ -139,6 +143,7 @@ pub async fn check_server() -> ServerStatus {
 /// * If credentials exist but the server cannot be reached (or the token has
 ///   been revoked), returns `AuthStatus { logged_in: true, username: None }`
 ///   to indicate that local credentials are present but unverified.
+#[cfg(feature = "auth")]
 pub async fn check_auth() -> AuthStatus {
     // 1. A stored hardware-bound grant takes precedence over classic
     //    credentials, matching how lpcli chooses credentials for requests.

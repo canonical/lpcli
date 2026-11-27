@@ -602,6 +602,7 @@ fn extract_filename(url: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::test_client_with_optional_auth;
 
     #[test]
     fn extract_filename_simple() {
@@ -774,12 +775,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let empty_dir = dir.path().join("empty-logs");
-        let client = LaunchpadClient::new(Some(crate::auth::Credentials::new(
-            "lpcli",
-            "tok",
-            "topsecret",
-        )))
-        .with_base_url(base.clone());
+        let client = test_client_with_optional_auth(base.clone(), "tok", "topsecret");
 
         assert!(
             download_named_public_files_with_progress(&client, &[], &empty_dir, ProgressMode::None)

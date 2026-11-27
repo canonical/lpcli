@@ -2,6 +2,8 @@
 //! (`SKILL.md`) embedded in the binary at compile time is printed to stdout
 //! byte for byte, with no credentials, configuration, or network access.
 
+#![cfg(feature = "auth")]
+
 #[test]
 fn skills_and_its_alias_print_the_embedded_skill_md_byte_for_byte() {
     let expected: &[u8] = include_bytes!("../SKILL.md");
