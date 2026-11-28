@@ -179,6 +179,29 @@ fn raw_self_link(entry: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The index of a message in a bug's message collection.
+///
+/// Production Launchpad message entries carry no `index` member, so the
+/// collection position is used: it equals the `/comments/<index>` suffix in
+/// the comment's `self_link` and the rich `#N` label. Deleted comments remain
+/// in the collection, so positions stay stable. An `index` member is preferred
+/// when Launchpad sends one (as the mocked fixtures do).
+fn comment_index(entry: &serde_json::Value, position: usize) -> u64 {
+    entry
+        .get("index")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(position as u64)
+}
+
+/// The index of every message, in collection order, deleted entries included.
+pub(crate) fn comment_indexes(entries: &[serde_json::Value]) -> Vec<u64> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(position, entry)| comment_index(entry, position))
+        .collect()
+}
+
 /// A complete collection of entries lpcli assembled itself.
 fn collection_json(entries: Vec<serde_json::Value>) -> serde_json::Value {
     serde_json::json!({
@@ -902,22 +925,38 @@ impl BugCommentsRead {
             "lpcli": {
                 "attachment_download_urls":
                     attachment_urls_json(&self.attachments, &self.download_urls),
+                "comment_indexes":
+                    comment_indexes(raw_entries(&self.messages_raw)),
             },
         })
     }
 
     fn records(&self) -> Records {
-        raw_records(
-            raw_entries(&self.messages_raw),
-            vec![
-                column("Author", "owner_link"),
-                column("Date", "date_created"),
-                column("Deleted", "date_deleted"),
-                column("Subject", "subject"),
-                column("Content", "content"),
-                column("Comment URL", "self_link"),
-            ],
-        )
+        let entries = raw_entries(&self.messages_raw);
+        let columns = vec![
+            column("Index", "comment_index"),
+            column("Author", "owner_link"),
+            column("Date", "date_created"),
+            column("Deleted", "date_deleted"),
+            column("Subject", "subject"),
+            column("Content", "content"),
+            column("Comment URL", "self_link"),
+        ];
+        let rows = entries
+            .iter()
+            .enumerate()
+            .map(|(position, entry)| {
+                let mut row = vec![Some(comment_index(entry, position).to_string())];
+                row.extend(
+                    columns
+                        .iter()
+                        .skip(1)
+                        .map(|column| raw_text(entry, column.key)),
+                );
+                row
+            })
+            .collect();
+        Records { columns, rows }
     }
 }
 
@@ -1196,14 +1235,16 @@ pub(crate) async fn bug_outcome(
         BugCommand::AddComment {
             bug_id,
             message,
+            message_file,
             attachment_file,
             attachment_url,
             attachment_description,
             attachment_type,
         } => {
+            let text = resolve_new_comment(message, message_file.as_deref())?;
             if attachment_file.is_some() || attachment_url.is_some() {
                 let params = attachment_params(
-                    &message,
+                    &text,
                     attachment_file.as_deref(),
                     attachment_url.as_deref(),
                     attachment_description.as_deref(),
@@ -1213,10 +1254,22 @@ pub(crate) async fn bug_outcome(
                 let msg = format!("Comment with attachment added to bug #{bug_id}.");
                 BugOutcome::entry(&attachment, vec![ok_block(msg)])
             } else {
-                let comment = bugs::add_bug_comment_raw(client, bug_id, &message).await?;
+                let comment = bugs::add_bug_comment_raw(client, bug_id, &text).await?;
                 let msg = format!("Comment added to bug #{bug_id}.");
                 BugOutcome::entry(&comment, vec![ok_block(msg)])
             }
+        }
+
+        BugCommand::EditComment {
+            bug_id,
+            comment_index,
+            message,
+            message_file,
+        } => {
+            let text = resolve_new_comment(message, message_file.as_deref())?;
+            let updated = bugs::edit_bug_comment_raw(client, bug_id, comment_index, &text).await?;
+            let msg = format!("Comment #{comment_index} updated on bug #{bug_id}.");
+            BugOutcome::entry(&updated, vec![ok_block(msg)])
         }
 
         BugCommand::Comments { bug_id } => {
@@ -2593,48 +2646,76 @@ pub(crate) fn resolve_new_description(
     description: Option<String>,
     description_file: Option<&str>,
 ) -> lpcli::error::Result<String> {
-    let text = match (description, description_file) {
+    resolve_new_text(description, description_file, "description")
+}
+
+/// Resolve the new comment text from `--message` or `--message-file`.
+///
+/// As with descriptions, exactly one source is required (enforced by clap) and
+/// empty or whitespace-only text is rejected, so an empty file or pipe cannot
+/// post a blank comment.
+pub(crate) fn resolve_new_comment(
+    message: Option<String>,
+    message_file: Option<&str>,
+) -> lpcli::error::Result<String> {
+    resolve_new_text(message, message_file, "comment")
+}
+
+/// Resolve text supplied inline or from a file, rejecting empty input.
+fn resolve_new_text(
+    text: Option<String>,
+    file: Option<&str>,
+    what: &str,
+) -> lpcli::error::Result<String> {
+    let text = match (text, file) {
         (Some(text), _) => text,
-        (None, Some(path)) => read_description_file(path)?,
-        (None, None) => unreachable!("clap requires --description or --description-file"),
+        (None, Some(path)) => read_text_file(path, what)?,
+        (None, None) => unreachable!("clap requires an inline or file text source"),
     };
     if text.trim().is_empty() {
-        return Err(lpcli::error::LpError::Other(
-            "the new bug description must not be empty".into(),
-        ));
+        return Err(lpcli::error::LpError::Other(format!(
+            "the new {what} must not be empty"
+        )));
     }
     Ok(text)
 }
 
-/// Read the new bug description from the file given by `--description-file`.
+/// Read text from a file, or from standard input when `path` is `-`.
+pub(crate) fn read_text_file(path: &str, what: &str) -> lpcli::error::Result<String> {
+    read_text_source(path, what, std::io::stdin())
+}
+
+/// Read text from `path`, using `stdin` when `path` is `-`.
 ///
-/// A path of `-` reads the description from standard input, mirroring
-/// `gh issue edit --body-file -`.
-pub(crate) fn read_description_file(path: &str) -> lpcli::error::Result<String> {
+/// The reader is a parameter so the stdin branch can be unit tested with a
+/// [`std::io::Cursor`] stand-in.
+pub(crate) fn read_text_source<R: std::io::Read>(
+    path: &str,
+    what: &str,
+    stdin: R,
+) -> lpcli::error::Result<String> {
     if path == "-" {
-        read_description_from_reader(std::io::stdin()).map_err(|e| {
+        read_text_from_reader(stdin).map_err(|e| {
             lpcli::error::LpError::Io(std::io::Error::new(
                 e.kind(),
-                format!("Failed to read description from standard input: {e}"),
+                format!("Failed to read {what} from standard input: {e}"),
             ))
         })
     } else {
         std::fs::read_to_string(path).map_err(|e| {
             lpcli::error::LpError::Io(std::io::Error::new(
                 e.kind(),
-                format!("Failed to read description file '{}': {e}", path),
+                format!("Failed to read {what} file '{}': {e}", path),
             ))
         })
     }
 }
 
-/// Read description text from an arbitrary reader.
+/// Read text from an arbitrary reader.
 ///
-/// Separated from [`read_description_file`] so the stdin path can be unit
-/// tested with a [`std::io::Cursor`] stand-in.
-pub(crate) fn read_description_from_reader<R: std::io::Read>(
-    mut reader: R,
-) -> std::io::Result<String> {
+/// Separated from [`read_text_source`] so the stdin path can be unit tested
+/// with a [`std::io::Cursor`] stand-in.
+pub(crate) fn read_text_from_reader<R: std::io::Read>(mut reader: R) -> std::io::Result<String> {
     let mut buf = String::new();
     reader.read_to_string(&mut buf)?;
     Ok(buf)
@@ -2695,6 +2776,7 @@ pub(crate) fn bug_supports_json(command: &BugCommand) -> bool {
         | BugCommand::Tasks { .. }
         | BugCommand::Search { .. }
         | BugCommand::AddComment { .. }
+        | BugCommand::EditComment { .. }
         | BugCommand::Comments { .. }
         | BugCommand::DeleteComment { .. }
         | BugCommand::Create { .. }

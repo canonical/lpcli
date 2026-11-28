@@ -517,8 +517,20 @@ lpcli bug search --target ubuntu --importance "Critical" --limit 10
 # Add a comment to a bug
 lpcli bug add-comment --bug-id 123456 --message "Reproduced on noble."
 
+# Add a comment from a file, avoiding shell quoting ('-' reads standard input)
+lpcli bug add-comment --bug-id 123456 --message-file ./reply.txt
+cat reply.txt | lpcli bug add-comment --bug-id 123456 --message-file -
+
 # List all comments on a bug
 lpcli bug comments --bug-id 123456
+
+# Get comment indices for scripts: one index per entry, in collection order
+# (the JSON's lpcli.comment_indexes member carries the indices)
+lpcli --format json bug comments --bug-id 123456
+
+# Edit one of your own comments in place; the old text is kept as a revision
+lpcli bug edit-comment --bug-id 123456 --comment-index 3 \
+    --message-file ./reply.txt
 
 # File a new bug
 lpcli bug create --target ubuntu --package curl --title "curl crashes on redirect" \

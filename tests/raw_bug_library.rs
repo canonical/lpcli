@@ -557,6 +557,220 @@ async fn add_bug_comment_raw_without_location_is_partial() {
 }
 
 #[tokio::test]
+async fn edit_bug_comment_raw_resolves_position_and_reads_back() {
+    let mut server = Server::new_async().await;
+    let base = server.url();
+    let comment_url = format!("{base}/bugs/42/comments/2");
+    // No `index` members (production shape), and a deleted comment before the
+    // target: positions stay stable, so #2 is the third entry.
+    let comments = json!({"entries": [
+        {"self_link": format!("{base}/bugs/42/comments/0")},
+        {"self_link": format!("{base}/bugs/42/comments/1"),
+         "date_deleted": "2026-01-04T00:00:00+00:00"},
+        {"self_link": comment_url}
+    ]});
+    let updated = json!({
+        "self_link": comment_url,
+        "content": "It's fixed: cannot reproduce.",
+        "date_created": "2026-01-02T03:04:05.5+00:00",
+        "date_deleted": null,
+        "owner_link": format!("{base}/~me"),
+    });
+    let list = mock_json(&mut server, "GET", "/bugs/42/messages", &comments).await;
+    let edit = server
+        .mock("POST", "/bugs/42/comments/2")
+        .match_body(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("ws.op".into(), "editContent".into()),
+            Matcher::UrlEncoded("new_content".into(), "It's fixed: cannot reproduce.".into()),
+        ]))
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let read_back = mock_json(&mut server, "GET", "/bugs/42/comments/2", &updated).await;
+
+    let raw = bugs::edit_bug_comment_raw(&client(&server), 42, 2, "It's fixed: cannot reproduce.")
+        .await
+        .unwrap();
+
+    assert_eq!(raw.raw, updated);
+    assert_eq!(
+        raw.value.content.as_deref(),
+        Some("It's fixed: cannot reproduce.")
+    );
+    assert_eq!(raw.value.index, None);
+    assert_all(&[list, edit, read_back]).await;
+}
+
+#[tokio::test]
+async fn edit_bug_comment_raw_prefers_launchpad_index() {
+    let mut server = Server::new_async().await;
+    let base = server.url();
+    let comment_url = format!("{base}/bugs/42/comments/7");
+    let comments = json!({"entries": [
+        {"self_link": format!("{base}/bugs/42/comments/0"), "index": 0},
+        {"self_link": comment_url, "index": 7}
+    ]});
+    let updated = json!({"self_link": comment_url, "content": "fixed", "index": 7});
+    let list = mock_json(&mut server, "GET", "/bugs/42/messages", &comments).await;
+    let edit = server
+        .mock("POST", "/bugs/42/comments/7")
+        .match_body(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("ws.op".into(), "editContent".into()),
+            Matcher::UrlEncoded("new_content".into(), "fixed".into()),
+        ]))
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let read_back = mock_json(&mut server, "GET", "/bugs/42/comments/7", &updated).await;
+
+    let raw = bugs::edit_bug_comment_raw(&client(&server), 42, 7, "fixed")
+        .await
+        .unwrap();
+
+    assert_eq!(raw.value.index, Some(7));
+    assert_all(&[list, edit, read_back]).await;
+}
+
+#[tokio::test]
+async fn edit_bug_comment_raw_rejects_cross_origin_self_link() {
+    let mut server = Server::new_async().await;
+    let comments = json!({"entries": [{
+        "self_link": "https://example.invalid/bugs/42/comments/0"
+    }]});
+    let list = mock_json(&mut server, "GET", "/bugs/42/messages", &comments).await;
+    let never = mock_never(&mut server, "POST", "/bugs/42/comments/0").await;
+
+    let result = bugs::edit_bug_comment_raw(&client(&server), 42, 0, "fixed").await;
+
+    match result {
+        Err(LpError::Other(message)) => {
+            assert!(
+                message.contains("not on the configured Launchpad API origin"),
+                "{message}"
+            );
+        }
+        other => panic!("expected LpError::Other, got {other:?}"),
+    }
+    list.assert_async().await;
+    never.assert_async().await;
+}
+
+#[tokio::test]
+async fn edit_bug_comment_raw_maps_403_to_unauthorized() {
+    let mut server = Server::new_async().await;
+    let base = server.url();
+    let comments = json!({"entries": [
+        {"self_link": format!("{base}/bugs/42/comments/0")},
+        {"self_link": format!("{base}/bugs/42/comments/1")}
+    ]});
+    let list = mock_json(&mut server, "GET", "/bugs/42/messages", &comments).await;
+    let edit = server
+        .mock("POST", "/bugs/42/comments/1")
+        .with_status(403)
+        .with_body("Only the author may edit this message.")
+        .expect(1)
+        .create_async()
+        .await;
+
+    let result = bugs::edit_bug_comment_raw(&client(&server), 42, 1, "fixed").await;
+
+    match result {
+        Err(LpError::Unauthorized(message)) => {
+            assert!(
+                message.contains("edited by its original author"),
+                "{message}"
+            );
+            assert!(message.contains("Only the author may edit"), "{message}");
+        }
+        other => panic!("expected LpError::Unauthorized, got {other:?}"),
+    }
+    assert_all(&[list, edit]).await;
+}
+
+#[tokio::test]
+async fn edit_bug_comment_raw_reports_partial_when_read_back_fails() {
+    let mut server = Server::new_async().await;
+    let base = server.url();
+    let comment_url = format!("{base}/bugs/42/comments/1");
+    let comments = json!({"entries": [
+        {"self_link": format!("{base}/bugs/42/comments/0")},
+        {"self_link": comment_url}
+    ]});
+    let list = mock_json(&mut server, "GET", "/bugs/42/messages", &comments).await;
+    let edit = server
+        .mock("POST", "/bugs/42/comments/1")
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let read_back = server
+        .mock("GET", "/bugs/42/comments/1")
+        .with_body("{not json")
+        .expect(1)
+        .create_async()
+        .await;
+
+    let result = bugs::edit_bug_comment_raw(&client(&server), 42, 1, "fixed").await;
+
+    assert_partial(
+        result,
+        &[
+            "Editing comment #1 on bug #42 succeeded",
+            "new text was applied",
+            "lpcli bug comments -b 42",
+        ],
+    );
+    assert_all(&[list, edit, read_back]).await;
+}
+
+#[tokio::test]
+async fn edit_bug_comment_raw_refuses_deleted_or_unknown_comments() {
+    let mut server = Server::new_async().await;
+    let base = server.url();
+    let comments = json!({"entries": [
+        {"self_link": format!("{base}/bugs/42/comments/0")},
+        {"self_link": format!("{base}/bugs/42/comments/1"),
+         "date_deleted": "2026-01-04T00:00:00+00:00"}
+    ]});
+    let list = server
+        .mock("GET", "/bugs/42/messages")
+        .with_header("content-type", "application/json")
+        .with_body(comments.to_string())
+        .expect(2)
+        .create_async()
+        .await;
+    let never_deleted = mock_never(&mut server, "POST", "/bugs/42/comments/1").await;
+    let never_unknown = mock_never(&mut server, "POST", "/bugs/42/comments/9").await;
+
+    let deleted = bugs::edit_bug_comment_raw(&client(&server), 42, 1, "fixed").await;
+    match deleted {
+        Err(LpError::LocalNotFound(message)) => {
+            assert!(
+                message.contains("deleted and cannot be edited"),
+                "{message}"
+            );
+        }
+        other => panic!("expected LpError::LocalNotFound, got {other:?}"),
+    }
+
+    let unknown = bugs::edit_bug_comment_raw(&client(&server), 42, 9, "fixed").await;
+    match unknown {
+        Err(LpError::LocalNotFound(message)) => {
+            assert!(
+                message.contains("Comment #9 does not exist on bug #42"),
+                "{message}"
+            );
+        }
+        other => panic!("expected LpError::LocalNotFound, got {other:?}"),
+    }
+    list.assert_async().await;
+    never_deleted.assert_async().await;
+    never_unknown.assert_async().await;
+}
+
+#[tokio::test]
 async fn add_bug_attachment_raw_reads_back_the_attachment() {
     let mut server = Server::new_async().await;
     let base = server.url();

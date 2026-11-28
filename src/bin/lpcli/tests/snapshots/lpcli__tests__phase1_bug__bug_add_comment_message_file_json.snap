@@ -1,0 +1,18 @@
+---
+source: src/bin/lpcli/tests/phase1_bug.rs
+expression: value
+---
+{
+  "bug_attachments_collection_link": "[server]/bugs/42/comments/3/bug_attachments",
+  "content": "It's fixed: \"quoted\" and multi-line.\n\nSecond paragraph.\n",
+  "date_created": "[timestamp]",
+  "date_deleted": null,
+  "date_last_edited": null,
+  "http_etag": "\"message-etag\"",
+  "owner_link": "[server]/~commenter",
+  "parent_link": null,
+  "resource_type_link": "[server]/#message",
+  "self_link": "[server]/bugs/42/comments/3",
+  "subject": "Re: curl crashes",
+  "web_link": "https://bugs.launchpad.net/bugs/42/comments/3"
+}

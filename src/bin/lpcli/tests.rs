@@ -892,6 +892,16 @@ fn mutations_never_use_anonymous_fallback() {
         vec!["bug", "add-comment", "--bug-id", "59", "--message", "test"],
         vec![
             "bug",
+            "edit-comment",
+            "--bug-id",
+            "59",
+            "--comment-index",
+            "1",
+            "--message",
+            "test",
+        ],
+        vec![
+            "bug",
             "delete-comment",
             "--bug-id",
             "59",
@@ -5417,6 +5427,100 @@ fn cli_bug_set_description_requires_description_or_file() {
     assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
 }
 
+/// `--message-file -` is accepted by `add-comment` and `edit-comment`, and each
+/// command requires exactly one of `--message` and `--message-file`.
+#[test]
+fn cli_bug_comment_text_sources_require_exactly_one() {
+    let add = Cli::try_parse_from([
+        "lpcli",
+        "bug",
+        "add-comment",
+        "-b",
+        "42",
+        "--message-file",
+        "-",
+    ])
+    .unwrap();
+    let Command::Bug(BugCommand::AddComment {
+        message,
+        message_file,
+        ..
+    }) = add.command
+    else {
+        panic!("expected add-comment");
+    };
+    assert!(message.is_none());
+    assert_eq!(message_file.as_deref(), Some("-"));
+
+    let edit = Cli::try_parse_from([
+        "lpcli",
+        "bug",
+        "edit-comment",
+        "-b",
+        "42",
+        "-c",
+        "1",
+        "--message-file",
+        "-",
+    ])
+    .unwrap();
+    let Command::Bug(BugCommand::EditComment {
+        message,
+        message_file,
+        ..
+    }) = edit.command
+    else {
+        panic!("expected edit-comment");
+    };
+    assert!(message.is_none());
+    assert_eq!(message_file.as_deref(), Some("-"));
+
+    for argv in [
+        vec!["lpcli", "bug", "add-comment", "-b", "42"],
+        vec!["lpcli", "bug", "edit-comment", "-b", "42", "-c", "1"],
+    ] {
+        let err = Cli::try_parse_from(&argv).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "{argv:?}"
+        );
+    }
+    for argv in [
+        vec![
+            "lpcli",
+            "bug",
+            "add-comment",
+            "-b",
+            "42",
+            "-m",
+            "text",
+            "--message-file",
+            "comment.txt",
+        ],
+        vec![
+            "lpcli",
+            "bug",
+            "edit-comment",
+            "-b",
+            "42",
+            "-c",
+            "1",
+            "-m",
+            "text",
+            "--message-file",
+            "comment.txt",
+        ],
+    ] {
+        let err = Cli::try_parse_from(&argv).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "{argv:?}"
+        );
+    }
+}
+
 /// Passing both `--description` and `--description-file` is an error.
 #[test]
 fn cli_bug_set_description_rejects_description_and_file_together() {
@@ -5435,24 +5539,24 @@ fn cli_bug_set_description_rejects_description_and_file_together() {
     assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
 }
 
-/// `read_description_file` reads the file contents verbatim, including
-/// newlines and unicode text.
+/// `read_text_file` reads the file contents verbatim, including newlines and
+/// unicode text.
 #[test]
-fn read_description_file_reads_file_contents() {
+fn read_text_file_reads_file_contents() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("description.txt");
     std::fs::write(&path, "line one\nline two ✓\n").unwrap();
 
-    let text =
-        read_description_file(path.to_str().unwrap()).expect("reading the file should succeed");
+    let text = read_text_file(path.to_str().unwrap(), "description")
+        .expect("reading the file should succeed");
     assert_eq!(text, "line one\nline two ✓\n");
 }
 
-/// `read_description_file` reports a helpful error naming the path for a
-/// missing file (mirroring the attachment-reader error pattern).
+/// `read_text_file` reports a helpful error naming the path for a missing file
+/// (mirroring the attachment-reader error pattern).
 #[test]
-fn read_description_file_missing_file_is_an_error() {
-    let err = read_description_file("/nonexistent/description.txt").unwrap_err();
+fn read_text_file_missing_file_is_an_error() {
+    let err = read_text_file("/nonexistent/description.txt", "description").unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("Failed to read description file '/nonexistent/description.txt'"),
@@ -5506,22 +5610,110 @@ fn resolve_new_description_rejects_empty_file() {
     assert!(err.to_string().contains("must not be empty"), "msg: {err}");
 }
 
-/// `read_description_from_reader` reads stdin-style input verbatim.
+/// `resolve_new_comment` accepts inline `--message` text and reads
+/// `--message-file` verbatim, including quotes and newlines.
 #[test]
-fn read_description_from_reader_reads_input() {
+fn resolve_new_comment_accepts_inline_and_file_text() {
+    let inline = resolve_new_comment(Some("It's fixed.".into()), None)
+        .expect("inline text should be accepted");
+    assert_eq!(inline, "It's fixed.");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("comment.txt");
+    std::fs::write(&path, "It's fixed:\n\n  cannot reproduce\n").unwrap();
+    let from_file = resolve_new_comment(None, Some(path.to_str().unwrap()))
+        .expect("file input should be accepted");
+    assert_eq!(from_file, "It's fixed:\n\n  cannot reproduce\n");
+}
+
+/// `resolve_new_comment` rejects empty input, so an empty file or pipe cannot
+/// post or replace a comment with blank text.
+#[test]
+fn resolve_new_comment_rejects_empty_text_and_files() {
+    let err = resolve_new_comment(Some(" \n\t".into()), None).unwrap_err();
+    assert!(err.to_string().contains("must not be empty"), "msg: {err}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty.txt");
+    std::fs::write(&path, "").unwrap();
+    let err = resolve_new_comment(None, Some(path.to_str().unwrap())).unwrap_err();
+    assert!(err.to_string().contains("must not be empty"), "msg: {err}");
+}
+
+/// `resolve_new_comment` reports a missing message file by flag-appropriate
+/// name, not as a description file.
+#[test]
+fn resolve_new_comment_missing_file_names_the_comment() {
+    let err = resolve_new_comment(None, Some("/nonexistent/comment.txt")).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Failed to read comment file '/nonexistent/comment.txt'"),
+        "msg: {err}"
+    );
+}
+
+/// A `--message-file -` source reads standard input verbatim, quotes included.
+#[test]
+fn read_text_source_stdin_dash_reads_comment() {
     use std::io::Cursor;
 
-    let text = read_description_from_reader(Cursor::new(b"piped description\n".to_vec()))
+    let text = read_text_source("-", "comment", Cursor::new(b"It's piped.\n".to_vec()))
+        .expect("stdin should be accepted");
+    assert_eq!(text, "It's piped.\n");
+}
+
+/// `comment_indexes` falls back to each message's collection position when
+/// Launchpad sends no `index`, and includes deleted comments so later
+/// positions do not shift.
+#[test]
+fn comment_indexes_fall_back_to_collection_position() {
+    let base = "https://api.launchpad.net/devel/bugs/42";
+    let entries = vec![
+        serde_json::json!({"self_link": format!("{base}/comments/0")}),
+        serde_json::json!({
+            "self_link": format!("{base}/comments/1"),
+            "date_deleted": "2026-01-04T00:00:00+00:00",
+        }),
+        serde_json::json!({"self_link": format!("{base}/comments/2")}),
+    ];
+
+    assert_eq!(comment_indexes(&entries), vec![0, 1, 2]);
+}
+
+/// `comment_indexes` prefers an explicit Launchpad `index` member when one is
+/// present, including on a deleted comment.
+#[test]
+fn comment_indexes_prefer_launchpad_index() {
+    let base = "https://api.launchpad.net/devel/bugs/42";
+    let entries = vec![
+        serde_json::json!({"self_link": format!("{base}/comments/0"), "index": 0}),
+        serde_json::json!({
+            "self_link": format!("{base}/comments/7"),
+            "index": 7,
+            "date_deleted": "2026-01-04T00:00:00+00:00",
+        }),
+        serde_json::json!({"self_link": format!("{base}/comments/8"), "index": 8}),
+    ];
+
+    assert_eq!(comment_indexes(&entries), vec![0, 7, 8]);
+}
+
+/// `read_text_from_reader` reads stdin-style input verbatim.
+#[test]
+fn read_text_from_reader_reads_input() {
+    use std::io::Cursor;
+
+    let text = read_text_from_reader(Cursor::new(b"piped description\n".to_vec()))
         .expect("reading should succeed");
     assert_eq!(text, "piped description\n");
 }
 
-/// `read_description_from_reader` surfaces non-UTF-8 input as an I/O error.
+/// `read_text_from_reader` surfaces non-UTF-8 input as an I/O error.
 #[test]
-fn read_description_from_reader_rejects_non_utf8() {
+fn read_text_from_reader_rejects_non_utf8() {
     use std::io::Cursor;
 
-    let err = read_description_from_reader(Cursor::new(vec![0xff, 0xfe, 0x41]))
+    let err = read_text_from_reader(Cursor::new(vec![0xff, 0xfe, 0x41]))
         .expect_err("non-UTF-8 input should be an error");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }
