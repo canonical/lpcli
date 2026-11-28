@@ -3,6 +3,12 @@
 
 use super::*;
 
+const SNAPSHOT_DOWNLOAD_DIR: &str = "[output dir]/out";
+
+fn redact_download_dir(text: &str, output_dir: &std::path::Path) -> String {
+    text.replace(output_dir.to_string_lossy().as_ref(), SNAPSHOT_DOWNLOAD_DIR)
+}
+
 mod documentation_examples {
     use super::*;
 
