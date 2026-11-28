@@ -1035,6 +1035,8 @@ impl LaunchpadClient {
     /// The callback `on_progress` is invoked with `(bytes_downloaded_so_far, total_size)`.
     /// `total_size` is `None` if the server did not provide a `Content-Length` header.
     ///
+    /// Use [`crate::download::MilestoneProgress`] to report at fixed byte milestones.
+    ///
     /// Returns the total number of bytes written to `dest`.
     pub async fn download_to_file_with_progress<F>(
         &self,
@@ -1111,6 +1113,8 @@ impl LaunchpadClient {
     /// overwritten or followed, and removes any partial file it created if the
     /// transfer fails. Invokes `on_progress` with
     /// `(bytes_downloaded_so_far, total_size)`.
+    ///
+    /// Use [`crate::download::MilestoneProgress`] to report at fixed byte milestones.
     pub async fn download_public_to_file_with_progress<F>(
         &self,
         url: &str,
